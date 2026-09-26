@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron"
-import type { ElectronAPI, WslServersEvent } from "./types"
+import type { ElectronAPI, OmniaEvent, OmniaFailure, Superskill, WslServersEvent } from "./types"
 import type { UpdaterState } from "@opencode-ai/app/updater"
 
 const updaterCallbacks = new Set<(state: UpdaterState) => void>()
@@ -10,7 +10,83 @@ const updaterHandler = (_: unknown, state: UpdaterState) => {
   updaterCallbacks.forEach((callback) => callback(state))
 }
 
+const omniaIpc = {
+  getCapabilities: "omnia-get-capabilities",
+  observe: "omnia-observe",
+  find: "omnia-find",
+  execute: "omnia-execute",
+  subscribe: "omnia-subscribe",
+  unsubscribe: "omnia-unsubscribe",
+  event: "omnia-event",
+} as const
+
 const api: ElectronAPI = {
+  superskills: {
+    list: () => ipcRenderer.invoke("superskills-list"),
+    get: (id: string) => ipcRenderer.invoke("superskills-get", id),
+    save: (skill: Superskill) => ipcRenderer.invoke("superskills-save", skill),
+    remove: (id: string) => ipcRenderer.invoke("superskills-remove", id),
+    call: (id: string, method: string, params: unknown) => ipcRenderer.invoke("superskills-call", id, method, params),
+  },
+  memory: {
+    list: (input?: { query?: string; scope?: string; application?: string; limit?: number }) =>
+      ipcRenderer.invoke("memories-list", input),
+    remove: (id: string) => ipcRenderer.invoke("memories-remove", id),
+    forget: (input: { query?: string; key?: string; scope?: string; application?: string }) =>
+      ipcRenderer.invoke("memories-forget", input),
+    stats: () => ipcRenderer.invoke("memories-stats"),
+  },
+  omnia: {
+    getCapabilities: () => ipcRenderer.invoke(omniaIpc.getCapabilities),
+    observe: (request) =>
+      request === undefined ? ipcRenderer.invoke(omniaIpc.observe) : ipcRenderer.invoke(omniaIpc.observe, request),
+    find: (request) => ipcRenderer.invoke(omniaIpc.find, request),
+    execute: (request) => ipcRenderer.invoke(omniaIpc.execute, request),
+    subscribe: async (listener) => {
+      if (typeof listener !== "function") return { ok: false, status: "blocked", reason: "invalid_payload" } as const
+      const subscriptionId = createSubscriptionId()
+      const handler = (_: unknown, value: unknown) => {
+        if (!isRecord(value) || !isRecord(value.event)) return
+        listener(value.event as OmniaEvent)
+      }
+      ipcRenderer.on(omniaIpc.event, handler)
+      let result: unknown
+      try {
+        result = await ipcRenderer.invoke(omniaIpc.subscribe, subscriptionId)
+      } catch (error) {
+        ipcRenderer.removeListener(omniaIpc.event, handler)
+        throw error
+      }
+      if (!isRecord(result) || typeof result.status !== "string") {
+        ipcRenderer.removeListener(omniaIpc.event, handler)
+        return { ok: false, status: "blocked", reason: "operation_failed" } as const
+      }
+      if (result.status !== "ok") {
+        ipcRenderer.removeListener(omniaIpc.event, handler)
+        return result as OmniaFailure
+      }
+      if (result.ok !== true || !isRecord(result.value) || result.value.subscriptionId !== subscriptionId) {
+        ipcRenderer.removeListener(omniaIpc.event, handler)
+        return { ok: false, status: "blocked", reason: "operation_failed" } as const
+      }
+      let closed = false
+      return {
+        ok: true,
+        status: "ok",
+        unsubscribe: async () => {
+          if (closed) return
+          closed = true
+          ipcRenderer.removeListener(omniaIpc.event, handler)
+          try {
+            await ipcRenderer.invoke(omniaIpc.unsubscribe, subscriptionId)
+          } catch (error) {
+            closed = false
+            throw error
+          }
+        },
+      }
+    },
+  },
   killSidecar: () => ipcRenderer.invoke("kill-sidecar"),
   installCli: () => ipcRenderer.invoke("install-cli"),
   awaitInitialization: () => ipcRenderer.invoke("await-initialization"),
@@ -133,6 +209,16 @@ const api: ElectronAPI = {
   setForceFocus: (enabled) => ipcRenderer.invoke("set-force-focus", enabled),
   recordFatalRendererError: (error) => ipcRenderer.invoke("record-fatal-renderer-error", error),
   setNativeTranslations: (bundle) => ipcRenderer.invoke("set-native-translations", bundle),
+}
+
+function createSubscriptionId() {
+  const uuid = globalThis.crypto?.randomUUID?.()
+  if (uuid) return uuid
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
 }
 
 contextBridge.exposeInMainWorld("api", api)

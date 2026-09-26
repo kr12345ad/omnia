@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "ធីកអាប់ដេតបានបរាជ័យ",
   "desktop.updater.checkFailed.message": "បានបរាជ័យក្នុងការពិនិត្យរកមើលបច្ចុប្បន្នភាព",
   "desktop.updater.none.title": "មិនមានការអាប់ដេតទេ។",
-  "desktop.updater.none.message": "អ្នកកំពុងប្រើកំណែចុងក្រោយនៃ OpenCode រួចហើយ",
+  "desktop.updater.none.message": "អ្នកកំពុងប្រើកំណែចុងក្រោយនៃ Omnia រួចហើយ",
   "desktop.updater.downloadFailed.title": "បរាជ័យក្នុងការអាប់ដេត",
   "desktop.updater.downloadFailed.message": "បានបរាជ័យក្នុងការទាញយកបច្ចុប្បន្នភាព",
   "desktop.updater.downloaded.title": "បានទាញយកបច្ចុប្បន្នភាព",

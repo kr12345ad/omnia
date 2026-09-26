@@ -21,6 +21,7 @@ export interface SoundSettings {
 
 export interface Settings {
   general: {
+    mode: "work" | "code"
     autoSave: boolean
     releaseNotes: boolean
     followup: "queue" | "steer"
@@ -182,6 +183,7 @@ export function terminalFontFamily(font: string | undefined) {
 
 const defaultSettings: Settings = {
   general: {
+    mode: "work",
     autoSave: true,
     releaseNotes: true,
     followup: "steer",
@@ -361,6 +363,10 @@ export const { use: useSettings, provider: SettingsProvider } = createSimpleCont
         return store
       },
       general: {
+        mode: withFallback(() => store.general?.mode, defaultSettings.general.mode),
+        setMode(value: "work" | "code") {
+          setStore("general", "mode", value)
+        },
         autoSave: withFallback(() => store.general?.autoSave, defaultSettings.general.autoSave),
         setAutoSave(value: boolean) {
           setStore("general", "autoSave", value)

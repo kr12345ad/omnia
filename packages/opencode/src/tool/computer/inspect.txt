@@ -1,0 +1,16 @@
+Full detail for one control, so you never have to guess.
+
+Returns everything the runtime knows about a control: role, name, description,
+text, value, states (enabled, focused, checked, expanded), available actions,
+exact screen bounds and pixel center, the owning application, its ancestor
+chain (which dialog or panel it lives in), and its children.
+
+Use it when:
+
+- a find returns several similar candidates and you need to tell them apart,
+- you are unsure whether a control is enabled, checked, or already focused,
+- you need the exact pixel to click when no semantic action exists,
+- you want to confirm what a dialog contains before typing into it.
+
+If the control is not in the current observation, re-observe first; inspect
+does not act, it only reports.

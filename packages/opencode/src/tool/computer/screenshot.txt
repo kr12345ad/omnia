@@ -1,0 +1,7 @@
+Capture the computer's screen to an image file.
+
+Returns the path of a PNG captured through the best available backend.
+The file can be read with the read tool when visual inspection is needed —
+for example with a canvas application, an image-only control, or a surface
+that exposes no accessibility tree. Prefer semantic observation first; use
+this only when text-first information is not enough.

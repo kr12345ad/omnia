@@ -1,0 +1,14 @@
+Summarize the current computer state with enough detail to act without guessing.
+
+Returns the observation id, the applications and windows present, the element
+that currently holds keyboard focus, and a compact list of controls. Every
+control line includes its role, name, exact screen pixel center, current value
+when it has one, its states (enabled, focused, checked, expanded, and so on),
+and the actions it supports.
+
+Use it to orient yourself at the start of a task and after any change. If a
+control you need is not listed, narrow with computer_find instead of asking for
+a bigger dump, and use computer_inspect for full detail on one control.
+
+Controls are listed with their exact coordinates; prefer semantic actions by
+name or id, and use the coordinates only when a control exposes no action.

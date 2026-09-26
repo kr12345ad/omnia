@@ -11,7 +11,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Provjera ažuriranja nije uspjela",
   "desktop.updater.checkFailed.message": "Nije moguće provjeriti ažuriranja",
   "desktop.updater.none.title": "Nema dostupnog ažuriranja",
-  "desktop.updater.none.message": "Već koristiš najnoviju verziju OpenCode-a",
+  "desktop.updater.none.message": "Već koristiš najnoviju verziju Omnia-a",
   "desktop.updater.downloadFailed.title": "Ažuriranje nije uspjelo",
   "desktop.updater.downloadFailed.message": "Neuspjelo preuzimanje ažuriranja",
   "desktop.updater.downloaded.title": "Ažuriranje preuzeto",

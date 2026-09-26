@@ -10,6 +10,8 @@ import { SettingsKeybinds } from "./settings-keybinds"
 import { SettingsProviders } from "./settings-providers"
 import { SettingsModels } from "./settings-models"
 import { SettingsServers } from "./settings-servers"
+import { SettingsSuperskills } from "./settings-superskills"
+import { SettingsMemory } from "./settings-memory"
 
 export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
   const language = useLanguage()
@@ -53,6 +55,20 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
                 </div>
 
                 <div class="flex flex-col gap-1.5">
+                  <Tabs.SectionTitle>{language.t("settings.section.computer")}</Tabs.SectionTitle>
+                  <div class="flex flex-col gap-1.5 w-full">
+                    <Tabs.Trigger value="superskills">
+                      <Icon name="dot-grid" />
+                      {language.t("settings.superskills.title")}
+                    </Tabs.Trigger>
+                    <Tabs.Trigger value="memory">
+                      <Icon name="dot-grid" />
+                      {language.t("settings.memory.title")}
+                    </Tabs.Trigger>
+                  </div>
+                </div>
+
+                <div class="flex flex-col gap-1.5">
                   <Tabs.SectionTitle>{language.t("settings.section.server")}</Tabs.SectionTitle>
                   <div class="flex flex-col gap-1.5 w-full">
                     <Tabs.Trigger value="providers">
@@ -87,6 +103,12 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
         </Tabs.Content>
         <Tabs.Content value="models" class="no-scrollbar">
           <SettingsModels />
+        </Tabs.Content>
+        <Tabs.Content value="superskills" class="no-scrollbar">
+          <SettingsSuperskills />
+        </Tabs.Content>
+        <Tabs.Content value="memory" class="no-scrollbar">
+          <SettingsMemory />
         </Tabs.Content>
       </Tabs>
     </Dialog>

@@ -13,45 +13,26 @@ export function WordmarkV2(props: Pick<ComponentProps<"svg">, "class">) {
     >
       <g opacity="0.6">
         <g mask={`url(#${mask})`}>
-          <g opacity="0.16">
+          <g opacity="0.16" fill-rule="evenodd">
             <path
               opacity="0.7"
-              d="M55.3846 36.4286H18.4615V91.7143H55.3846V36.4286ZM73.8462 110.143H0V18H73.8462V110.143Z"
+              d="M139 18H213V110H139V18ZM157 36H195V92H157V36Z"
               fill="currentColor"
             />
             <path
               opacity="0.7"
-              d="M110.462 91.7143H147.385V36.4286H110.462V91.7143ZM165.846 110.143H110.462V128.571H92V18H165.846V110.143Z"
+              d="M231 110V18H249L268 55L287 18H305V110H287V54L268 91L249 54V110H231Z"
               fill="currentColor"
             />
             <path
               opacity="0.7"
-              d="M258.846 73.2857H203.462V91.7143H258.846V110.143H185V18H258.846V73.2857ZM203.462 54.8571H240.385V36.4286H203.462V54.8571Z"
+              d="M323 110V18H341L379 74V18H397V110H379L341 54V110H323Z"
               fill="currentColor"
             />
+            <path opacity="0.7" d="M443 18H461V110H443V18Z" fill="currentColor" />
             <path
               opacity="0.7"
-              d="M332.385 36.4286H295.462V110.143H277V18H332.385V36.4286ZM350.846 110.143H332.385V36.4286H350.846V110.143Z"
-              fill="currentColor"
-            />
-            <path
-              opacity="0.7"
-              d="M442.846 36.4286H387.462V91.7143H442.846V110.143H369V18H442.846V36.4286Z"
-              fill="currentColor"
-            />
-            <path
-              opacity="0.7"
-              d="M517.385 36.4286H480.462V91.7143H517.385V36.4286ZM535.846 110.143H462V18H535.846V110.143Z"
-              fill="currentColor"
-            />
-            <path
-              opacity="0.7"
-              d="M609.385 36.8571H572.462V92.1429H609.385V36.8571ZM627.846 110.571H554V18.4286H609.385V0H627.846V110.571Z"
-              fill="currentColor"
-            />
-            <path
-              opacity="0.7"
-              d="M664.462 36.4286V54.8571H701.385V36.4286H664.462ZM719.846 73.2857H664.462V91.7143H719.846V110.143H646V18H719.846V73.2857Z"
+              d="M507 110L535 18H553L581 110H563L557.5 91H530.5L525 110H507ZM536 73H552L544 45L536 73Z"
               fill="currentColor"
             />
           </g>

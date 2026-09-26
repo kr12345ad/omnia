@@ -1,0 +1,31 @@
+Perform one user-interface action on the computer.
+
+Actions:
+
+- click, double_click, right_click, type, focus, move: require a target
+  element ID from the most recent computer_find or computer_observe.
+- type: type text. Optional start and stop markers bound exactly what gets
+  typed: start skips everything before the marker, stop ends immediately
+  after it. If a marker is absent from text, nothing is typed and the
+  action reports marker_not_found, so typing can never run past the text the
+  model asked for. endKey optionally presses a key after typing.
+- key: send one key (a character or Return, Tab, Escape, BackSpace,
+  Delete, arrows, F1-F12).
+- hotkey: send a combination such as ["ctrl", "shift", "t"].
+- scroll: direction up/down/left/right and amount, optionally targeting an
+  element so the pointer moves there first.
+- launch_app: start an application by name or command. Launching enables
+  accessibility for it, so its windows can be observed afterward.
+- activate_app: raise and focus an application that is already open.
+- close_app: ask an open application's window to close.
+- open_file: open a path with the computer's default application.
+- open_url: open a URL in the default browser.
+
+Every action is revalidated against the live interface, executed through the
+best available route (accessibility action, global keyboard, or global
+pointer), and then verified by comparing observations: the result says
+whether the effect was verified, or failed, or needs approval.
+
+State-changing actions ask the user for approval first unless computer
+access was already approved. Never send coordinates yourself; never assume
+an action worked because input was sent.

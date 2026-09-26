@@ -34,7 +34,7 @@ import {
 import { useData } from "../context"
 import { useFileComponent } from "@opencode-ai/ui/context/file"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
-import { type UiI18n, useI18n } from "@opencode-ai/ui/context/i18n"
+import { type UiI18n, type UiI18nKey, useI18n } from "@opencode-ai/ui/context/i18n"
 import { BasicTool, GenericTool } from "./basic-tool"
 import { Accordion } from "@opencode-ai/ui/accordion"
 import { StickyAccordionHeader } from "@opencode-ai/ui/sticky-accordion-header"
@@ -1970,6 +1970,381 @@ ToolRegistry.register({
         }}
       >
         <ExaOutput output={props.output} />
+      </BasicTool>
+    )
+  },
+})
+
+ToolRegistry.register({
+  name: "computer_observe",
+  render(props) {
+    const i18n = useI18n()
+    const application = createMemo(() => {
+      const value = props.metadata.application ?? props.input.applicationId
+      return typeof value === "string" && value ? value : "desktop"
+    })
+    const count = createMemo(() => {
+      const value = props.metadata.elementCount
+      return typeof value === "number" ? value : undefined
+    })
+    return (
+      <BasicTool
+        {...props}
+        icon="eye"
+        trigger={{
+          title: i18n.t("ui.tool.computerObserve"),
+          subtitle: application(),
+          args: count() === undefined ? [] : [i18n.t("ui.tool.computer.elements", { count: count()! })],
+        }}
+      >
+        <Show when={props.output}>
+          <div
+            data-component="tool-output"
+            data-scrollable
+            tabIndex={0}
+            role="region"
+            aria-label={i18n.t("ui.scrollView.ariaLabel")}
+          >
+            <Markdown text={props.output!} />
+          </div>
+        </Show>
+      </BasicTool>
+    )
+  },
+})
+
+ToolRegistry.register({
+  name: "computer_find",
+  render(props) {
+    const i18n = useI18n()
+    const query = createMemo(() => {
+      const value = props.input.query ?? props.metadata.query
+      return typeof value === "string" ? value : ""
+    })
+    const best = createMemo(() => {
+      const value = props.metadata.best as { name?: unknown } | undefined
+      return value && typeof value.name === "string" ? value.name : undefined
+    })
+    return (
+      <BasicTool
+        {...props}
+        icon="magnifying-glass-menu"
+        trigger={{
+          title: i18n.t("ui.tool.computerFind"),
+          subtitle: best() ?? query(),
+          args: query() && best() ? [`query=${query()}`] : [],
+        }}
+      >
+        <Show when={props.output}>
+          <div
+            data-component="tool-output"
+            data-scrollable
+            tabIndex={0}
+            role="region"
+            aria-label={i18n.t("ui.scrollView.ariaLabel")}
+          >
+            <Markdown text={props.output!} />
+          </div>
+        </Show>
+      </BasicTool>
+    )
+  },
+})
+
+const COMPUTER_ACT_TITLES: Record<string, UiI18nKey> = {
+  click: "ui.tool.computerAct.click",
+  double_click: "ui.tool.computerAct.doubleClick",
+  right_click: "ui.tool.computerAct.rightClick",
+  type: "ui.tool.computerAct.type",
+  key: "ui.tool.computerAct.key",
+  hotkey: "ui.tool.computerAct.hotkey",
+  focus: "ui.tool.computerAct.focus",
+  scroll: "ui.tool.computerAct.scroll",
+  move: "ui.tool.computerAct.move",
+  launch_app: "ui.tool.computerAct.launchApp",
+  activate_app: "ui.tool.computerAct.activateApp",
+  close_app: "ui.tool.computerAct.closeApp",
+  open_file: "ui.tool.computerAct.openFile",
+  open_url: "ui.tool.computerAct.openUrl",
+}
+
+ToolRegistry.register({
+  name: "computer_act",
+  render(props) {
+    const i18n = useI18n()
+    const action = createMemo(() => {
+      const value = props.input.action ?? props.metadata.action
+      return typeof value === "string" ? value : ""
+    })
+    const target = createMemo(() => {
+      const value = props.metadata.targetName ?? props.input.target
+      return typeof value === "string" ? value : ""
+    })
+    const failed = createMemo(() => props.metadata.success === false)
+    return (
+      <BasicTool
+        {...props}
+        icon="window-cursor"
+        trigger={{
+          title: `${i18n.t(COMPUTER_ACT_TITLES[action()] ?? "ui.tool.computerAct.click")}${target() ? ` ${target()}` : ""}`,
+          subtitle: failed() ? i18n.t("ui.tool.computer.failed") : undefined,
+        }}
+      >
+        <Show when={props.output}>
+          <div
+            data-component="tool-output"
+            data-scrollable
+            tabIndex={0}
+            role="region"
+            aria-label={i18n.t("ui.scrollView.ariaLabel")}
+          >
+            <Markdown text={props.output!} />
+          </div>
+        </Show>
+      </BasicTool>
+    )
+  },
+})
+
+ToolRegistry.register({
+  name: "computer_apps",
+  render(props) {
+    const i18n = useI18n()
+    const count = createMemo(() => {
+      const value = props.metadata.applications
+      return typeof value === "number" ? value : undefined
+    })
+    return (
+      <BasicTool
+        {...props}
+        icon="status"
+        trigger={{
+          title: i18n.t("ui.tool.computerApps"),
+          subtitle: count() === undefined ? "" : i18n.t("ui.tool.computer.applications", { count: count()! }),
+        }}
+      >
+        <Show when={props.output}>
+          <div
+            data-component="tool-output"
+            data-scrollable
+            tabIndex={0}
+            role="region"
+            aria-label={i18n.t("ui.scrollView.ariaLabel")}
+          >
+            <Markdown text={props.output!} />
+          </div>
+        </Show>
+      </BasicTool>
+    )
+  },
+})
+
+ToolRegistry.register({
+  name: "computer_capabilities",
+  render(props) {
+    const i18n = useI18n()
+    const platform = createMemo(() => {
+      const value = props.metadata.platform
+      return typeof value === "string" ? value : ""
+    })
+    return (
+      <BasicTool
+        {...props}
+        icon="sliders"
+        trigger={{
+          title: i18n.t("ui.tool.computerCapabilities"),
+          subtitle: platform(),
+        }}
+      >
+        <Show when={props.output}>
+          <div
+            data-component="tool-output"
+            data-scrollable
+            tabIndex={0}
+            role="region"
+            aria-label={i18n.t("ui.scrollView.ariaLabel")}
+          >
+            <Markdown text={props.output!} />
+          </div>
+        </Show>
+      </BasicTool>
+    )
+  },
+})
+
+ToolRegistry.register({
+  name: "computer_screenshot",
+  render(props) {
+    const i18n = useI18n()
+    const path = createMemo(() => {
+      const value = props.metadata.path
+      return typeof value === "string" ? value : ""
+    })
+    const failed = createMemo(() => props.metadata.success === false)
+    return (
+      <BasicTool
+        {...props}
+        icon="eye"
+        trigger={{
+          title: i18n.t("ui.tool.computerScreenshot"),
+          subtitle: failed() ? i18n.t("ui.tool.computer.failed") : path(),
+        }}
+      >
+        <Show when={props.output}>
+          <div
+            data-component="tool-output"
+            data-scrollable
+            tabIndex={0}
+            role="region"
+            aria-label={i18n.t("ui.scrollView.ariaLabel")}
+          >
+            <Markdown text={props.output!} />
+          </div>
+        </Show>
+      </BasicTool>
+    )
+  },
+})
+
+ToolRegistry.register({
+  name: "computer_do",
+  render(props) {
+    const i18n = useI18n()
+    const completed = createMemo(() => {
+      const value = props.metadata.completed
+      return typeof value === "number" ? value : undefined
+    })
+    const total = createMemo(() => {
+      const value = props.metadata.total
+      return typeof value === "number" ? value : undefined
+    })
+    const failed = createMemo(() => props.metadata.success === false)
+    return (
+      <BasicTool
+        {...props}
+        icon="window-cursor"
+        trigger={{
+          title: i18n.t("ui.tool.computerDo"),
+          subtitle:
+            failed() && typeof props.metadata.failedAt === "number"
+              ? i18n.t("ui.tool.computer.failed")
+              : completed() !== undefined && total() !== undefined
+                ? i18n.t("ui.tool.computer.steps", { completed: completed()!, count: total()! })
+                : undefined,
+        }}
+      >
+        <Show when={props.output}>
+          <div
+            data-component="tool-output"
+            data-scrollable
+            tabIndex={0}
+            role="region"
+            aria-label={i18n.t("ui.scrollView.ariaLabel")}
+          >
+            <Markdown text={props.output!} />
+          </div>
+        </Show>
+      </BasicTool>
+    )
+  },
+})
+
+ToolRegistry.register({
+  name: "computer_read",
+  render(props) {
+    const i18n = useI18n()
+    const length = createMemo(() => {
+      const value = props.metadata.length
+      return typeof value === "number" ? value : undefined
+    })
+    const failed = createMemo(() => props.metadata.success === false)
+    return (
+      <BasicTool
+        {...props}
+        icon="magnifying-glass-menu"
+        trigger={{
+          title: i18n.t("ui.tool.computerRead"),
+          subtitle: failed() ? i18n.t("ui.tool.computer.failed") : length() === undefined ? undefined : `${length()} chars`,
+        }}
+      >
+        <Show when={props.output}>
+          <div
+            data-component="tool-output"
+            data-scrollable
+            tabIndex={0}
+            role="region"
+            aria-label={i18n.t("ui.scrollView.ariaLabel")}
+          >
+            <Markdown text={props.output!} />
+          </div>
+        </Show>
+      </BasicTool>
+    )
+  },
+})
+
+ToolRegistry.register({
+  name: "computer_browser",
+  render(props) {
+    const i18n = useI18n()
+    const action = createMemo(() => {
+      const value = props.input.action
+      return typeof value === "string" ? value : ""
+    })
+    const failed = createMemo(() => props.metadata.success === false)
+    return (
+      <BasicTool
+        {...props}
+        icon="magnifying-glass-menu"
+        trigger={{
+          title: i18n.t("ui.tool.computerBrowser"),
+          subtitle: failed() ? i18n.t("ui.tool.computer.failed") : action(),
+        }}
+      >
+        <Show when={props.output}>
+          <div
+            data-component="tool-output"
+            data-scrollable
+            tabIndex={0}
+            role="region"
+            aria-label={i18n.t("ui.scrollView.ariaLabel")}
+          >
+            <Markdown text={props.output!} />
+          </div>
+        </Show>
+      </BasicTool>
+    )
+  },
+})
+
+ToolRegistry.register({
+  name: "computer_context",
+  render(props) {
+    const i18n = useI18n()
+    const window = createMemo(() => {
+      const value = props.metadata.activeWindow as { name?: unknown } | undefined
+      return value && typeof value.name === "string" ? value.name : ""
+    })
+    return (
+      <BasicTool
+        {...props}
+        icon="window-cursor"
+        trigger={{
+          title: i18n.t("ui.tool.computerContext"),
+          subtitle: window(),
+        }}
+      >
+        <Show when={props.output}>
+          <div
+            data-component="tool-output"
+            data-scrollable
+            tabIndex={0}
+            role="region"
+            aria-label={i18n.t("ui.scrollView.ariaLabel")}
+          >
+            <Markdown text={props.output!} />
+          </div>
+        </Show>
       </BasicTool>
     )
   },

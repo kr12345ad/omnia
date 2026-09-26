@@ -11,7 +11,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Pemeriksaan pembaruan gagal",
   "desktop.updater.checkFailed.message": "Gagal memeriksa pembaruan",
   "desktop.updater.none.title": "Tidak ada pembaruan",
-  "desktop.updater.none.message": "Anda sudah menggunakan versi terbaru OpenCode",
+  "desktop.updater.none.message": "Anda sudah menggunakan versi terbaru Omnia",
   "desktop.updater.downloadFailed.title": "Pembaruan gagal",
   "desktop.updater.downloadFailed.message": "Gagal mengunduh pembaruan",
   "desktop.updater.downloaded.title": "Pembaruan diunduh",

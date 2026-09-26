@@ -2,6 +2,90 @@ import type { DesktopMenuAction } from "@opencode-ai/app/desktop-menu"
 import type { WslServersPlatform } from "@opencode-ai/app/wsl/types"
 import type { UpdaterState } from "@opencode-ai/app/updater"
 import type { DesktopNativeBundle } from "@opencode-ai/app/i18n/desktop-native"
+import type { OmniaAPI } from "../main/omnia/types"
+
+export type SuperskillSummary = {
+  id: string
+  name: string
+  description: string
+  enabled: boolean
+  version?: string
+  author?: string
+  bridgeType: "stdio" | "http"
+  methods: string[]
+}
+
+export type SuperskillMethod = {
+  name: string
+  description: string
+  parameters?: Record<string, unknown>
+  scopes?: string[]
+}
+
+export type Superskill = {
+  id: string
+  name: string
+  description: string
+  instructions: string
+  enabled: boolean
+  version?: string
+  author?: string
+  scopes?: string[]
+  bridge: { type: "stdio" | "http"; command?: string; url?: string; env?: Record<string, string>; timeoutMs?: number }
+  methods: SuperskillMethod[]
+}
+
+export type SuperskillPlatform = {
+  list(): Promise<SuperskillSummary[]>
+  get(id: string): Promise<Superskill>
+  save(skill: Superskill): Promise<Superskill>
+  remove(id: string): Promise<boolean>
+  call(id: string, method: string, params: unknown): Promise<unknown>
+}
+
+export type MemoryScope = "session" | "task" | "workspace" | "user" | "skill" | "application"
+
+export type MemoryRecord = {
+  id: string
+  scope: MemoryScope
+  text: string
+  key?: string
+  tags?: string[]
+  application?: string
+  sessionId?: string
+  workspace?: string
+  source: "agent" | "system" | "user"
+  confidence: number
+  sensitivity: "public" | "internal" | "private"
+  createdAt: number
+  updatedAt: number
+  expiresAt?: number
+}
+
+export type MemoryPlatform = {
+  list(input?: { query?: string; scope?: string; application?: string; limit?: number }): Promise<MemoryRecord[]>
+  remove(id: string): Promise<boolean>
+  forget(input: { query?: string; key?: string; scope?: string; application?: string }): Promise<number>
+  stats(): Promise<Record<string, number>>
+}
+
+export type {
+  OmniaAction,
+  OmniaAPI,
+  OmniaBlockedReason,
+  OmniaCapabilities,
+  OmniaEvent,
+  OmniaExecuteRequest,
+  OmniaFailure,
+  OmniaExecution,
+  OmniaFindRequest,
+  OmniaFindResult,
+  OmniaObservation,
+  OmniaResult,
+  OmniaSubscribeResult,
+  OmniaTargetReference,
+  OmniaUnavailableReason,
+} from "../main/omnia/types"
 export type {
   WslDistroProbe,
   WslInstalledDistro,
@@ -43,6 +127,9 @@ export type FatalRendererError = {
 }
 
 export type ElectronAPI = {
+  omnia: OmniaAPI
+  superskills: SuperskillPlatform
+  memory: MemoryPlatform
   killSidecar: () => Promise<void>
   installCli: () => Promise<string>
   awaitInitialization: () => Promise<ServerReadyData>

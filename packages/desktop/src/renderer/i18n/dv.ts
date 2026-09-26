@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "އަޕްޑޭޓް ޗެކް ފެއިލްވެއްޖެ",
   "desktop.updater.checkFailed.message": "އަޕްޑޭޓްތައް ޗެކް ނުކުރެވުނެވެ",
   "desktop.updater.none.title": "އެއްވެސް އަޕްޑޭޓެއް ނުލިބެއެވެ",
-  "desktop.updater.none.message": "މިހާރުވެސް ބޭނުން ކުރަމުންދަނީ OpenCode ގެ އެންމެ ފަހުގެ ވަރޝަން އެވެ",
+  "desktop.updater.none.message": "މިހާރުވެސް ބޭނުން ކުރަމުންދަނީ Omnia ގެ އެންމެ ފަހުގެ ވަރޝަން އެވެ",
   "desktop.updater.downloadFailed.title": "އަޕްޑޭޓް ފެއިލްވެއްޖެ",
   "desktop.updater.downloadFailed.message": "އަޕްޑޭޓް ޑައުންލޯޑް ނުކުރެވުނެވެ",
   "desktop.updater.downloaded.title": "އަޕްޑޭޓް ޑައުންލޯޑް ކުރެވިއްޖެއެވެ",

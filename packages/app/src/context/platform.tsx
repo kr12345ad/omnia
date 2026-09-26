@@ -6,6 +6,8 @@ import { ServerConnection } from "./server"
 import type { WslServersPlatform } from "../wsl/types"
 import type { UpdaterPlatform } from "../updater"
 import type { DraftStore } from "@/utils/draft-store"
+import type { SuperskillPlatform } from "@/superskills"
+import type { MemoryPlatform } from "@/memory"
 
 type PickerPaths = string | string[] | null
 type OpenDirectoryPickerOptions = { title?: string; multiple?: boolean }
@@ -49,6 +51,12 @@ type PlatformBase = {
 
   /** Send a system notification */
   notify(title: string, description?: string, onClick?: () => void): Promise<void>
+
+  /** User-defined superskills: modular UI knowledge plus JSON-RPC bridges (desktop only) */
+  superskills?: SuperskillPlatform
+
+  /** Long-term memory: knowledge the agent keeps across sessions (desktop only) */
+  memory?: MemoryPlatform
 
   /** Open a native attachment picker and read selected files sequentially (desktop only) */
   openAttachmentPickerDialog?(

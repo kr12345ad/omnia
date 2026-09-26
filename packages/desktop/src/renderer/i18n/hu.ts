@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Frissítés ellenőrzése sikertelen",
   "desktop.updater.checkFailed.message": "Nem sikerült ellenőrizni a frissítéseket",
   "desktop.updater.none.title": "Nem érhető el frissítés",
-  "desktop.updater.none.message": "Már az OpenCode legújabb verzióját használja",
+  "desktop.updater.none.message": "Már az Omnia legújabb verzióját használja",
   "desktop.updater.downloadFailed.title": "Frissítés sikertelen",
   "desktop.updater.downloadFailed.message": "Nem sikerült letölteni a frissítést",
   "desktop.updater.downloaded.title": "Frissítés letöltve",

@@ -10,6 +10,8 @@ import { SettingsProvidersV2 } from "./providers"
 import { SettingsModelsV2 } from "./models"
 import "./settings-v2.css"
 import { SettingsServersV2 } from "./servers"
+import { SettingsSuperskills } from "../settings-superskills"
+import { SettingsMemory } from "../settings-memory"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { useLayout } from "@/context/layout"
 import { useTabs } from "@/context/tabs"
@@ -69,6 +71,20 @@ export const DialogSettings: Component<{
                 </div>
 
                 <div class="flex flex-col gap-1.5">
+                  <TabsV2.SectionTitle>{language.t("settings.section.computer")}</TabsV2.SectionTitle>
+                  <div class="flex flex-col gap-1.5 w-full">
+                    <TabsV2.Trigger value="superskills">
+                      <Icon name="dot-grid" />
+                      {language.t("settings.superskills.title")}
+                    </TabsV2.Trigger>
+                    <TabsV2.Trigger value="memory">
+                      <Icon name="dot-grid" />
+                      {language.t("settings.memory.title")}
+                    </TabsV2.Trigger>
+                  </div>
+                </div>
+
+                <div class="flex flex-col gap-1.5">
                   <TabsV2.SectionTitle>{language.t("settings.section.server")}</TabsV2.SectionTitle>
                   <div class="flex flex-col gap-1.5 w-full">
                     <TabsV2.Trigger value="servers">
@@ -107,6 +123,12 @@ export const DialogSettings: Component<{
         </TabsV2.Content>
         <TabsV2.Content value="models" class="settings-v2-panel">
           <SettingsModelsV2 />
+        </TabsV2.Content>
+        <TabsV2.Content value="superskills" class="settings-v2-panel">
+          <SettingsSuperskills />
+        </TabsV2.Content>
+        <TabsV2.Content value="memory" class="settings-v2-panel">
+          <SettingsMemory />
         </TabsV2.Content>
       </TabsV2>
     </Dialog>

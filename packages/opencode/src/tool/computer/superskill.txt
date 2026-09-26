@@ -1,0 +1,28 @@
+Call a user-defined superskill: a modular bridge that combines UI knowledge
+with deterministic JSON-RPC methods.
+
+Superskills are created by the user in Settings > Superskills. Each one
+provides:
+
+- instructions: how to use a specific application or service through its UI,
+- methods: JSON-RPC calls for the parts that benefit from a direct bridge,
+  such as reading or writing structured data.
+
+Workflow:
+
+1. action=list to see the available superskills and their method names.
+2. action=describe with a skill id to read its instructions and the full
+   method list with parameter descriptions.
+3. Follow the instructions for UI work, and use action=call when a bridge
+   method is the right tool. Pass method and a params object.
+4. action=save creates or updates a superskill from a definition. Use it when
+   the user asks for a new superskill, for example "make one for LibreOffice".
+   Ground the instructions in the real interface first: launch the app,
+   observe it, and describe menus, dialogs, and verification steps precisely.
+   Bridge methods are optional; a superskill with UI instructions alone is
+   useful.
+5. action=delete removes one by id.
+
+Bridge calls are permission-checked by the Omnia Server using the scopes the
+superskill declares; the user approves them through the normal permission
+flow. A superskill never grants more access than it declares.

@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Atjauninājumu pārbaude neizdevās",
   "desktop.updater.checkFailed.message": "Neizdevās pārbaudīt atjauninājumus",
   "desktop.updater.none.title": "Atjauninājumu nav",
-  "desktop.updater.none.message": "Jūs jau izmantojat jaunāko OpenCode versiju",
+  "desktop.updater.none.message": "Jūs jau izmantojat jaunāko Omnia versiju",
   "desktop.updater.downloadFailed.title": "Atjaunināšana neizdevās",
   "desktop.updater.downloadFailed.message": "Neizdevās lejupielādēt atjauninājumu",
   "desktop.updater.downloaded.title": "Atjauninājums lejupielādēts",

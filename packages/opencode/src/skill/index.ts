@@ -17,6 +17,7 @@ import { Glob } from "@opencode-ai/core/util/glob"
 import { Discovery } from "./discovery"
 import { isRecord } from "@/util/record"
 import { escapeHtml } from "@/util/html"
+import { COMPUTER_USE_SKILL_BODY, COMPUTER_USE_SKILL_DESCRIPTION, COMPUTER_USE_SKILL_NAME } from "./computer-use"
 
 const CLAUDE_EXTERNAL_DIR = ".claude"
 const AGENTS_EXTERNAL_DIR = ".agents"
@@ -280,6 +281,12 @@ const layer = Layer.effect(
           description: CUSTOMIZE_OPENCODE_SKILL_DESCRIPTION,
           location: "<built-in>",
           content: CUSTOMIZE_OPENCODE_SKILL_BODY,
+        }
+        s.skills[COMPUTER_USE_SKILL_NAME] = {
+          name: COMPUTER_USE_SKILL_NAME,
+          description: COMPUTER_USE_SKILL_DESCRIPTION,
+          location: "<built-in>",
+          content: COMPUTER_USE_SKILL_BODY,
         }
         yield* loadSkills(s, yield* InstanceState.get(discovered), events)
         return s

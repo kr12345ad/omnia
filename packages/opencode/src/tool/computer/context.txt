@@ -1,0 +1,9 @@
+Report exactly where the agent is right now.
+
+Returns the active window and application, the element that currently holds
+keyboard focus, the real pointer position, the open windows, and the browser
+status including which tab is current.
+
+Call this first when a task starts, after switching applications, or whenever
+an action lands somewhere unexpected. It answers "where am I" without
+guessing from stale observations.

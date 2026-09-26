@@ -1,0 +1,51 @@
+Execute a short plan of computer actions in one call.
+
+Use this as the normal way to operate the computer. Write the whole task as
+one plan of high-level intents; the runtime resolves each target, executes
+it, observes the result, and verifies the effect before moving on. On the
+first failure it stops and tells you exactly which step failed and what the
+interface looked like, so you can recover with a new plan.
+
+Send complete plans, not fragments. A plan of 10 to 60 steps is normal: for
+example open an app, type a document, save it, open the browser, look
+something up, copy a fact, switch back, and paste it. Do not send two or
+three steps and wait for another turn; put every step you already know into
+one call. Only split a plan when you genuinely need to inspect something
+first, or when the previous plan failed and you are correcting course.
+
+Desktop steps and browser steps can be mixed in the same plan. Browser steps
+use the controlled browser: browser_open, browser_navigate, browser_read,
+browser_find, browser_click, browser_type, browser_key, browser_tabs,
+browser_activate_tab, browser_close_tab, browser_back, browser_forward,
+browser_reload. Page element ids come from browser_find and must be used in
+the same page; re-find after any navigation.
+
+Each step supports:
+
+- action: click, double_click, right_click, type, key, hotkey, focus,
+  scroll, move, launch_app, activate_app, close_app, open_file, open_url,
+  observe, wait.
+- query + optional role: the control to act on by meaning, for example
+  "Export button". The runtime resolves it and rejects ambiguous matches
+  instead of guessing.
+- target + optional observationId: an exact element ID from computer_find
+  or computer_observe when you already know it.
+- text, key, keys, app, url, path, direction, amount: action arguments.
+- For type steps, start and stop markers bound the typed text (typing refuses
+  to run if a marker is absent), and endKey presses a key afterwards.
+- expect: text, window, or file. After the step, the runtime verifies the
+  expectation and fails the step if it is not met.
+
+Example plan:
+
+  steps:
+    - action: launch_app, app: dolphin, expect: { window: dolphin }
+    - action: activate_app, app: dolphin
+    - action: click, query: "Home"
+    - action: type, text: "report.pdf"
+    - action: key, key: Return
+    - action: close_app, app: dolphin
+
+Do not include low-level recovery inside the plan. If a step fails, read the
+failure, call computer_observe or computer_find if you need more detail, then
+send a corrected plan. Prefer this tool over many separate computer_act calls.

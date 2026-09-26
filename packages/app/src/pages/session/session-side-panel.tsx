@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, onCleanup, type JSX } from "solid-js"
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js"
 import { createStore } from "solid-js/store"
 import { createMediaQuery } from "@solid-primitives/media"
 import { DragDropProvider as DndKitProvider, PointerSensor } from "@dnd-kit/solid"
@@ -34,8 +34,12 @@ import { SessionContextUsage } from "@/components/session-context-usage"
 
 const reviewTabID = "session-side-panel-review-tab"
 const reviewTabPanelID = "session-side-panel-review-tabpanel"
+const subagentsTabID = "session-side-panel-subagents-tab"
+const subagentsTabPanelID = "session-side-panel-subagents-tabpanel"
 const fileBrowserTabPanelID = "session-side-panel-file-browser-tabpanel"
 import { SessionContextTab, SortableTab, SortableTabV2, FileVisual } from "@/components/session"
+import { SubagentsPanel, useSubagentSessions } from "@/components/session/subagents-panel"
+import { useData } from "@opencode-ai/session-ui/context/data"
 import { OpenInAppV2 } from "@/components/session/open-in-app-v2"
 import { useCommand } from "@/context/command"
 import { useFile, type SelectedLineRange } from "@/context/file"
@@ -90,6 +94,9 @@ export function SessionSidePanel(props: {
   const dialog = useDialog()
   const sdk = useSDK()
   const { sessionKey, tabs, view, params } = useSessionLayout()
+  const data = useData()
+  const subagents = useSubagentSessions()
+  const [subagentsOpen, setSubagentsOpen] = createSignal(false)
   const projectDirectory = createMemo(() => sdk().directory)
 
   const isDesktop = createMediaQuery("(min-width: 768px)")
@@ -237,6 +244,7 @@ export function SessionSidePanel(props: {
     return openedTabs().length > 0 || openFileOpen() || !!browserTab()
   })
   const fileBrowserVisible = createMemo(() => {
+    if (subagentsOpen()) return false
     const active = activeTab()
     return active !== "review" && active !== "context" && active !== "empty"
   })
@@ -341,7 +349,17 @@ export function SessionSidePanel(props: {
                       >
                         <DragDropSensors />
                         <ConstrainDragYAxis />
-                        <Tabs value={activeTab()} onChange={activateTab}>
+                        <Tabs
+                          value={subagentsOpen() ? "subagents" : activeTab()}
+                          onChange={(value) => {
+                            if (value === "subagents") {
+                              setSubagentsOpen(true)
+                              return
+                            }
+                            setSubagentsOpen(false)
+                            activateTab(value)
+                          }}
+                        >
                           <div class="sticky top-0 shrink-0 flex">
                             <Tabs.List
                               ref={(el: HTMLDivElement) => {
@@ -359,6 +377,20 @@ export function SessionSidePanel(props: {
                                     <div>{language.t("session.tab.review")}</div>
                                     <Show when={props.hasReview()}>
                                       <div>{props.reviewCount()}</div>
+                                    </Show>
+                                  </div>
+                                </Tabs.Trigger>
+                              </Show>
+                              <Show when={reviewTab()}>
+                                <Tabs.Trigger
+                                  value="subagents"
+                                  id={subagentsTabID}
+                                  aria-controls={subagentsOpen() ? subagentsTabPanelID : undefined}
+                                >
+                                  <div class="flex items-center gap-1.5">
+                                    <Icon name="subagent" size="small" />
+                                    <Show when={subagents.running() > 0}>
+                                      <div>{subagents.running()}</div>
                                     </Show>
                                   </div>
                                 </Tabs.Trigger>
@@ -464,7 +496,24 @@ export function SessionSidePanel(props: {
                             </Tabs.List>
                           </div>
 
-                          <Show when={reviewTab() && props.canReview() && activeTab() === "review"}>
+                          <Show when={subagentsOpen()}>
+                            <div
+                              id={subagentsTabPanelID}
+                              role="tabpanel"
+                              aria-labelledby={subagentsTabID}
+                              data-slot="tabs-content"
+                              class="flex flex-col h-full overflow-hidden contain-strict"
+                            >
+                              <SubagentsPanel
+                                onSelect={(id) => {
+                                  setSubagentsOpen(false)
+                                  data.navigateToSession?.(id)
+                                }}
+                              />
+                            </div>
+                          </Show>
+
+                          <Show when={!subagentsOpen() && reviewTab() && props.canReview() && activeTab() === "review"}>
                             <div
                               id={reviewTabPanelID}
                               role="tabpanel"
@@ -477,7 +526,7 @@ export function SessionSidePanel(props: {
                             </div>
                           </Show>
 
-                          <Show when={activeTab() === "empty"}>
+                          <Show when={!subagentsOpen() && activeTab() === "empty"}>
                             <Tabs.Content value="empty" class="flex flex-col h-full overflow-hidden contain-strict">
                               <div class="relative pt-2 flex-1 min-h-0 overflow-hidden">
                                 <div class="h-full px-6 pb-42 -mt-4 flex flex-col items-center justify-center text-center gap-6">
@@ -490,7 +539,7 @@ export function SessionSidePanel(props: {
                             </Tabs.Content>
                           </Show>
 
-                          <Show when={activeTab() === "context"}>
+                          <Show when={!subagentsOpen() && activeTab() === "context"}>
                             <Tabs.Content value="context" class="flex flex-col h-full overflow-hidden contain-strict">
                               <div class="relative pt-2 flex-1 min-h-0 overflow-hidden">
                                 <SessionContextTab />
@@ -544,7 +593,17 @@ export function SessionSidePanel(props: {
                         tabs().move(source.id.toString(), source.index)
                       }}
                     >
-                      <Tabs value={activeTab()} onChange={activateTab}>
+                      <Tabs
+                        value={subagentsOpen() ? "subagents" : activeTab()}
+                        onChange={(value) => {
+                          if (value === "subagents") {
+                            setSubagentsOpen(true)
+                            return
+                          }
+                          setSubagentsOpen(false)
+                          activateTab(value)
+                        }}
+                      >
                         <div class="session-review-v2-tabs-bar sticky top-0 shrink-0 flex items-center">
                           <Tabs.List
                             ref={(el: HTMLDivElement) => {
@@ -569,6 +628,20 @@ export function SessionSidePanel(props: {
                                 {props.hasReview()
                                   ? language.t("session.review.filesChanged", { count: props.reviewCount() })
                                   : language.t("session.tab.review")}
+                              </Tabs.Trigger>
+                            </Show>
+                            <Show when={reviewTab()}>
+                              <Tabs.Trigger
+                                value="subagents"
+                                id={subagentsTabID}
+                                aria-controls={subagentsOpen() ? subagentsTabPanelID : undefined}
+                              >
+                                <div class="flex items-center gap-1.5">
+                                  <Icon name="subagent" size="small" />
+                                  <Show when={subagents.running() > 0}>
+                                    <div>{subagents.running()}</div>
+                                  </Show>
+                                </div>
                               </Tabs.Trigger>
                             </Show>
                             <Show when={contextOpen()}>
@@ -692,7 +765,24 @@ export function SessionSidePanel(props: {
                           </div>
                         </div>
 
-                        <Show when={reviewTab() && props.canReview() && activeTab() === "review"}>
+                        <Show when={subagentsOpen()}>
+                          <div
+                            id={subagentsTabPanelID}
+                            role="tabpanel"
+                            aria-labelledby={subagentsTabID}
+                            data-slot="tabs-content"
+                            class="flex flex-col h-full overflow-hidden contain-strict"
+                          >
+                            <SubagentsPanel
+                              onSelect={(id) => {
+                                setSubagentsOpen(false)
+                                data.navigateToSession?.(id)
+                              }}
+                            />
+                          </div>
+                        </Show>
+
+                        <Show when={!subagentsOpen() && reviewTab() && props.canReview() && activeTab() === "review"}>
                           <div
                             id={reviewTabPanelID}
                             role="tabpanel"
@@ -705,7 +795,7 @@ export function SessionSidePanel(props: {
                           </div>
                         </Show>
 
-                        <Show when={activeTab() === "empty"}>
+                        <Show when={!subagentsOpen() && activeTab() === "empty"}>
                           <Tabs.Content value="empty" class="flex flex-col h-full overflow-hidden contain-strict">
                             <div class="relative pt-2 flex-1 min-h-0 overflow-hidden">
                               <div class="h-full px-6 pb-42 -mt-4 flex flex-col items-center justify-center text-center gap-6">
@@ -718,7 +808,7 @@ export function SessionSidePanel(props: {
                           </Tabs.Content>
                         </Show>
 
-                        <Show when={activeTab() === "context"}>
+                        <Show when={!subagentsOpen() && activeTab() === "context"}>
                           <Tabs.Content value="context" class="flex flex-col h-full overflow-hidden contain-strict">
                             <div class="relative pt-2 flex-1 min-h-0 overflow-hidden">
                               <SessionContextTab />

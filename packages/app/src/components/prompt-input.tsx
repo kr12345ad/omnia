@@ -78,6 +78,7 @@ import { PromptContextItems } from "./prompt-input/context-items"
 import { PromptImageAttachments } from "./prompt-input/image-attachments"
 import { PromptDragOverlay } from "./prompt-input/drag-overlay"
 import { promptPlaceholder } from "./prompt-input/placeholder"
+import { useSettings } from "@/context/settings"
 import { createPromptInputTransientState } from "./prompt-input/transient-state"
 import { showToast } from "@/utils/toast"
 import { ImagePreview } from "@opencode-ai/ui/image-preview"
@@ -316,6 +317,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     return messages.some((m) => m.role === "user")
   })
 
+  const settings = useSettings()
   const history = props.history ?? createPersistedPromptInputHistory()
 
   const suggest = createMemo(() => !hasUserPrompt())
@@ -323,6 +325,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
   const placeholder = createMemo(() =>
     promptPlaceholder({
       mode: store.mode,
+      appMode: settings.general.mode(),
       commentCount: commentCount(),
       example: suggest() ? (store.mode === "shell" ? "git status" : language.t(EXAMPLES[store.placeholder])) : "",
       suggest: suggest(),

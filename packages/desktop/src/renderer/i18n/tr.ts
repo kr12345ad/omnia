@@ -11,7 +11,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Güncelleme kontrolü başarısız oldu",
   "desktop.updater.checkFailed.message": "Güncellemeler kontrol edilemedi",
   "desktop.updater.none.title": "Güncelleme yok",
-  "desktop.updater.none.message": "OpenCode'un en son sürümünü zaten kullanıyorsunuz",
+  "desktop.updater.none.message": "Omnia'un en son sürümünü zaten kullanıyorsunuz",
   "desktop.updater.downloadFailed.title": "Güncelleme başarısız oldu",
   "desktop.updater.downloadFailed.message": "Güncelleme indirilemedi",
   "desktop.updater.downloaded.title": "Güncelleme indirildi",

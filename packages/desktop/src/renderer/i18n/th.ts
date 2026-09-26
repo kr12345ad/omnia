@@ -11,7 +11,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "การตรวจหาการอัปเดตล้มเหลว",
   "desktop.updater.checkFailed.message": "ไม่สามารถตรวจหาการอัปเดตได้",
   "desktop.updater.none.title": "ไม่มีการอัปเดต",
-  "desktop.updater.none.message": "คุณกำลังใช้ OpenCode เวอร์ชันล่าสุดอยู่แล้ว",
+  "desktop.updater.none.message": "คุณกำลังใช้ Omnia เวอร์ชันล่าสุดอยู่แล้ว",
   "desktop.updater.downloadFailed.title": "การอัปเดตล้มเหลว",
   "desktop.updater.downloadFailed.message": "ไม่สามารถดาวน์โหลดการอัปเดตได้",
   "desktop.updater.downloaded.title": "ดาวน์โหลดการอัปเดตแล้ว",

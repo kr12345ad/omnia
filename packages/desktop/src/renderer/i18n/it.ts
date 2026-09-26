@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Controllo degli aggiornamenti non riuscito",
   "desktop.updater.checkFailed.message": "Impossibile controllare gli aggiornamenti",
   "desktop.updater.none.title": "Nessun aggiornamento disponibile",
-  "desktop.updater.none.message": "Stai già utilizzando l'ultima versione di OpenCode",
+  "desktop.updater.none.message": "Stai già utilizzando l'ultima versione di Omnia",
   "desktop.updater.downloadFailed.title": "Aggiornamento non riuscito",
   "desktop.updater.downloadFailed.message": "Impossibile scaricare l'aggiornamento",
   "desktop.updater.downloaded.title": "Aggiornamento scaricato",

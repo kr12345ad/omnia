@@ -1,0 +1,16 @@
+Read the text content of a control, document, or application.
+
+Use this to see what a surface actually contains instead of taking a
+screenshot. It returns the text, its length, and a short hash so the model
+can confirm exactly what changed after an action.
+
+Provide one of:
+
+- target: a stable element ID from computer_find or computer_observe.
+- query + optional role: locate the surface by meaning, for example
+  "document text" or "Find field".
+- app or window: read the whole application or a window's application.
+
+Documents, entries, combo boxes, and labels expose their text when the
+application publishes accessibility text. Canvas-only surfaces report
+honestly that no text is available; use computer_screenshot for those.

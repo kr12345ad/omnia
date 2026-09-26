@@ -43,6 +43,7 @@ import {
   restoreMainWindows,
 } from "./windows"
 import { createWslServersController } from "./wsl/servers"
+import { registerModelsWithOmniaServer, startLocalOmniaServer, type LocalOmniaServer } from "./omnia/server-host"
 import { registerWslIpcHandlers } from "./wsl/ipc"
 import { spawnWslSidecar } from "./wsl/sidecar"
 import { migrate } from "./migrate"
@@ -51,14 +52,14 @@ import { startBackgroundCli } from "./background-cli"
 import { setNativeTranslations } from "./native-translations"
 
 const APP_NAMES: Record<string, string> = {
-  dev: "OpenCode Dev",
-  beta: "OpenCode Beta",
-  prod: "OpenCode",
+  dev: "Omnia Dev",
+  beta: "Omnia Beta",
+  prod: "Omnia",
 }
 const APP_IDS: Record<string, string> = {
-  dev: "ai.opencode.desktop.dev",
-  beta: "ai.opencode.desktop.beta",
-  prod: "ai.opencode.desktop",
+  dev: "io.omnia.desktop.dev",
+  beta: "io.omnia.desktop.beta",
+  prod: "io.omnia.desktop",
 }
 const TEST_ONBOARDING = process.env.OPENCODE_TEST_ONBOARDING === "1"
 const SIDECAR_VERSION = process.env.OPENCODE_SIDECAR_V2 === "1" ? "v2" : "v1"
@@ -66,6 +67,7 @@ const jsCallStackFeature = "DocumentPolicyIncludeJSCallStacksInCrashReports"
 
 let logger: ReturnType<typeof initLogging>
 let server: SidecarListener | null = null
+let omniaServer: LocalOmniaServer | null = null
 
 const pendingDeepLinks: string[] = []
 
@@ -122,7 +124,7 @@ const main = Effect.gen(function* () {
 
   process.env.OPENCODE_DISABLE_EMBEDDED_WEB_UI = "true"
 
-  const appId = app.isPackaged ? APP_IDS[CHANNEL] : "ai.opencode.desktop.dev"
+  const appId = app.isPackaged ? APP_IDS[CHANNEL] : "io.omnia.desktop.dev"
   const onboardingTestRoot = ((): string | undefined => {
     if (!TEST_ONBOARDING) return
 
@@ -138,7 +140,7 @@ const main = Effect.gen(function* () {
     process.env.XDG_STATE_HOME = join(root, "state")
     return root
   })()
-  app.setName(app.isPackaged ? APP_NAMES[CHANNEL] : "OpenCode Dev")
+  app.setName(app.isPackaged ? APP_NAMES[CHANNEL] : "Omnia Dev")
   app.setAppUserModelId(appId)
   app.setPath(
     "userData",
@@ -203,7 +205,7 @@ const main = Effect.gen(function* () {
   const shellEnv = preferAppEnv(app.getPath("userData"))
 
   app.on("second-instance", (_event: Event, argv: string[]) => {
-    const urls = argv.filter((arg: string) => arg.startsWith("opencode://"))
+    const urls = argv.filter((arg: string) => arg.startsWith("omnia://") || arg.startsWith("opencode://"))
     if (urls.length) {
       logger.log("deep link received via second-instance", { urls })
       emitDeepLinks(urls)
@@ -268,6 +270,7 @@ const main = Effect.gen(function* () {
       }),
     ),
   )
+  app.setAsDefaultProtocolClient("omnia")
   app.setAsDefaultProtocolClient("opencode")
   registerRendererProtocol()
   setDockIcon()
@@ -330,6 +333,25 @@ const main = Effect.gen(function* () {
     ensureLoopbackNoProxy()
     useEnvProxy()
 
+    const localServer = yield* Effect.promise(() => startLocalOmniaServer()).pipe(
+      Effect.tap((handle) =>
+        Effect.sync(() => {
+          if (handle) logger.log("omnia server started", { url: handle.url, serverId: handle.serverId })
+          else logger.log("omnia computer runtime unavailable on this platform")
+        }),
+      ),
+      Effect.catch((error) =>
+        Effect.sync(() => {
+          logger.warn("omnia server failed to start", error)
+          return undefined
+        }),
+      ),
+    )
+    omniaServer = localServer ?? null
+    app.once("will-quit", () => {
+      void omniaServer?.stop().catch(() => undefined)
+    })
+
     if (SIDECAR_VERSION === "v2") {
       logger.log("spawning v2 sidecar")
       const sidecar = yield* Effect.promise(() => startBackgroundCli(logger, shellEnv?.XDG_STATE_HOME))
@@ -338,6 +360,15 @@ const main = Effect.gen(function* () {
         username: sidecar.username,
         password: sidecar.password,
       })
+      if (omniaServer) {
+        void registerModelsWithOmniaServer(omniaServer, {
+          url: sidecar.url,
+          username: sidecar.username,
+          password: sidecar.password,
+        })
+          .then((count) => logger.log("registered models with the omnia server", { count }))
+          .catch((error) => logger.warn("model registration failed", error))
+      }
 
       if (process.platform === "win32") {
         void wslServers.initialize().catch((error) => logger.error("wsl server initialization failed", error))
@@ -389,6 +420,11 @@ const main = Effect.gen(function* () {
       username: "opencode",
       password,
     })
+    if (omniaServer) {
+      void registerModelsWithOmniaServer(omniaServer, { url, username: "opencode", password })
+        .then((count) => logger.log("registered models with the omnia server", { count }))
+        .catch((error) => logger.warn("model registration failed", error))
+    }
 
     if (process.platform === "win32") {
       void wslServers.initialize().catch((error) => logger.error("wsl server initialization failed", error))

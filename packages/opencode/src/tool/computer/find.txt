@@ -1,0 +1,12 @@
+Locate a control by meaning and return ranked candidates with everything
+needed to act on them.
+
+Each candidate includes its role, accessible name, stable element id, exact
+screen pixel center, current value, states (enabled, disabled, focused,
+checked), the actions it supports, and a confidence score. When several
+controls share a name, the ranked list and the ancestor context tell you which
+one is real; use computer_inspect if you need more detail.
+
+Pick the best candidate by id and act on it, or click its exact pixel when no
+semantic action exists. If nothing matches, observe again: the interface may
+have changed.

@@ -9,7 +9,7 @@ export const dict: Record<string, string> = {
   "desktop.updater.checkFailed.title": "अपडेट जाँच असफल भयो",
   "desktop.updater.checkFailed.message": "अद्यावधिकहरूको लागि जाँच गर्न असफल भयो",
   "desktop.updater.none.title": "कुनै अद्यावधिक उपलब्ध छैन",
-  "desktop.updater.none.message": "तपाईंले पहिले नै OpenCode को नवीनतम संस्करण प्रयोग गरिरहनुभएको छ",
+  "desktop.updater.none.message": "तपाईंले पहिले नै Omnia को नवीनतम संस्करण प्रयोग गरिरहनुभएको छ",
   "desktop.updater.downloadFailed.title": "अपडेट गर्न सकिएन",
   "desktop.updater.downloadFailed.message": "अपडेट डाउनलोड गर्न असफल भयो",
   "desktop.updater.downloaded.title": "अपडेट डाउनलोड गरियो",

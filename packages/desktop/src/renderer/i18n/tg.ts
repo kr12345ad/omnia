@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Санҷиши навсозӣ иҷро нашуд",
   "desktop.updater.checkFailed.message": "Санҷиши навсозиҳо муяссар нашуд",
   "desktop.updater.none.title": "Навсозии дастрас нест",
-  "desktop.updater.none.message": "Шумо аллакай версияи охирини OpenCode-ро истифода мебаред",
+  "desktop.updater.none.message": "Шумо аллакай версияи охирини Omnia-ро истифода мебаред",
   "desktop.updater.downloadFailed.title": "Навсозӣ ноком шуд",
   "desktop.updater.downloadFailed.message": "Боргирии навсозӣ муваффақ нашуд",
   "desktop.updater.downloaded.title": "Навсозии зеркашӣ",

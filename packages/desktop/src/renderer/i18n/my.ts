@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "အပ်ဒိတ်စစ်ဆေးမှု မအောင်မြင်ပါ။",
   "desktop.updater.checkFailed.message": "အပ်ဒိတ်များကို စစ်ဆေးရန် မအောင်မြင်ပါ။",
   "desktop.updater.none.title": "အပ်ဒိတ် မရနိုင်ပါ။",
-  "desktop.updater.none.message": "သင်သည် OpenCode ၏နောက်ဆုံးထွက်ဗားရှင်းကို အသုံးပြုနေပြီဖြစ်သည်။",
+  "desktop.updater.none.message": "သင်သည် Omnia ၏နောက်ဆုံးထွက်ဗားရှင်းကို အသုံးပြုနေပြီဖြစ်သည်။",
   "desktop.updater.downloadFailed.title": "အပ်ဒိတ် မအောင်မြင်ပါ။",
   "desktop.updater.downloadFailed.message": "အပ်ဒိတ်ကို ဒေါင်းလုဒ်လုပ်ရန် မအောင်မြင်ပါ။",
   "desktop.updater.downloaded.title": "အပ်ဒိတ်ကို ဒေါင်းလုဒ်လုပ်ထားသည်။",

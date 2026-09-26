@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Uppfærsluathugun mistókst",
   "desktop.updater.checkFailed.message": "Mistókst að leita að uppfærslum",
   "desktop.updater.none.title": "Engin uppfærsla í boði",
-  "desktop.updater.none.message": "Þú ert nú þegar að nota nýjustu útgáfuna af OpenCode",
+  "desktop.updater.none.message": "Þú ert nú þegar að nota nýjustu útgáfuna af Omnia",
   "desktop.updater.downloadFailed.title": "Uppfærsla mistókst",
   "desktop.updater.downloadFailed.message": "Mistókst að hlaða niður uppfærslu",
   "desktop.updater.downloaded.title": "Uppfærslu hlaðið niður",

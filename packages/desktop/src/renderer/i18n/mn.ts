@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Шинэчлэх шалгалт амжилтгүй боллоо",
   "desktop.updater.checkFailed.message": "Шинэчлэлтүүдийг шалгаж чадсангүй",
   "desktop.updater.none.title": "Шинэчлэлт байхгүй",
-  "desktop.updater.none.message": "Та OpenCode-н хамгийн сүүлийн хувилбарыг аль хэдийн ашиглаж байна",
+  "desktop.updater.none.message": "Та Omnia-н хамгийн сүүлийн хувилбарыг аль хэдийн ашиглаж байна",
   "desktop.updater.downloadFailed.title": "Шинэчилж чадсангүй",
   "desktop.updater.downloadFailed.message": "Шинэчлэлтийг татаж авч чадсангүй",
   "desktop.updater.downloaded.title": "Шинэчлэлтийг татаж авсан",

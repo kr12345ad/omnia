@@ -1,4 +1,7 @@
+import { Show } from "solid-js"
 import { ScrollView } from "@opencode-ai/ui/scroll-view"
+import { useSettings } from "@/context/settings"
+import { WorkHome } from "./home/work-home"
 import { createHomeController } from "./home/home-controller"
 import { createHomeProjectsController } from "./home/home-projects-controller"
 import { HomeUtilityNav } from "./home/home-projects-view"
@@ -9,6 +12,15 @@ import { createHomeSessionsController } from "./home/home-sessions-controller"
 import { HomeSessions } from "./home/home-sessions"
 
 export function NewHome() {
+  const settings = useSettings()
+  return (
+    <Show when={settings.general.mode() === "work"} fallback={<CodeHome />}>
+      <WorkHome />
+    </Show>
+  )
+}
+
+function CodeHome() {
   const home = createHomeController()
   const projects = createHomeProjectsController(home)
   const sessions = createHomeSessionsController(home)

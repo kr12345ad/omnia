@@ -24,6 +24,9 @@ import type { UpdaterController } from "./updater-controller"
 import { createUpdaterSubscriptions } from "./updater-subscriptions"
 import { createDesktopDraftStore } from "./draft-store"
 import { nativeT } from "./native-translations"
+import { registerOmniaIpcHandlers } from "./omnia/ipc"
+import { registerSuperskillIpcHandlers } from "./omnia/superskills"
+import { registerMemoryIpcHandlers } from "./omnia/memory"
 
 const pickerFilters = (ext?: string[]) => {
   if (!ext || ext.length === 0) return undefined
@@ -55,6 +58,9 @@ type Deps = {
 }
 
 export function registerIpcHandlers(deps: Deps) {
+  registerOmniaIpcHandlers()
+  registerSuperskillIpcHandlers()
+  registerMemoryIpcHandlers()
   const drafts = createDesktopDraftStore(join(app.getPath("userData"), "drafts.sqlite"))
   const updaterSubscriptions = createUpdaterSubscriptions()
   app.once("will-quit", updaterSubscriptions.clear)

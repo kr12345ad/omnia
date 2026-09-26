@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Kontrolli i përditësimit dështoi",
   "desktop.updater.checkFailed.message": "Kontrolli për përditësime dështoi",
   "desktop.updater.none.title": "Nuk ka përditësim të disponueshëm",
-  "desktop.updater.none.message": "Ju tashmë po përdorni versionin më të fundit të OpenCode",
+  "desktop.updater.none.message": "Ju tashmë po përdorni versionin më të fundit të Omnia",
   "desktop.updater.downloadFailed.title": "Përditësimi dështoi",
   "desktop.updater.downloadFailed.message": "Shkarkimi i përditësimit dështoi",
   "desktop.updater.downloaded.title": "Përditësimi u shkarkua",

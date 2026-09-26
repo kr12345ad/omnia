@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Värskenduskontroll ebaõnnestus",
   "desktop.updater.checkFailed.message": "Värskenduste kontrollimine ebaõnnestus",
   "desktop.updater.none.title": "Värskendus pole saadaval",
-  "desktop.updater.none.message": "Kasutate juba rakenduse OpenCode uusimat versiooni",
+  "desktop.updater.none.message": "Kasutate juba rakenduse Omnia uusimat versiooni",
   "desktop.updater.downloadFailed.title": "Värskendus ebaõnnestus",
   "desktop.updater.downloadFailed.message": "Värskenduse allalaadimine ebaõnnestus",
   "desktop.updater.downloaded.title": "Värskendus alla laaditud",

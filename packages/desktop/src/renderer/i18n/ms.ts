@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Semakan Kemas Kini Gagal",
   "desktop.updater.checkFailed.message": "Gagal menyemak kemas kini",
   "desktop.updater.none.title": "Tiada Kemas Kini Tersedia",
-  "desktop.updater.none.message": "Anda sudah menggunakan versi terkini OpenCode",
+  "desktop.updater.none.message": "Anda sudah menggunakan versi terkini Omnia",
   "desktop.updater.downloadFailed.title": "Kemas Kini Gagal",
   "desktop.updater.downloadFailed.message": "Gagal memuat turun kemas kini",
   "desktop.updater.downloaded.title": "Kemas Kini Dimuat Turun",

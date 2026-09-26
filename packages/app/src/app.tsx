@@ -68,6 +68,7 @@ import { createSessionLineage } from "@/pages/session/session-lineage"
 import { SessionPage, SessionRouteErrorBoundary, TargetSessionRouteContent } from "@/pages/session"
 import { NewHome } from "@/pages/home"
 import { LegacyHome } from "@/pages/home/legacy-home"
+import { WorkHome } from "@/pages/home/work-home"
 
 const NewSession = lazy(() => import("@/pages/new-session"))
 
@@ -612,6 +613,15 @@ export function AppInterface(props: {
   )
 }
 
+function HomeByMode() {
+  const settings = useSettings()
+  return (
+    <Show when={settings.general.mode() === "work"} fallback={<LegacyHome />}>
+      <WorkHome />
+    </Show>
+  )
+}
+
 function Routes(props: { serverScoped?: JSX.Element }) {
   const settings = useSettings()
 
@@ -625,7 +635,7 @@ function Routes(props: { serverScoped?: JSX.Element }) {
         <Show when={!settings.general.newLayoutDesigns()}>
           {
             <>
-              <Route path="/" component={LegacyHome} />
+              <Route path="/" component={HomeByMode} />
               <Route path="/server/:serverKey/session/:id" component={LegacyTargetSessionRoute} />
             </>
           }

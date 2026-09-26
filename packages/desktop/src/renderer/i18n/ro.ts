@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Verificarea actualizărilor a eșuat",
   "desktop.updater.checkFailed.message": "Nu s-au putut verifica actualizările",
   "desktop.updater.none.title": "Nicio actualizare disponibilă",
-  "desktop.updater.none.message": "Folosești deja cea mai recentă versiune OpenCode",
+  "desktop.updater.none.message": "Folosești deja cea mai recentă versiune Omnia",
   "desktop.updater.downloadFailed.title": "Actualizarea a eșuat",
   "desktop.updater.downloadFailed.message": "Nu s-a putut descărca actualizarea",
   "desktop.updater.downloaded.title": "Actualizare descărcată",

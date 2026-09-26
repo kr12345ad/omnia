@@ -257,7 +257,7 @@ const createPlatform = (windowState: DesktopWindowState): Platform => {
 
       const notification = new Notification(title, {
         body: description ?? "",
-        icon: "https://opencode.ai/favicon-96x96-v3.png",
+        icon: "./favicon-96x96.png",
       })
       notification.onclick = () => {
         void window.api.showWindow()
@@ -301,6 +301,10 @@ const createPlatform = (windowState: DesktopWindowState): Platform => {
     setPinchZoomEnabled,
 
     runDesktopMenuAction,
+
+    superskills: window.api.superskills,
+
+    memory: window.api.memory,
 
     checkAppExists: async (appName: string) => {
       return window.api.checkAppExists(appName)

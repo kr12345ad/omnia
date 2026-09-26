@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Dagføringarkanningin miseydnaðist",
   "desktop.updater.checkFailed.message": "Tað eydnaðist ikki at kanna fyri dagføringum",
   "desktop.updater.none.title": "Eingin dagføring er tøk",
-  "desktop.updater.none.message": "Tú brúkar longu nýggjastu útgávuna av OpenCode.",
+  "desktop.updater.none.message": "Tú brúkar longu nýggjastu útgávuna av Omnia.",
   "desktop.updater.downloadFailed.title": "Dagføring miseydnaðist",
   "desktop.updater.downloadFailed.message": "Tað eydnaðist ikki at heinta dagføring",
   "desktop.updater.downloaded.title": "Dagføring heintað",

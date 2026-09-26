@@ -1,0 +1,30 @@
+Durable memory that survives across sessions, so the agent can refer to its own
+previous work.
+
+Memory scopes:
+
+- session: notes for the current task that should not outlive it.
+- task: what this kind of task needs (inputs, steps, pitfalls).
+- workspace: facts about a project or folder.
+- user: stable preferences and constraints.
+- skill: how to operate a capability well.
+- application: quirks of a specific application, for example which dialogs
+  exist or whether accessibility works.
+
+Actions:
+
+- recall: search memories by meaning. Filter with scope, application, key, or
+  tags. Returns the best matches with their scope, age, and confidence.
+- remember: store a memory. Use a stable key to update the same fact instead of
+  duplicating it (for example "application:calc:export-steps"). Set
+  expiresInDays for temporary notes. Secrets are redacted automatically; never
+  store credentials, tokens, or private file contents.
+- forget: delete memories matching a query, key, scope, or application.
+- list: the most recent memories.
+- stats: counts per scope.
+
+Use memory at the start of work: recall what you already learned about the
+application, the user, and the task. After a task, remember the reusable parts:
+the procedure that worked, the control names, the user's preferences, and any
+blocker you found. Keep entries short and factual; prefer several specific
+memories over one long note.

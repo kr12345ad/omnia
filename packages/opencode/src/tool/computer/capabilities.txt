@@ -1,0 +1,7 @@
+Report what the computer runtime can and cannot do right now.
+
+Returns the platform, the active backend, and the state of each
+capability: screen reading, accessibility trees, keyboard input, pointer
+input, and direct interface control. States are available, degraded,
+unavailable, or unknown — never promises. Check this before assuming an
+action will work, and quote it when explaining limits to the user.

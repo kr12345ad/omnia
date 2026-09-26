@@ -1,0 +1,5 @@
+List the applications currently open on the computer.
+
+Returns each open application with its active window title and whether it
+is the focused application. Use this to discover what the user is working
+with before observing or acting. This never changes anything.

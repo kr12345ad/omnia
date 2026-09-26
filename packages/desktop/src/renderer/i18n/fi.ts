@@ -9,7 +9,7 @@ export const dict = {
   "desktop.updater.checkFailed.title": "Päivitystarkistus epäonnistui",
   "desktop.updater.checkFailed.message": "Päivitysten tarkistaminen epäonnistui",
   "desktop.updater.none.title": "Päivitystä ei ole saatavilla",
-  "desktop.updater.none.message": "Käytät jo OpenCoden uusinta versiota",
+  "desktop.updater.none.message": "Käytät jo Omnian uusinta versiota",
   "desktop.updater.downloadFailed.title": "Päivitys epäonnistui",
   "desktop.updater.downloadFailed.message": "Päivityksen lataaminen epäonnistui",
   "desktop.updater.downloaded.title": "Päivitys ladattu",

@@ -27,6 +27,7 @@ import { useCommand } from "@/context/command"
 import { useLanguage } from "@/context/language"
 import { useSettings } from "@/context/settings"
 import { WindowsAppMenu } from "./windows-app-menu"
+import { ModeToggle } from "./mode-toggle"
 import { applyPath, backPath, forwardPath } from "./titlebar-history"
 import { TitlebarTabStrip } from "@/components/titlebar-tab-strip"
 import { makeEventListener } from "@solid-primitives/event-listener"
@@ -372,6 +373,7 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                 <Show when={windows() || linux()}>
                   <WindowsAppMenu command={command} platform={platform} variant="v2" />
                 </Show>
+                <ModeToggle />
                 <TooltipV2
                   placement="bottom"
                   value={
@@ -448,6 +450,7 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
             >
               <Show when={windows() || linux()}>
                 <WindowsAppMenu command={command} platform={platform} />
+                <ModeToggle />
               </Show>
               <Show when={mac()}>
                 <div class="xl:hidden w-10 shrink-0 flex items-center justify-center">

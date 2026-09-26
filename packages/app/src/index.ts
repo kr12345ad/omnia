@@ -13,6 +13,14 @@ export { useWslServers } from "./wsl/context"
 export { type DisplayBackend, type FatalRendererErrorLog, type Platform, PlatformProvider } from "./context/platform"
 export { type UpdaterPlatform, type UpdaterState } from "./updater"
 export {
+  type Superskill,
+  type SuperskillBridge,
+  type SuperskillMethod,
+  type SuperskillPlatform,
+  type SuperskillSummary,
+} from "./superskills"
+export { type MemoryPlatform, type MemoryRecord, type MemoryScope } from "./memory"
+export {
   type WslDistroProbe,
   type WslInstalledDistro,
   type WslJob,
