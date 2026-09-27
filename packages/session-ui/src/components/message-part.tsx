@@ -2539,6 +2539,9 @@ ToolRegistry.register({
           </div>
         )}
       >
+        <Show when={topic()}>
+          <div class="px-1 pb-1 text-12-regular text-text-strong">{topic()}</div>
+        </Show>
         <div class="px-1 pb-2 text-11-regular text-text-weak">{i18n.t("ui.tool.discussion.hint")}</div>
       </BasicTool>
     )
