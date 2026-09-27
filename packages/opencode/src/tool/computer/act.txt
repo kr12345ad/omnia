@@ -20,6 +20,30 @@ Actions:
 - close_app: ask an open application's window to close.
 - open_file: open a path with the computer's default application.
 - open_url: open a URL in the default browser.
+- read_text: read the text content of a control or application.
+- read_value: read the current value of a control, for example a text
+  field or cell. Uses the focused control when no target is given.
+- run_command: run a shell command on the connected computer. Returns the
+  exit code, stdout, and stderr, and the result is verified against the exit
+  code. Prefer this for work that is better done with a command than by
+  clicking, for example listing files, git operations, or package managers.
+- credentials: list the credentials stored for this computer. Only names,
+  usernames, and matching rules are returned; secret values are never shown.
+
+Stored credentials:
+- A user can store credentials for a computer in Settings > Computer >
+  Computers, with rules that describe when each one applies (a command
+  substring, an application, or a URL prefix).
+- Pass credential: "auto" to run_command to use the credential whose rules
+  match the command, or a credential id/name to pick one explicitly. For
+  sudo commands the secret is fed to sudo without appearing in the command
+  line; for other commands it is exposed only as environment variables
+  OMNIA_CREDENTIAL_USERNAME, OMNIA_CREDENTIAL_PASSWORD, and
+  OMNIA_CREDENTIAL_TOKEN.
+- If a command matches a stored credential but using it was not approved,
+  the result says permission_required and names the credential. Retry with
+  credential: "auto" to request it; never ask the user to type a password
+  into the chat.
 
 Every action is revalidated against the live interface, executed through the
 best available route (accessibility action, global keyboard, or global

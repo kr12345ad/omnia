@@ -11,6 +11,9 @@ export const Parameters = Schema.Struct({
     "navigate",
     "read",
     "find",
+    "images",
+    "save_image",
+    "copy_image",
     "click",
     "type",
     "key",
@@ -24,7 +27,9 @@ export const Parameters = Schema.Struct({
   url: Schema.optional(Schema.String).annotate({ description: "URL for open and navigate." }),
   query: Schema.optional(Schema.String).annotate({ description: "What to find on the page, for example 'Search suppliers'." }),
   role: Schema.optional(Schema.String).annotate({ description: "Optional role filter for find, for example button or textbox." }),
-  target: Schema.optional(Schema.String).annotate({ description: "Page element id from browser_find." }),
+  target: Schema.optional(Schema.String).annotate({
+    description: "Page element id from browser_find, or image id from the images action.",
+  }),
   text: Schema.optional(Schema.String).annotate({ description: "Text for type." }),
   key: Schema.optional(Schema.String).annotate({ description: "Key for key, for example Enter or Tab." }),
   tab: Schema.optional(Schema.String).annotate({ description: "Tab id from tabs." }),
@@ -34,6 +39,11 @@ export const Parameters = Schema.Struct({
   offset: Schema.optional(Schema.Number).annotate({
     description: "Starting character offset for read. Use the offset from a previous truncated read to continue.",
   }),
+  path: Schema.optional(Schema.String).annotate({
+    description:
+      "Absolute file path for save_image. Defaults to ~/Downloads/omnia with a name taken from the image URL or alt text.",
+  }),
+  name: Schema.optional(Schema.String).annotate({ description: "File name for save_image when no path is given." }),
   x: Schema.optional(Schema.Number).annotate({
     description: "Viewport pixel x for click when no element id is available. Use coordinates from browser_find.",
   }),
@@ -67,6 +77,24 @@ type BrowserResponse = {
       }>
       clicked?: { name?: string; role?: string; id?: string; x?: number; y?: number; rect?: { x: number; y: number; width: number; height: number } }
       tabs?: Array<{ id: string; url: string; title?: string }>
+      images?: Array<{
+        id: string
+        src: string
+        alt?: string
+        width: number
+        height: number
+        naturalWidth: number
+        naturalHeight: number
+        visible: boolean
+        rect?: { x: number; y: number; width: number; height: number }
+        link?: string
+      }>
+      path?: string
+      bytes?: number
+      mimeType?: string
+      src?: string
+      alt?: string
+      method?: string
       tab?: string | { id: string; url: string }
       value?: string
       status?: { running: boolean; browser?: string; tabs: number }
@@ -97,6 +125,16 @@ export const ComputerBrowserTool = Tool.define<typeof Parameters, Record<string,
           if (params.action === "type" && (!params.target || params.text === undefined)) {
             throw new Error("The type action requires target and text.")
           }
+          if (
+            (params.action === "save_image" || params.action === "copy_image") &&
+            !params.target &&
+            !params.query &&
+            !params.url
+          ) {
+            throw new Error(
+              "The " + params.action + " action requires an image id from the images action, a query, or a url.",
+            )
+          }
           yield* ctx.ask({
             permission: "computer",
             patterns: [`browser:${params.action}:${params.query ?? params.url ?? params.target ?? "page"}`],
@@ -117,6 +155,8 @@ export const ComputerBrowserTool = Tool.define<typeof Parameters, Record<string,
             ...(params.offset === undefined ? {} : { offset: params.offset }),
             ...(params.x === undefined ? {} : { x: params.x }),
             ...(params.y === undefined ? {} : { y: params.y }),
+            ...(params.path === undefined ? {} : { path: params.path }),
+            ...(params.name === undefined ? {} : { name: params.name }),
             approve: true,
             approvedBy: `session:${ctx.sessionID}`,
             approvedScopes: ["BROWSER"],
@@ -155,6 +195,19 @@ export const ComputerBrowserTool = Tool.define<typeof Parameters, Record<string,
           if (metadata.tabs && metadata.tabs.length > 0) {
             for (const tab of metadata.tabs) lines.push(`- ${tab.title ?? tab.url} (tab ${tab.id})`)
           }
+          if (metadata.images && metadata.images.length > 0) {
+            for (const image of metadata.images) {
+              const label = image.alt === undefined || image.alt.length === 0 ? "" : ` "${image.alt}"`
+              const size = `${image.naturalWidth || image.width}x${image.naturalHeight || image.height}`
+              lines.push(
+                `- id=${image.id} ${size}${label}${image.visible ? "" : " (not visible)"} ${image.src}${image.link === undefined ? "" : ` -> ${image.link}`}`,
+              )
+            }
+          }
+          if (metadata.path !== undefined && metadata.bytes !== undefined) {
+            lines.push(`saved to ${metadata.path} (${metadata.bytes} bytes${metadata.mimeType === undefined ? "" : `, ${metadata.mimeType}`})`)
+            if (metadata.src !== undefined) lines.push(`source: ${metadata.src}`)
+          }
           if (metadata.clicked !== undefined && metadata.clicked.x !== undefined) {
             lines.push(`clicked at viewport pixel ${metadata.clicked.x},${metadata.clicked.y}`)
           }
@@ -192,6 +245,9 @@ function browserTitle(action: string, metadata: NonNullable<BrowserResponse["res
   if (action === "read") return `Read page: ${metadata.title ?? metadata.url ?? "page"}`
   if (action === "find") return `Found ${metadata.candidates?.length ?? 0} page element(s)`
   if (action === "tabs") return `${metadata.tabs?.length ?? 0} browser tab(s)`
+  if (action === "images") return `Found ${metadata.images?.length ?? 0} page image(s)`
+  if (action === "save_image") return `Saved image${metadata.path === undefined ? "" : `: ${metadata.path}`}`
+  if (action === "copy_image") return "Copied image to clipboard"
   if (action === "status") return metadata.status?.running === true ? `Browser running (${metadata.status.browser ?? "unknown"})` : "Browser not running"
   if (action === "open" || action === "navigate") {
     const target = typeof metadata.tab === "string" ? metadata.url : (metadata.tab?.url ?? metadata.url)

@@ -1,0 +1,24 @@
+Ground and act on controls that semantic observation cannot resolve, such as
+canvas content, image-only toolbars, poorly accessible legacy interfaces, and
+precise drag or resize operations.
+
+Use this after computer_observe or computer_find failed to identify a target
+with enough confidence. Describe the target the way a person would ("the orange
+Save icon in the top right"), not by coordinates. The runtime captures the
+relevant screen, resolves the target through Omnia's computer-use model layer,
+executes the resulting action through the normal permission-checked action
+resolver, and verifies the outcome by observation.
+
+Set execute to false to receive a proposal without acting. Prefer semantic
+tools first: exact text, accessibility, and DOM information always take
+priority over visual inference, and this tool will say so when semantics
+already resolve the target.
+
+
+Inspect mode:
+- Use operation "inspect" with a target, or pass question to ask the visual
+  model anything about the screen ("what error is shown?", "which row is
+  selected?"). The answer comes back as text, and when the answer is a
+  location the model also returns coordinates that can be executed with
+  computer_act. Use this when the semantic tree is missing or ambiguous and
+  you need the model to look at the screen for you.

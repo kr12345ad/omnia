@@ -26,6 +26,7 @@ export const ACTIONS = [
   "wait",
   "release_keys",
   "read_text",
+  "read_value",
   "get_focus",
   "get_cursor",
   "read_clipboard",
@@ -37,6 +38,8 @@ export const ACTIONS = [
   "close_app",
   "open_file",
   "open_url",
+  "run_command",
+  "credentials",
 ] as const
 
 const Endpoint = Schema.Struct({
@@ -105,6 +108,18 @@ export const Parameters = Schema.Struct({
   y: Schema.optional(Schema.Number).annotate({ description: "Screen y coordinate for pointer actions." }),
   from: Schema.optional(Endpoint).annotate({ description: "Start of a drag action." }),
   to: Schema.optional(Endpoint).annotate({ description: "End of a drag action, for example an image resize handle." }),
+  command: Schema.optional(Schema.String).annotate({
+    description:
+      "Shell command for run_command, for example 'ls -la' or 'sudo systemctl restart nginx'. Runs on the connected computer and returns exit code, stdout, and stderr.",
+  }),
+  cwd: Schema.optional(Schema.String).annotate({ description: "Working directory for run_command." }),
+  timeoutMs: Schema.optional(Schema.Number).annotate({
+    description: "Timeout in milliseconds for run_command. Defaults to 120000 and is capped at 600000.",
+  }),
+  credential: Schema.optional(Schema.String).annotate({
+    description:
+      "Credential selection for run_command: 'auto' uses a stored credential whose rules match the command, 'none' disables stored credentials, or a credential id or name. Stored credentials are managed in Settings > Computer > Computers; their secrets are never shown to the model.",
+  }),
 })
 
 type ActResponse = {
@@ -115,12 +130,31 @@ type ActResponse = {
     message?: string
     observation?: { id: string; text?: string; metadata?: Record<string, unknown> }
     verification?: { status?: string; message?: string }
+    command?: {
+      exitCode: number | null
+      stdout: string
+      stderr: string
+      truncated?: boolean
+      timedOut?: boolean
+      durationMs?: number
+    }
     metadata?: {
       target?: { role?: string; name?: string }
       stateDelta?: { summary?: string; hasChanges?: boolean; highlights?: readonly string[] }
       context?: readonly string[]
+      value?: unknown
+      credentials?: readonly {
+        id?: string
+        name?: string
+        kind?: string
+        username?: string
+        enabled?: boolean
+        rules?: readonly { kind?: string; match?: string }[]
+      }[]
+      credential?: { id?: string; name?: string }
+      exitCode?: number | null
     }
-    error?: { code?: string; message: string }
+    error?: { code?: string; message: string; details?: { missing?: readonly string[]; credential?: { name?: string } } }
   }
 }
 
@@ -157,6 +191,13 @@ const ACTION_LABEL: Record<string, string> = {
   mouse_up: "Released mouse button",
   get_cursor: "Read pointer position",
   menu: "Selected menu",
+  read_value: "Read value",
+  run_command: "Ran command",
+  credentials: "Listed credentials",
+}
+
+function clip(text: string, max = 8000): string {
+  return text.length > max ? `${text.slice(0, max)}… (${text.length - max} more characters)` : text
 }
 
 export const ComputerActTool = Tool.define<typeof Parameters, Record<string, unknown>, HttpClient.HttpClient>(
@@ -177,6 +218,8 @@ export const ComputerActTool = Tool.define<typeof Parameters, Record<string, unk
             throw new Error(`The ${params.action} action requires app.`)
           if (params.action === "open_url" && !params.url) throw new Error("The open_url action requires url.")
           if (params.action === "open_file" && !params.path) throw new Error("The open_file action requires path.")
+          if (params.action === "run_command" && (!params.command || params.command.trim().length === 0))
+            throw new Error("The run_command action requires command.")
           if (["type", "focus"].includes(params.action) && !params.target && !params.query) {
             throw new Error(`The ${params.action} action requires target or query.`)
           }
@@ -187,7 +230,7 @@ export const ComputerActTool = Tool.define<typeof Parameters, Record<string, unk
           yield* ctx.ask({
             permission: "computer",
             patterns: [
-              `act:${params.action}:${params.target ?? params.query ?? params.app ?? params.url ?? params.path ?? "desktop"}`,
+              `act:${params.action}:${params.target ?? params.query ?? params.app ?? params.url ?? params.path ?? params.command ?? "desktop"}`,
             ],
             always: ["*"],
             metadata: {
@@ -198,9 +241,22 @@ export const ComputerActTool = Tool.define<typeof Parameters, Record<string, unk
               ...(params.app === undefined ? {} : { app: params.app }),
               ...(params.text === undefined ? {} : { text: params.text }),
               ...(params.key === undefined ? {} : { key: params.key }),
+              ...(params.command === undefined ? {} : { command: params.command }),
+              ...(params.credential === undefined ? {} : { credential: params.credential }),
             },
           })
           const id = yield* computerId(http, config)
+          const approvedScopes = [
+            "UI_READ",
+            "UI_CONTROL",
+            "KEYBOARD",
+            "POINTER",
+            "CLIPBOARD_READ",
+            "CLIPBOARD_WRITE",
+            "PROCESS_EXECUTE",
+            "SCREEN_READ",
+            ...(params.action === "credentials" || params.credential !== undefined ? ["SECRETS" as const] : []),
+          ]
           const result = yield* request<ActResponse>(http, config, "POST", `/v1/computers/${id}/actions`, {
             action: params.action,
             ...(params.target === undefined
@@ -231,31 +287,62 @@ export const ComputerActTool = Tool.define<typeof Parameters, Record<string, unk
             ...(params.y === undefined ? {} : { y: params.y }),
             ...(params.from === undefined ? {} : { from: params.from }),
             ...(params.to === undefined ? {} : { to: params.to }),
+            ...(params.command === undefined ? {} : { command: params.command }),
+            ...(params.cwd === undefined ? {} : { cwd: params.cwd }),
+            ...(params.timeoutMs === undefined ? {} : { timeoutMs: params.timeoutMs }),
+            ...(params.credential === undefined ? {} : { credential: params.credential }),
             approve: true,
             approvedBy: `session:${ctx.sessionID}`,
-            approvedScopes: [
-              "UI_READ",
-              "UI_CONTROL",
-              "KEYBOARD",
-              "POINTER",
-              "CLIPBOARD_READ",
-              "CLIPBOARD_WRITE",
-              "PROCESS_EXECUTE",
-              "SCREEN_READ",
-            ],
+            approvedScopes,
             sessionId: ctx.sessionID,
           })
           const outcome = result.result
           const targetName =
             typeof outcome.metadata?.target?.name === "string" && outcome.metadata.target.name.length > 0
               ? outcome.metadata.target.name
-              : params.target ?? params.query ?? params.app ?? params.url ?? params.path ?? "desktop"
+              : params.target ??
+                params.query ??
+                params.app ??
+                params.url ??
+                params.path ??
+                params.command ??
+                "desktop"
           const verification = outcome.verification?.status ?? (outcome.success ? "unverified" : "failed")
           const statusLabel = !outcome.success ? (outcome.error?.code ?? outcome.status ?? "failed") : verification
           const title = `${ACTION_LABEL[params.action] ?? params.action} ${targetName} (${statusLabel})`
           yield* ctx.metadata({ title, metadata: {} })
           const lines = [outcome.message ?? `${params.action} ${outcome.success ? "completed" : "did not complete"}.`]
           if (outcome.metadata?.stateDelta?.summary) lines.push(`observed change: ${outcome.metadata.stateDelta.summary}`)
+          if (outcome.command) {
+            lines.push(`exit code: ${outcome.command.exitCode ?? "unknown"}`)
+            if (outcome.command.stdout.trim().length > 0) lines.push(`stdout:\n${clip(outcome.command.stdout)}`)
+            if (outcome.command.stderr.trim().length > 0) lines.push(`stderr:\n${clip(outcome.command.stderr)}`)
+            if (outcome.command.truncated === true) lines.push("output was truncated; redirect to a file if you need all of it.")
+          }
+          if (params.action === "read_value" && outcome.metadata?.value !== undefined) {
+            lines.push(`value: ${JSON.stringify(outcome.metadata.value)}`)
+          }
+          const storedCredentials = outcome.metadata?.credentials
+          if (storedCredentials !== undefined) {
+            if (storedCredentials.length === 0) lines.push("no stored credentials for this computer.")
+            else {
+              lines.push("stored credentials:")
+              for (const entry of storedCredentials) {
+                const rules = (entry.rules ?? [])
+                  .map((rule) => `${rule.kind ?? "rule"}:${rule.match ?? ""}`)
+                  .join(", ")
+                lines.push(
+                  `- ${entry.name ?? entry.id ?? "credential"} (${entry.kind ?? "password"})${entry.username === undefined ? "" : ` username ${entry.username}`}${rules.length === 0 ? "" : `; use for ${rules}`}${entry.enabled === false ? " [disabled]" : ""}`,
+                )
+              }
+              lines.push('pass credential: "auto" to run_command to use the matching credential; the secret stays hidden.')
+            }
+          }
+          if (!outcome.success && outcome.error?.details?.credential?.name) {
+            lines.push(
+              `a stored credential "${outcome.error.details.credential.name}" matches this command; retry with credential: "auto" to use it.`,
+            )
+          }
           if (!outcome.success && Array.isArray(outcome.metadata?.context) && outcome.metadata.context.length > 0) {
             lines.push("current interface context:")
             for (const entry of outcome.metadata.context.slice(0, 12)) lines.push(`- ${entry}`)

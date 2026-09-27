@@ -24,7 +24,11 @@ Each step supports:
 
 - action: click, double_click, right_click, type, key, hotkey, focus,
   scroll, move, launch_app, activate_app, close_app, open_file, open_url,
-  observe, wait.
+  observe, wait, read_value, run_command, credentials.
+- command + optional cwd, timeoutMs, credential: a shell command for
+  run_command. Use run_command for tasks better done with a command, such as
+  file listing, git, or package managers. credential: "auto" uses a stored
+  credential whose rules match the command; see computer_act for details.
 - query + optional role: the control to act on by meaning, for example
   "Export button". The runtime resolves it and rejects ambiguous matches
   instead of guessing.

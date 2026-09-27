@@ -39,12 +39,15 @@ export const Step = Schema.Struct({
     "wait",
     "release_keys",
     "read_text",
+    "read_value",
     "get_focus",
     "get_cursor",
     "read_clipboard",
     "write_clipboard",
     "dismiss",
     "menu",
+    "run_command",
+    "credentials",
     "browser_open",
     "browser_navigate",
     "browser_read",
@@ -95,6 +98,12 @@ export const Step = Schema.Struct({
   limit: Schema.optional(Schema.Number).annotate({ description: "Maximum candidates for browser_find." }),
   from: Schema.optional(Endpoint).annotate({ description: "Start of a drag action." }),
   to: Schema.optional(Endpoint).annotate({ description: "End of a drag action." }),
+  command: Schema.optional(Schema.String).annotate({ description: "Shell command for run_command." }),
+  cwd: Schema.optional(Schema.String).annotate({ description: "Working directory for run_command." }),
+  timeoutMs: Schema.optional(Schema.Number).annotate({ description: "Timeout in milliseconds for run_command." }),
+  credential: Schema.optional(Schema.String).annotate({
+    description: 'Credential for run_command: "auto", "none", or a stored credential id/name.',
+  }),
   expect: Schema.optional(
     Schema.Struct({
       text: Schema.optional(Schema.String).annotate({ description: "Text that should be visible after the step." }),
@@ -214,6 +223,10 @@ export const ComputerDoTool = Tool.define<typeof Parameters, Record<string, unkn
               ...(step.limit === undefined ? {} : { limit: step.limit }),
               ...(step.from === undefined ? {} : { from: step.from }),
               ...(step.to === undefined ? {} : { to: step.to }),
+              ...(step.command === undefined ? {} : { command: step.command }),
+              ...(step.cwd === undefined ? {} : { cwd: step.cwd }),
+              ...(step.timeoutMs === undefined ? {} : { timeoutMs: step.timeoutMs }),
+              ...(step.credential === undefined ? {} : { credential: step.credential }),
               ...(step.expect === undefined ? {} : { expect: step.expect }),
             })),
             approve: true,
@@ -228,6 +241,9 @@ export const ComputerDoTool = Tool.define<typeof Parameters, Record<string, unkn
               "PROCESS_EXECUTE",
               "SCREEN_READ",
               "FILES_READ",
+              ...(params.steps.some((step) => step.action === "credentials" || step.credential !== undefined)
+                ? ["SECRETS" as const]
+                : []),
             ],
             sessionId: ctx.sessionID,
           })

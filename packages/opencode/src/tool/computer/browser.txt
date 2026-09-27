@@ -14,6 +14,14 @@ Actions:
   to see what a page says instead of taking a screenshot.
 - find: locate page elements by meaning (query, optional role) and return
   stable element ids with confidence. Prefer this before clicking or typing.
+- images: list the images on the current page with ids, natural size, alt
+  text, visibility, source URL, and any link they open. Use this before
+  saving or copying an image.
+- save_image: save one page image to disk. Address it with the image id from
+  images, or with query/url text. The default location is ~/Downloads/omnia
+  with a name derived from the image; pass path or name to choose your own.
+- copy_image: copy one page image to the system clipboard so it can be pasted
+  into a document or chat. Address it the same way as save_image.
 - click: click a found element with a real pointer action, or click x/y.
 - type: type into a found field and verify the value was written.
 - key: press a key such as Enter or Tab in the page.
