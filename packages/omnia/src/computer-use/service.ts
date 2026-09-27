@@ -12,6 +12,7 @@ import {
   effectiveAllowTitleBarClicks,
   findKnownClosePoints,
   isCropPath,
+  isMinimizeIntent,
   isTitleBarTarget,
   isWindowManagementIntent,
   windowManagementFallback,
@@ -451,9 +452,13 @@ export class ComputerUseService {
       operation: input.operation,
       weights: { capabilityMatch: 0.3, quality: 0.25, hardwareFit: 0.2, latencyScore: 0.1, privacyScore: 0.1, costScore: 0.05 },
     }
-    // Prefer semantic resolution when the environment names the window.
+    // Prefer semantic resolution when the environment names the window, but
+    // only for focus intents: the semantic provider has no minimize action, so
+    // a center-click on the matched window (e.g. clicking Omnia itself for
+    // "minimize the Omnia window") can never minimize. Minimize intents go
+    // straight to the keyboard fallback below.
     const semantic = this.options.providers.find((entry) => entry.id === "semantic")
-    if (semantic !== undefined) {
+    if (semantic !== undefined && !isMinimizeIntent(input.targetDescription, input.taskContext)) {
       const request: ComputerUseRequest = {
         computerId: input.computerId,
         requestedOperation: input.operation,

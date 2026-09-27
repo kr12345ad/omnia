@@ -515,6 +515,20 @@ describe("computer-use window safety (P0 title-bar ban)", () => {
     expect(shouldUseCropPath({ computerId: "local", requestedOperation: "click", targetDescription: "the Save button" })).toBe(false)
   })
 
+  test("minimize intent analyzes to a keyboard action, never a window click", async () => {
+    const catalog = createComputerUseCatalog()
+    const local = await localManager(catalog, tempDir())
+    const providers = createProviders({ catalog, local, settings: () => settings() })
+    const router = new DefaultComputerUseRouter({ providers, local, settings: () => settings() })
+    const manager = { ids: () => [], get: () => undefined } as unknown as ComputerManager
+    const service = new ComputerUseService({ manager, local, router, providers, catalog })
+    const analysis = await service.analyze({ computerId: "local", operation: "click", targetDescription: "minimize the Omnia window" })
+    // Regression: semantic once matched the window itself and returned a
+    // center-click, which can never minimize. Minimize must be keyboard.
+    expect(analysis.result.success).toBe(true)
+    expect(analysis.result.action).toEqual({ type: "key", key: "Super+Down" })
+  })
+
   test("deflects minimize intents away from full-screen UI-TARS grounding", async () => {
     process.env.OMNIA_LLAMA_SERVER = fakeRuntime()
     const catalog = createComputerUseCatalog()
