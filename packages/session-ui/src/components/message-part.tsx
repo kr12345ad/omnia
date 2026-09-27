@@ -60,6 +60,9 @@ import { Spinner } from "@opencode-ai/ui/spinner"
 import { TextShimmer } from "@opencode-ai/ui/text-shimmer"
 import { AnimatedCountList } from "./tool-count-summary"
 import { ToolStatusTitle } from "./tool-status-title"
+import { SearchingWebAnimation } from "./searching-web-animation"
+import { ComputerPlanAnimation } from "./computer-plan-animation"
+import { ToolCheckmark } from "./tool-checkmark"
 import { patchFiles } from "./apply-patch-file"
 import { partDefaultOpen } from "./part-default-open"
 import { animate } from "motion"
@@ -520,6 +523,12 @@ export function getToolInfo(
         subtitle: input.description,
       }
     }
+    case "discussion_room":
+      return {
+        icon: "speech-bubble",
+        title: i18n.t("ui.tool.discussion"),
+        subtitle: input.topic,
+      }
     case "bash":
     case "shell":
       return {
@@ -1917,6 +1926,7 @@ ToolRegistry.register({
         {...props}
         hideDetails
         icon="window-cursor"
+        indicator={(status) => <SearchingWebAnimation status={status} />}
         trigger={
           <div data-slot="basic-tool-tool-info-structured">
             <div data-slot="basic-tool-tool-info-main">
@@ -1963,6 +1973,7 @@ ToolRegistry.register({
       <BasicTool
         {...props}
         icon="window-cursor"
+        indicator={(status) => <SearchingWebAnimation status={status} />}
         trigger={{
           title: title(),
           subtitle: query(),
@@ -2223,6 +2234,7 @@ ToolRegistry.register({
       <BasicTool
         {...props}
         icon="window-cursor"
+        indicator={(status) => <ComputerPlanAnimation status={status} />}
         trigger={{
           title: i18n.t("ui.tool.computerDo"),
           subtitle:
@@ -2411,9 +2423,9 @@ ToolRegistry.register({
               <Show
                 when={running()}
                 fallback={
-                  <Show when={newLayout()}>
+                  <Show when={props.status === "completed"} fallback={<Show when={newLayout()}><span data-component="task-tool-icon"><Icon name="subagent" size="small" /></span></Show>}>
                     <span data-component="task-tool-icon">
-                      <Icon name="subagent" size="small" />
+                      <ToolCheckmark />
                     </span>
                   </Show>
                 }
@@ -2453,6 +2465,82 @@ ToolRegistry.register({
         onTriggerClick={navigate}
         onTriggerKeyDown={navigateKey}
       />
+    )
+  },
+})
+
+ToolRegistry.register({
+  name: "discussion_room",
+  render(props) {
+    const data = useData()
+    const i18n = useI18n()
+    const running = createMemo(() => props.status === "pending" || props.status === "running")
+    const topic = createMemo(() => (typeof props.input.topic === "string" ? props.input.topic : ""))
+    const managerId = createMemo(() => {
+      const value = props.metadata.managerSessionId
+      return typeof value === "string" && value ? value : undefined
+    })
+    const participantIds = createMemo(() => {
+      const value = props.metadata.specialistSessionIds
+      const specialists = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
+      return [managerId(), ...specialists].filter((id): id is string => typeof id === "string" && id.length > 0)
+    })
+    const participants = createMemo(() =>
+      participantIds().map((id) => {
+        const session = data.store.session.find((item) => item.id === id)
+        const agent = session?.agent ?? "specialist"
+        const role = agent.startsWith("discussion-") ? agent.slice("discussion-".length) : agent
+        const label = role.length > 0 ? role[0]!.toUpperCase() + role.slice(1) : agent
+        return { id, label, status: data.store.session_status[id]?.type ?? "idle" }
+      }),
+    )
+    const open = (id: string) => data.navigateToSession?.(id)
+
+    return (
+      <BasicTool
+        icon="speech-bubble"
+        status={props.status}
+        allowOpenWhilePending
+        trigger={() => (
+          <div data-slot="basic-tool-tool-info-structured" class="flex w-full min-w-0 flex-col gap-2">
+            <div data-slot="basic-tool-tool-info-main">
+              <span data-slot="basic-tool-tool-title">
+                <TextShimmer text={i18n.t("ui.tool.discussion")} active={running()} />
+              </span>
+              <Show when={topic()}>
+                <span data-slot="basic-tool-tool-subtitle" class="discussion-topic" title={topic()}>
+                  {topic()}
+                </span>
+              </Show>
+            </div>
+            <div class="flex flex-wrap items-center gap-1.5">
+              <For each={participants()}>
+                {(participant) => (
+                  <button
+                    type="button"
+                    class="flex items-center gap-1.5 rounded-md border border-border-weak-base bg-background-base px-2 py-1 text-11-medium text-text-strong transition-colors hover:bg-surface-raised-base-hover"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      open(participant.id)
+                    }}
+                  >
+                    <span
+                      class="size-1.5 rounded-full"
+                      classList={{
+                        "bg-icon-success-base": participant.status === "idle",
+                        "bg-icon-warning-base": participant.status === "busy",
+                      }}
+                    />
+                    {participant.label}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
+        )}
+      >
+        <div class="px-1 pb-2 text-11-regular text-text-weak">{i18n.t("ui.tool.discussion.hint")}</div>
+      </BasicTool>
     )
   },
 })

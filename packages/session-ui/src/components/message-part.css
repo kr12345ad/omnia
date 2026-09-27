@@ -1580,3 +1580,17 @@ body:not([data-new-layout]) {
     color: var(--text-weak);
   }
 }
+\n
+/* Discussion-room topics are full sentences, not short subtitles: let them
+   wrap to two lines instead of clipping mid-word on one ellipsis line. */
+[data-slot="basic-tool-tool-info-main"]:has(> .discussion-topic) {
+  align-items: flex-start;
+}
+
+.discussion-topic[data-slot="basic-tool-tool-subtitle"] {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
