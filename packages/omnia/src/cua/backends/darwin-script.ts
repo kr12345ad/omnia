@@ -3,6 +3,11 @@ import type { Bounds, Point } from "../../protocol"
 export const DARWIN_MAX_ELEMENTS = 1000
 export const DARWIN_MAX_DEPTH = 12
 
+// Shared across the native helper, the JXA fallback, and the backend so every
+// layer reports the same missing-permission guidance byte for byte.
+export const DARWIN_PERMISSION_WARNING =
+  "macOS Accessibility permission is not granted for this app; enable it in System Settings > Privacy & Security > Accessibility and relaunch Omnia."
+
 // JSON.stringify output is valid JavaScript except for U+2028/U+2029, which
 // are line terminators in JS source and would break the generated script.
 function jsString(value: unknown): string {
@@ -201,7 +206,11 @@ export function darwinObserveScript(options: DarwinObserveOptions = {}): string 
   }
   return `
 ObjC.import('CoreGraphics')
+ObjC.import('ApplicationServices')
 ${DARWIN_HELPERS}
+function omniaTrusted() {
+  try { return $.AXIsProcessTrusted() === true } catch (error) { return true }
+}
 function omniaWalk(element, index, depth, budget) {
   if (budget.count >= budget.maxElements || depth > budget.maxDepth) {
     budget.truncated = true
@@ -247,16 +256,26 @@ function main() {
   } catch (error) {
     screen = null
   }
+  if (!omniaTrusted()) return JSON.stringify({ error: 'permission', message: ${jsString(DARWIN_PERMISSION_WARNING)} })
   var se = Application('System Events')
+  // Default observation walks only the frontmost application. Enumerating and
+  // walking every running app costs one AppleEvent per attribute and routinely
+  // exceeds the time budget before the app the user is actually looking at is
+  // reached; other apps stay reachable through an explicit app filter.
   var processes = []
   try {
-    processes = se.applicationProcesses()
+    processes = filter === null ? se.applicationProcesses.whose({ frontmost: true })() : se.applicationProcesses()
   } catch (error) {
     return JSON.stringify({ error: 'permission', message: 'macOS accessibility access is unavailable; grant Omnia permission in System Settings > Privacy & Security > Accessibility.' })
   }
-  // Every System Events attribute read is an AppleEvent round trip, so a full
-  // desktop walk over background agents can take minutes. Skip background-only
-  // processes and stop at a hard time budget.
+  if (filter === null && processes.length === 0) {
+    try {
+      var all = se.applicationProcesses()
+      for (var f = 0; f < all.length && f < 40; f++) {
+        try { if (all[f].frontmost() === true) { processes = [all[f]]; break } } catch (error) {}
+      }
+    } catch (error) {}
+  }
   var startedAt = Date.now()
   var timeBudgetMs = config.timeBudgetMs
   var applications = []
@@ -273,11 +292,6 @@ function main() {
     var appName = ''
     try { appName = String(process.name() || '') } catch (error) { continue }
     if (filter !== null && appName.toLowerCase().indexOf(filter) < 0) continue
-    if (filter === null) {
-      var backgroundOnly = false
-      try { backgroundOnly = process.backgroundOnly() === true } catch (error) { backgroundOnly = false }
-      if (backgroundOnly) continue
-    }
     var pid = -1
     try { pid = Number(process.unixId()) } catch (error) { pid = -1 }
     var nodes = []
@@ -299,6 +313,12 @@ export const DARWIN_OBSERVE_SCRIPT = darwinObserveScript()
 
 export const DARWIN_PROBE_SCRIPT = `
 function main() {
+  try {
+    ObjC.import('ApplicationServices')
+    if ($.AXIsProcessTrusted() !== true) {
+      return JSON.stringify({ ok: false, error: 'permission', message: ${jsString(DARWIN_PERMISSION_WARNING)} })
+    }
+  } catch (error) {}
   try {
     var se = Application('System Events')
     var processes = se.applicationProcesses()
@@ -440,18 +460,16 @@ export type DarwinWindowAction = "focus" | "minimize" | "restore" | "close"
 export function darwinWindowScript(pid: number, windowIndex: number, action: DarwinWindowAction): string {
   const body: Record<DarwinWindowAction, string> = {
     focus: `
-  try { proc.frontmost = true } catch (error) {}
+  // NO silent frontmost fallback: bringing another app forward steals focus
+  // and must be an explicit user-approved step, not a hidden side effect of
+  // focusing a window. Only AXRaise / AXFocused are attempted here.
   var raised = omniaPerform(se, target, 'AXRaise')
   if (raised.ok) return JSON.stringify({ ok: true, method: 'raise' })
   try {
     target.focused = true
     return JSON.stringify({ ok: true, method: 'focused' })
   } catch (error) {}
-  try {
-    proc.frontmost = true
-    return JSON.stringify({ ok: true, method: 'frontmost' })
-  } catch (error) {}
-  return JSON.stringify({ ok: false, error: 'focus is not supported by this window' })`,
+  return JSON.stringify({ ok: false, error: 'focus is not supported by this window; frontmost fallback is disabled' })`,
     minimize: `
   var minimized = omniaPerform(se, target, 'AXMinimize')
   if (minimized.ok) return JSON.stringify(minimized)
@@ -547,6 +565,7 @@ export function darwinKeyBody(keys: string): string | undefined {
     .filter((part) => part.length > 0)
   const modifiers: string[] = []
   let key: string | undefined
+  let nonModifierCount = 0
   for (const part of parts) {
     const modifier = DARWIN_MODIFIERS[part]
     if (modifier !== undefined) {
@@ -554,7 +573,11 @@ export function darwinKeyBody(keys: string): string | undefined {
       continue
     }
     key = part
+    nonModifierCount += 1
   }
+  // A single keyCode/keystroke cannot express several non-modifier keys;
+  // keeping the last one would silently drop the rest of the combination.
+  if (nonModifierCount > 1) return undefined
   if (key === undefined) return undefined
   const using = modifiers.length === 0 ? "" : `, { using: [${modifiers.map((item) => JSON.stringify(item)).join(", ")}] }`
   const code = DARWIN_KEY_CODES[key]
@@ -589,6 +612,22 @@ function main() {
   var se = Application('System Events')
   ${steps}
   return JSON.stringify({ ok: true })
+}
+main()
+`
+}
+
+// macOS Secure Input (password prompts, Terminal "Secure Keyboard Entry")
+// routes keyboard events to the security agent and silently discards synthetic
+// ones while System Events still reports success. Probe it explicitly so
+// keyboard actions refuse instead of claiming delivery they cannot prove.
+export function darwinSecureInputScript(): string {
+  return `
+function main() {
+  var app = Application.currentApplication()
+  app.includeStandardAdditions = true
+  var output = app.doShellScript('/usr/sbin/ioreg -l -d 1 -k CGSSessionSecureInputPID')
+  return JSON.stringify({ ok: true, secureInput: output.indexOf('SecureInputPID') >= 0 })
 }
 main()
 `
@@ -778,7 +817,7 @@ function optionalNumber(value: unknown): number | undefined {
   return finiteNumber(value)
 }
 
-function parseDarwinNode(value: unknown): DarwinElementSnapshot | undefined {
+export function parseDarwinNode(value: unknown): DarwinElementSnapshot | undefined {
   if (!isRecord(value)) return undefined
   const bounds = parseDarwinBounds(value.bounds)
   const children = Array.isArray(value.children)

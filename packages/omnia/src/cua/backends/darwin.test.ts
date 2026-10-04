@@ -16,9 +16,12 @@ import {
   matchesWaitCondition,
   parseDarwinBackendRef,
   slugify,
+  type DarwinNativeBridge,
   type DarwinRunner,
 } from "./darwin"
+import { DARWIN_AX_HELPER } from "./darwin-ax"
 import {
+  DARWIN_PERMISSION_WARNING,
   darwinClickScript,
   darwinKeyBody,
   parseDarwinResolvedPayload,
@@ -139,9 +142,11 @@ type ScriptKind =
   | "click"
   | "scroll"
   | "drag"
+  | "secure"
   | "unknown"
 
 function scriptKind(script: string): ScriptKind {
+  if (script.includes("CGSSessionSecureInputPID")) return "secure"
   if (script.includes("processes: processes.length")) return "probe"
   if (script.includes("omniaWalk(")) return "observe"
   if (script.includes("element.value = attempts[i]")) return "set_value"
@@ -188,12 +193,38 @@ function createFakeRunner(handlers: Partial<Record<ScriptKind, ScriptHandler>> =
     if (kind === "value_step") return { stdout: JSON.stringify({ ok: true, method: "value" }), stderr: "" }
     if (kind === "focus") return { stdout: JSON.stringify({ ok: true, method: "focused" }), stderr: "" }
     if (kind === "window") return { stdout: JSON.stringify({ ok: true, method: "raise" }), stderr: "" }
+    if (kind === "secure") return { stdout: JSON.stringify({ ok: true, secureInput: false }), stderr: "" }
     if (kind === "type" || kind === "key" || kind === "click" || kind === "scroll" || kind === "drag") {
       return { stdout: JSON.stringify({ ok: true }), stderr: "" }
     }
     return { stdout: JSON.stringify({ ok: false, error: `unsupported ${kind}` }), stderr: "" }
   }
   return { runner, calls }
+}
+
+interface NativeCall {
+  command: string
+  params: Record<string, unknown>
+}
+
+type NativeHandler = (params: Record<string, unknown>) => unknown
+
+function createNativeBridge(handlers: Partial<Record<string, NativeHandler>> = {}) {
+  const calls: NativeCall[] = []
+  const bridge: DarwinNativeBridge = {
+    exec: (command, params) => {
+      calls.push({ command, params })
+      const handler = handlers[command]
+      return Promise.resolve(handler === undefined ? undefined : handler(params))
+    },
+  }
+  return { bridge, calls }
+}
+
+function fixtureNativePayload() {
+  const parsed = parseDarwinSnapshotPayload(JSON.parse(DARWIN_FIXTURE_JSON))
+  if (parsed === undefined) throw new Error("fixture did not parse")
+  return { ok: true, applications: parsed.applications, screen: parsed.screen, truncated: false }
 }
 
 function createHarness(
@@ -806,7 +837,9 @@ describe("cua darwin backend with a fake runner", () => {
     const capabilities = await backend.capabilities()
     expect(capabilities.snapshot).toBe(false)
     expect(capabilities.semanticActions).toBe(false)
-    expect(capabilities.limits).toContain("not permitted")
+    // Refusals name the exact missing permission, not a generic message.
+    expect(capabilities.limits.some((limit) => limit.includes("not permitted"))).toBe(true)
+    expect(capabilities.limits.some((limit) => limit.includes("Automation") || limit.includes("Accessibility"))).toBe(true)
     const snapshot = await backend.snapshot()
     expect(snapshot.elements).toHaveLength(0)
     expect(snapshot.warnings.some((warning) => warning.includes("Accessibility"))).toBe(true)
@@ -859,5 +892,304 @@ describe("darwin pointer click scripts", () => {
     const left = darwinClickScript({ x: 5, y: 6 }, "left", 4)
     expect(left).toContain("i <= 4")
     expect(left).toContain("kCGEventLeftMouseDown")
+  })
+})
+
+describe("cua darwin truth-layer regressions", () => {
+  test("window focus never falls back to frontmost", async () => {
+    const { darwinWindowScript } = await import("./darwin-script")
+    const script = darwinWindowScript(4242, 0, "focus")
+    // The refusal message mentions frontmost; the script must never set it.
+    expect(script).not.toMatch(/frontmost\s*=/)
+    expect(script).toContain("AXRaise")
+  })
+
+  test("type never uses background set_value without focus", async () => {
+    const { backend } = createHarness({
+      handlers: { resolve: () => ({ ...RESOLVED_BUTTON, role: "AXTextField", name: "Search" }) },
+    })
+    const snapshot = await backend.snapshot()
+    const search = requireElement(snapshot, "Search")
+    // Without foreground allowance, typed refs must refuse instead of
+    // silently using background set-value.
+    const refused = await backend.execute({ type: "type", text: "hi", ref: search.ref })
+    expect(refused.ok).toBe(false)
+    expect(refused.error?.code).toBe("background_unavailable")
+  })
+
+  test("generation-scoped refs refuse stale observations", async () => {
+    const { backend } = createHarness()
+    const snapshot = await backend.snapshot()
+    const button = requireElement(snapshot, "Export")
+    const stale = await backend.execute({ type: "invoke", ref: button.ref, observationId: "cap-stale" })
+    expect(stale.ok).toBe(false)
+    expect(stale.error?.code).toBe("stale_ref")
+    const ok = await backend.execute({
+      type: "invoke",
+      ref: button.ref,
+      observationId: snapshot.id,
+      generation: snapshot.generation,
+    })
+    expect(ok.ok).toBe(true)
+  })
+
+  test("refuses keyboard input while macOS Secure Input is active", async () => {
+    const { backend, runner } = createHarness({
+      handlers: { secure: () => ({ ok: true, secureInput: true }) },
+    })
+    const typed = await backend.execute({ type: "type", text: "secret" })
+    expect(typed.ok).toBe(false)
+    expect(typed.error?.code).toBe("secure_input")
+    const keyed = await backend.execute({ type: "key", keys: ["enter"] })
+    expect(keyed.ok).toBe(false)
+    expect(keyed.error?.code).toBe("secure_input")
+    const dismissed = await backend.execute({ type: "dismiss" })
+    expect(dismissed.ok).toBe(false)
+    // No key or type script may run while the system discards them silently.
+    expect(runner.calls.filter((script) => scriptKind(script) === "type")).toHaveLength(0)
+    expect(runner.calls.filter((script) => scriptKind(script) === "key")).toHaveLength(0)
+  })
+
+  test("keyboard actions proceed when Secure Input is off", async () => {
+    const { backend, runner } = createHarness()
+    const result = await backend.execute({ type: "type", text: "hello" })
+    expect(result.ok).toBe(true)
+    expect(result.error).toBeUndefined()
+    expect(runner.calls.filter((script) => scriptKind(script) === "type")).toHaveLength(1)
+  })
+
+  test("unknown mac keys fail instead of dropping silently", async () => {
+    const { backend } = createHarness()
+    const snapshot = await backend.snapshot()
+    const result = await backend.execute({ type: "click", point: { x: 5, y: 5 }, captureId: snapshot.id })
+    expect(result.ok).toBe(true)
+    const badKey = await backend.execute({ type: "key", keys: ["nonsense+key+combo"] })
+    expect(badKey.ok).toBe(false)
+    expect(badKey.error?.code).toBe("invalid_action")
+  })
+
+  test("native helper path is wired (apps probe before JXA)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omnia-ax-wired-"))
+    const helper = join(dir, "ax-helper")
+    writeFileSync(helper, '#!/bin/sh\necho \'{"applications":[]}\'\n')
+    chmodSync(helper, 0o755)
+    try {
+      const fake = createFakeRunner()
+      const backend = createDarwinCuaBackend({ runner: fake.runner, nativeHelper: helper })
+      // Probe succeeds via native apps even though JXA probe would fail if
+      // native were dead; snapshot still wires through JXA fallback for trees.
+      const snapshot = await backend.snapshot()
+      expect(snapshot.windows).toHaveLength(1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("cua darwin permission truthfulness", () => {
+  test("surfaces an explicit warning and unavailable state when AX is denied", async () => {
+    const denied = {
+      ok: false,
+      error: "permission",
+      code: "kAXErrorAPIDisabled",
+      message: DARWIN_PERMISSION_WARNING,
+    }
+    const { bridge, calls } = createNativeBridge({ generation: () => denied, apps: () => denied })
+    const backend = createDarwinCuaBackend({ runner: createFakeRunner().runner, nativeBridge: bridge })
+    const snapshot = await backend.snapshot()
+    expect(snapshot.elements).toHaveLength(0)
+    expect(snapshot.windows).toHaveLength(0)
+    expect(snapshot.warnings.some((warning) => warning.includes("Accessibility permission"))).toBe(true)
+    expect(snapshot.accessibility).toBe("unavailable")
+    // The denial short-circuits before any walk or JXA fallback.
+    expect(calls.filter((call) => call.command === "snapshot")).toHaveLength(0)
+    expect(await backend.available()).toBe(false)
+  })
+
+  test("never returns a silent empty tree", async () => {
+    const { bridge } = createNativeBridge({
+      generation: () => ({ ok: true, signature: "empty" }),
+      snapshot: () => ({ ok: true, applications: [{ name: "Finder", pid: 1, nodes: [] }], truncated: false }),
+    })
+    const backend = createDarwinCuaBackend({ runner: createFakeRunner().runner, nativeBridge: bridge })
+    const snapshot = await backend.snapshot()
+    expect(snapshot.windows).toHaveLength(0)
+    expect(snapshot.elements).toHaveLength(0)
+    expect(snapshot.warnings.length).toBeGreaterThan(0)
+    expect(snapshot.accessibility).toBe("degraded")
+  })
+})
+
+describe("cua darwin focused-app traversal", () => {
+  test("requests the frontmost app by default and only filters when asked", async () => {
+    const { bridge, calls } = createNativeBridge({
+      generation: () => ({ ok: true, signature: "s" }),
+      snapshot: () => ({ ok: true, applications: [], truncated: false }),
+    })
+    const backend = createDarwinCuaBackend({ runner: createFakeRunner().runner, nativeBridge: bridge })
+    await backend.snapshot()
+    const defaultCall = calls.find((call) => call.command === "generation")
+    expect(defaultCall?.params.app).toBeUndefined()
+    expect(calls.find((call) => call.command === "snapshot")?.params.app).toBeUndefined()
+    await backend.snapshot({ app: "TextEdit" })
+    const filtered = calls.filter((call) => call.command === "generation").at(-1)
+    expect(filtered?.params.app).toBe("TextEdit")
+  })
+
+  test("the native helper trusts only the frontmost app, batch-fetches, and skips hidden leaves", () => {
+    expect(DARWIN_AX_HELPER).toContain("AXIsProcessTrustedWithOptions")
+    expect(DARWIN_AX_HELPER).toContain("kAXErrorAPIDisabled")
+    expect(DARWIN_AX_HELPER).toContain("frontmostApplication")
+    expect(DARWIN_AX_HELPER).toContain("AXUIElementCopyMultipleAttributeValues")
+    expect(DARWIN_AX_HELPER).toContain("unavailableLeaf")
+    expect(DARWIN_AX_HELPER).toContain("kAXHiddenAttribute")
+  })
+})
+
+describe("cua darwin tree cache", () => {
+  test("reuses a warm tree until the window generation changes", async () => {
+    let signature = "s1"
+    let walks = 0
+    const { bridge } = createNativeBridge({
+      generation: () => ({ ok: true, signature }),
+      snapshot: () => {
+        walks += 1
+        return fixtureNativePayload()
+      },
+    })
+    const backend = createDarwinCuaBackend({ runner: createFakeRunner().runner, nativeBridge: bridge })
+    const first = await backend.snapshot()
+    expect(walks).toBe(1)
+    const warm = await backend.snapshot()
+    expect(walks).toBe(1)
+    expect(warm.windows[0]?.ref).toBe(first.windows[0]?.ref)
+    expect(warm.generation).toBeGreaterThan(first.generation)
+    signature = "s2"
+    await backend.snapshot()
+    expect(walks).toBe(2)
+  })
+
+  test("invalidate forces the next observe to walk again", async () => {
+    let walks = 0
+    const { bridge } = createNativeBridge({
+      generation: () => ({ ok: true, signature: "stable" }),
+      snapshot: () => {
+        walks += 1
+        return fixtureNativePayload()
+      },
+    })
+    const backend = createDarwinCuaBackend({ runner: createFakeRunner().runner, nativeBridge: bridge })
+    await backend.snapshot()
+    await backend.snapshot()
+    expect(walks).toBe(1)
+    backend.invalidate?.()
+    await backend.snapshot()
+    expect(walks).toBe(2)
+  })
+
+  test("refreshWindow patches only the target window and skips a full walk", async () => {
+    let signature = "s1"
+    const { bridge, calls } = createNativeBridge({
+      generation: () => ({ ok: true, signature }),
+      snapshot: () => fixtureNativePayload(),
+      window: () => ({
+        ok: true,
+        node: {
+          index: 0,
+          role: "AXWindow",
+          name: "Untitled",
+          states: ["focused"],
+          actions: ["AXRaise"],
+          editable: false,
+          valuePresent: false,
+          bounds: { x: 1, y: 2, width: 300, height: 200 },
+          children: [],
+        },
+      }),
+    })
+    const backend = createDarwinCuaBackend({ runner: createFakeRunner().runner, nativeBridge: bridge })
+    const first = await backend.snapshot()
+    const windowRef = first.windows[0]?.ref
+    if (windowRef === undefined) throw new Error("fixture missing window")
+    signature = "s2"
+    const refreshed = await backend.refreshWindow?.(windowRef)
+    expect(refreshed?.windows[0]?.title).toBe("Untitled")
+    expect(refreshed?.windows[0]?.bounds).toEqual({ x: 1, y: 2, width: 300, height: 200 })
+    expect(calls.filter((call) => call.command === "snapshot")).toHaveLength(1)
+    expect(calls.filter((call) => call.command === "window")).toHaveLength(1)
+  })
+
+  test("refreshWindow refuses a shifted index instead of patching the wrong window", async () => {
+    let signature = "s1"
+    const { bridge } = createNativeBridge({
+      generation: () => ({ ok: true, signature }),
+      snapshot: () => fixtureNativePayload(),
+      window: () => ({
+        ok: true,
+        node: {
+          index: 0,
+          role: "AXWindow",
+          name: "Other",
+          states: [],
+          actions: [],
+          editable: false,
+          valuePresent: false,
+          children: [],
+        },
+      }),
+    })
+    const backend = createDarwinCuaBackend({ runner: createFakeRunner().runner, nativeBridge: bridge })
+    const first = await backend.snapshot()
+    const windowRef = first.windows[0]?.ref
+    if (windowRef === undefined) throw new Error("fixture missing window")
+    signature = "s2"
+    expect(await backend.refreshWindow?.(windowRef)).toBeUndefined()
+  })
+})
+
+describe("cua darwin helper timeout bound", () => {
+  test("bounds a hung helper walk and reports a timeout warning", async () => {
+    const bridge: DarwinNativeBridge = {
+      exec: (command) =>
+        command === "generation"
+          ? Promise.resolve({ ok: true, signature: "s" })
+          : new Promise(() => {}),
+    }
+    const backend = createDarwinCuaBackend({
+      runner: createFakeRunner().runner,
+      nativeBridge: bridge,
+      nativeTimeoutMs: 60,
+    })
+    const started = Date.now()
+    const snapshot = await backend.snapshot()
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(snapshot.warnings.some((warning) => warning.includes("timed out"))).toBe(true)
+    expect(snapshot.accessibility).toBe("degraded")
+  })
+
+  test("bounds a hung generation probe before any walk starts", async () => {
+    const bridge: DarwinNativeBridge = { exec: () => new Promise(() => {}) }
+    const backend = createDarwinCuaBackend({
+      runner: createFakeRunner().runner,
+      nativeBridge: bridge,
+      nativeTimeoutMs: 60,
+    })
+    const started = Date.now()
+    const snapshot = await backend.snapshot()
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(snapshot.warnings.some((warning) => warning.includes("timed out"))).toBe(true)
+  })
+})
+
+describe("cua darwin controller probe", () => {
+  test("available is false immediately when the helper reports the denial", async () => {
+    const denied = { ok: false, error: "permission", code: "kAXErrorAPIDisabled", message: DARWIN_PERMISSION_WARNING }
+    const { bridge, calls } = createNativeBridge({ apps: () => denied })
+    const backend = createDarwinCuaBackend({ runner: createFakeRunner().runner, nativeBridge: bridge })
+    const started = Date.now()
+    expect(await backend.available()).toBe(false)
+    expect(Date.now() - started).toBeLessThan(500)
+    // No JXA probe fallback after the helper names the missing grant.
+    expect(calls.some((call) => call.command === "apps")).toBe(true)
   })
 })

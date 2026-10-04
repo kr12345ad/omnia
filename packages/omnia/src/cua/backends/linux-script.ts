@@ -15,11 +15,46 @@ import re
 import sys
 import time
 
-LIMITS = {"max_apps": 40, "max_depth": 16, "max_nodes": 4000, "text_limit": 500}
+LIMITS = {"max_apps": 40, "max_depth": 28, "max_nodes": 4000, "text_limit": 500}
 
 ${ATSPI_STATE_PY}
 
 ${ATSPI_KEY_PY}
+
+# raw_role() lowercases and strips spaces, so every role below uses that
+# vocabulary ("document text" arrives as "documenttext").
+TEXT_ROLES = {
+    "text", "paragraph", "documenttext", "documentweb", "documentspreadsheet",
+    "documentpresentation", "documentemail", "label", "static", "heading",
+    "caption", "entry", "passwordtext", "terminal", "comment",
+}
+
+VALUE_ROLES = {
+    "slider", "spinbutton", "scrollbar", "progressbar", "levelbar", "combobox",
+    "entry",
+}
+
+ATTRIBUTE_ROLES = {
+    "slider", "spinbutton", "scrollbar", "progressbar", "levelbar", "combobox",
+    "entry", "passwordtext",
+}
+
+# Containers that only add depth: a nameless one with no kept descendants is
+# dropped before serialization.
+PASSIVE_CONTAINER_ROLES = {
+    "panel", "filler", "viewport", "scrollpane", "rootpane", "layeredpane",
+    "glasspane", "redundantobject", "separator", "section", "grouping", "icon",
+    "image", "canvas", "drawingarea", "htmlcontainer",
+}
+
+# Passive roles that almost never expose actions; skipping the probe saves one
+# AT-SPI round trip per node.
+ACTIONLESS_ROLES = {
+    "text", "paragraph", "label", "static", "filler", "panel", "separator",
+    "viewport", "scrollpane", "rootpane", "layeredpane", "glasspane",
+    "documenttext", "documentweb", "documentspreadsheet", "documentpresentation",
+    "documentemail",
+}
 
 WINDOW_ACTIONS = {
     "activate": ["activate", "focus", "raise"],
@@ -293,20 +328,249 @@ def child_at(accessible, index):
     except Exception:
         return accessible.getChildAtIndex(index)
 
-def make_node(accessible, path, index, limits):
+
+# Per-application snapshot cache. The helper owns it so a find that requests
+# more elements than an observe still reads the same full walk, and so a warm
+# observe never re-walks. AT-SPI events bump per-application versions; when no
+# event arrived, a cheap token (event versions + desktop index + top-level
+# child count + the cached focused path still being focused) invalidates the
+# entry before it can go stale.
+APP_CACHE = {}
+EVENTS = {"apps": {}, "global": 0, "focus_key": None}
+
+
+def app_pid(accessible):
+    try:
+        value = accessible.get_process_id()
+        return int(value) if value else None
+    except Exception:
+        return None
+
+
+def app_name(accessible):
+    return safe_str(getattr(accessible, "name", None), 500)
+
+
+def app_cache_key(accessible):
+    pid = app_pid(accessible)
+    if pid is not None:
+        return "pid:" + str(pid)
+    return "name:" + str(app_name(accessible))
+
+
+def event_app_key(source):
+    if source is None:
+        return None
+    try:
+        application = source.getApplication()
+    except Exception:
+        try:
+            import pyatspi as atspi_module
+            application = atspi_module.getApplication(source)
+        except Exception:
+            return None
+    if application is None:
+        return None
+    return app_cache_key(application)
+
+
+def on_event(event, kind):
+    try:
+        key = event_app_key(getattr(event, "source", None))
+    except Exception:
+        key = None
+    if key is None:
+        EVENTS["global"] += 1
+        return
+    EVENTS["apps"][key] = EVENTS["apps"].get(key, 0) + 1
+    if kind in ("focus", "window:activate"):
+        EVENTS["focus_key"] = key
+
+
+def register_events():
+    for kind in (
+        "window:activate", "window:create", "window:destroy", "focus",
+        "object:children-changed", "object:property-change:accessible-name",
+        "object:text-changed",
+    ):
+        def listener(event, event_kind=kind):
+            try:
+                on_event(event, event_kind)
+            except Exception:
+                pass
+        try:
+            pyatspi.Registry.registerEventListener(listener, kind)
+        except Exception:
+            pass
+
+
+def pump_events():
+    try:
+        pyatspi.Registry.pumpQueuedEvents()
+    except Exception:
+        pass
+
+
+def focus_path_still(path, name):
+    if not path:
+        return False
+    try:
+        node = pyatspi.Registry().getDesktop(0)
+        for index in path:
+            node = child_at(node, int(index))
+            if node is None:
+                return False
+        return "focused" in node_states(node) and (getattr(node, "name", None) or "") == (name or "")
+    except Exception:
+        return False
+
+
+def app_token(index, app, key):
+    version = EVENTS["apps"].get(key, 0)
+    try:
+        children = app.get_child_count()
+    except Exception:
+        children = -1
+    focus_ok = 1
+    cached = APP_CACHE.get(key)
+    if cached is not None and cached.get("focus") is not None:
+        focus_ok = 1 if focus_path_still(cached["focus"]["path"], cached["focus"]["name"]) else 0
+    return "v%d:g%d:i%d:c%d:f%d" % (version, EVENTS["global"], index, children, focus_ok)
+
+
+def compact(node):
+    # Collapse generic containers that carry nothing an agent can act on and
+    # have no surviving descendants. Child paths stay absolute, so element refs
+    # remain stable across a generation.
+    kept = []
+    for child in node.get("children") or []:
+        compacted = compact(child)
+        if compacted is not None:
+            kept.append(compacted)
+    node["children"] = kept
+    if node["role"] in PASSIVE_CONTAINER_ROLES:
+        if (
+            not kept
+            and not node.get("actions")
+            and not node.get("name")
+            and not node.get("text")
+            and not node.get("value")
+            and "focused" not in node.get("states", [])
+        ):
+            return None
+    return node
+
+
+def select_apps(desktop, params):
+    try:
+        total = desktop.get_child_count()
+    except Exception:
+        total = desktop.childCount
+    max_apps = int(params.get("max_apps") or LIMITS["max_apps"])
+    app_filter = params.get("app")
+    scope = params.get("scope") or ("app" if app_filter else "all")
+    if scope == "windows":
+        scope = "all"
+    active_pid = params.get("active_pid")
+    candidates = []
+    for index in range(min(total, max_apps)):
+        app = child_at(desktop, index)
+        if app is None:
+            continue
+        name = app_name(app)
+        if name is None:
+            continue
+        if app_filter is not None and str(app_filter).lower() not in name.lower():
+            continue
+        candidates.append((index, app, name, app_pid(app)))
+    fallback = False
+    focused_key = None
+    if scope == "focused":
+        chosen = None
+        if active_pid is not None:
+            try:
+                wanted = int(active_pid)
+            except Exception:
+                wanted = None
+            if wanted is not None:
+                for item in candidates:
+                    if item[3] == wanted:
+                        chosen = item
+                        break
+        if chosen is None and EVENTS.get("focus_key"):
+            for item in candidates:
+                if app_cache_key(item[1]) == EVENTS["focus_key"]:
+                    chosen = item
+                    break
+        if chosen is None:
+            for item in candidates:
+                if "active" in node_states(item[1]):
+                    chosen = item
+                    break
+                try:
+                    frames = item[1].get_child_count()
+                except Exception:
+                    frames = 0
+                for frame_index in range(min(frames, 12)):
+                    frame = child_at(item[1], frame_index)
+                    if frame is not None and "active" in node_states(frame):
+                        chosen = item
+                        break
+                if chosen is not None:
+                    break
+        if chosen is not None:
+            focused_key = app_cache_key(chosen[1])
+            candidates = [chosen]
+        else:
+            # The X11 active window has no AT-SPI application (a native X11 app
+            # without accessibility): return nothing instead of walking every
+            # application on the desktop. Without any active-window signal the
+            # desktop is not described well enough to narrow the scope, so keep
+            # the previous all-applications behavior.
+            fallback = True
+            if active_pid is not None:
+                candidates = []
+    return candidates, fallback, focused_key
+
+
+def make_node(accessible, path, index, limits, states=None):
+    states = node_states(accessible) if states is None else states
+    role = raw_role(accessible) or "unknown"
+    name = safe_str(getattr(accessible, "name", None), limits["text_limit"])
+    actions = [] if role in ACTIONLESS_ROLES else node_actions(accessible)
+    bounds = component_bounds(accessible)
+    editable = "editable" in states
+    text = node_text(accessible, limits["text_limit"]) if (role in TEXT_ROLES or editable) else None
+    value = node_value(accessible, limits["text_limit"]) if role in VALUE_ROLES else None
+    attributes = node_attributes(accessible) if role in ATTRIBUTE_ROLES else {}
+    component = bounds is not None
+    if not component:
+        try:
+            accessible.queryComponent()
+            component = True
+        except Exception:
+            component = False
+    description = None
+    if not name or actions:
+        description = safe_str(getattr(accessible, "description", None), limits["text_limit"])
     return {
         "index": index,
         "path": list(path),
-        "role": raw_role(accessible) or "unknown",
-        "name": safe_str(getattr(accessible, "name", None), limits["text_limit"]),
-        "description": safe_str(getattr(accessible, "description", None), limits["text_limit"]),
-        "text": node_text(accessible, limits["text_limit"]),
-        "value": node_value(accessible, limits["text_limit"]),
-        "states": node_states(accessible),
-        "actions": node_actions(accessible),
-        "bounds": component_bounds(accessible),
-        "attributes": node_attributes(accessible),
-        "interfaces": interface_flags(accessible),
+        "role": role,
+        "name": name,
+        "description": description,
+        "text": text,
+        "value": value,
+        "states": states,
+        "actions": actions,
+        "bounds": bounds,
+        "attributes": attributes,
+        "interfaces": {
+            "component": component,
+            "action": len(actions) > 0,
+            "editable": editable,
+            "value": role in VALUE_ROLES,
+        },
         "children": [],
     }
 
@@ -375,45 +639,33 @@ def perform_first(target, names):
     raise RuntimeError("no supported action: " + str(last_error))
 
 
-def cmd_snapshot(params):
+def cmd_probe(params):
     require_pyatspi()
-    limits = dict(LIMITS)
-    for key in ("max_apps", "max_depth", "max_nodes", "text_limit"):
-        if params.get(key) is not None:
-            limits[key] = int(params.get(key))
-    app_filter = params.get("app")
+    pump_events()
     desktop = pyatspi.Registry().getDesktop(0)
-    try:
-        total = desktop.get_child_count()
-    except Exception:
-        total = desktop.childCount
-    budget = {"count": 0, "truncated": False}
-    applications = []
-    # (node dict, accessible, path, depth) flattened across every matching
-    # application. Interleaving apps in one queue walks the whole desktop
-    # breadth-first, so a single huge tree (a browser or a deep menu) cannot
-    # consume the node budget before shallow controls in other applications
-    # are collected. Depth-first walking starved exactly those controls.
-    pending = []
-    for index in range(min(total, limits["max_apps"])):
-        app = child_at(desktop, index)
-        if app is None:
-            continue
-        try:
-            name = app.name
-        except Exception as error:
-            applications.append({"name": None, "error": str(error), "nodes": []})
-            continue
-        if app_filter is not None and (not name or str(app_filter).lower() not in str(name).lower()):
-            continue
-        try:
-            root = make_node(app, [index], index, limits)
-        except Exception as error:
-            applications.append({"name": name, "error": str(error), "nodes": []})
-            continue
-        budget["count"] += 1
-        applications.append({"name": name, "error": None, "nodes": [root]})
-        pending.append((root, app, [index], 0))
+    targets, fallback, focused_key = select_apps(desktop, params)
+    apps = []
+    for index, app, name, pid in targets:
+        key = app_cache_key(app)
+        apps.append({
+            "key": key,
+            "signature": app_token(index, app, key),
+            "index": index,
+            "name": name,
+            "pid": pid,
+            "cached": key in APP_CACHE,
+        })
+    return {"apps": apps, "fallback": fallback, "focused": focused_key}
+
+
+def walk_app(app, index, limits, budget, windows_only=False):
+    root_states = node_states(app)
+    root = make_node(app, [index], index, limits, root_states)
+    budget["count"] += 1
+    focus = {"path": [index], "name": root.get("name")} if "focused" in root_states else None
+    # (node dict, accessible, path, depth) flattened breadth-first so a deep
+    # menu cannot consume the budget before shallow controls are collected.
+    pending = [(root, app, [index], 0)]
     head = 0
     while head < len(pending):
         node, target, node_path, depth = pending[head]
@@ -431,17 +683,95 @@ def cmd_snapshot(params):
         if total_children > 200:
             budget["truncated"] = True
         for child_index in range(min(total_children, 200)):
-            if budget["count"] >= limits["max_nodes"] or depth + 1 > limits["max_depth"]:
+            if budget["count"] >= limits["max_nodes"]:
                 budget["truncated"] = True
+                break
+            if depth + 1 > limits["max_depth"]:
+                if total_children > 0:
+                    budget["truncated"] = True
                 break
             child = child_at(target, child_index)
             if child is None:
                 continue
+            child_states = node_states(child)
+            if "offscreen" in child_states:
+                budget["pruned"] += 1
+                continue
             budget["count"] += 1
-            child_node = make_node(child, node_path + [child_index], child_index, limits)
+            child_path = node_path + [child_index]
+            child_node = make_node(child, child_path, child_index, limits, child_states)
             node["children"].append(child_node)
-            pending.append((child_node, child, node_path + [child_index], depth + 1))
-    return {"applications": applications, "screen": desktop_extents(), "truncated": budget["truncated"]}
+            if focus is None and "focused" in child_states:
+                focus = {"path": child_path, "name": child_node.get("name")}
+            if not windows_only:
+                pending.append((child_node, child, child_path, depth + 1))
+    compact(root)
+    return root, focus
+
+
+def cmd_snapshot(params):
+    require_pyatspi()
+    pump_events()
+    limits = dict(LIMITS)
+    for key in ("max_apps", "max_depth", "max_nodes", "text_limit"):
+        if params.get(key) is not None:
+            limits[key] = int(params.get(key))
+    force = params.get("force") is True
+    windows_only = params.get("windows_only") is True
+    desktop = pyatspi.Registry().getDesktop(0)
+    targets, fallback, focused_key = select_apps(desktop, params)
+    budget = {"count": 0, "truncated": False, "pruned": 0}
+    applications = []
+    hits = 0
+    for index, app, name, pid in targets:
+        key = app_cache_key(app) + ("|windows" if windows_only else "")
+        token = app_token(index, app, key)
+        cached = APP_CACHE.get(key)
+        if cached is not None and cached.get("token") == token and cached.get("index") == index and not force:
+            payload = dict(cached["payload"])
+            payload["cached"] = True
+            if cached.get("truncated"):
+                budget["truncated"] = True
+            applications.append(payload)
+            hits += 1
+            continue
+        try:
+            root, focus = walk_app(app, index, limits, budget, windows_only)
+        except Exception as error:
+            applications.append({"name": name, "error": str(error), "nodes": []})
+            continue
+        entry = {
+            "token": token,
+            "index": index,
+            "focus": focus,
+            "payload": {
+                "name": name,
+                "pid": pid,
+                "index": index,
+                "nodes": [root],
+                "key": key,
+                "signature": token,
+                "cached": False,
+            },
+            "truncated": budget["truncated"],
+        }
+        APP_CACHE[key] = entry
+        # Recompute the token now that the new focus path is cached: storing the
+        # pre-walk token would make a focus transition look changed immediately
+        # after the walk and force a second walk.
+        final_token = app_token(index, app, key)
+        entry["token"] = final_token
+        entry["payload"]["signature"] = final_token
+        applications.append(entry["payload"])
+    return {
+        "applications": applications,
+        "screen": desktop_extents(),
+        "truncated": budget["truncated"],
+        "pruned": budget["pruned"],
+        "cache_hits": hits,
+        "fallback": fallback,
+        "focused": focused_key,
+    }
 
 
 def cmd_resolve(params):
@@ -781,6 +1111,7 @@ def cmd_drag(params):
 
 
 COMMANDS = {
+    "probe": cmd_probe,
     "snapshot": cmd_snapshot,
     "resolve": cmd_resolve,
     "act": cmd_act,
@@ -812,6 +1143,11 @@ def dispatch(message):
 
 
 def main():
+    if pyatspi is not None:
+        try:
+            register_events()
+        except Exception:
+            pass
     emit({
         "ready": True,
         "ok": pyatspi is not None,
@@ -870,12 +1206,33 @@ export interface AtspiApplicationSnapshot {
   pid?: number
   error?: string
   nodes: AtspiNodeSnapshot[]
+  // Per-application cache identity and token emitted by the helper. Present
+  // only on real helper responses; fixtures may omit them.
+  key?: string
+  signature?: string
+  index?: number
+  cached?: boolean
 }
 
 export interface AtspiSnapshotPayload {
   applications: AtspiApplicationSnapshot[]
   screen?: { x?: number; y?: number; width: number; height: number }
   truncated: boolean
+}
+
+export interface AtspiAppSignature {
+  key: string
+  signature: string
+  index: number
+  name?: string
+  pid?: number
+  cached: boolean
+}
+
+export interface AtspiProbePayload {
+  apps: AtspiAppSignature[]
+  fallback: boolean
+  focused?: string
 }
 
 export interface ResolvedElementPayload {
@@ -1002,11 +1359,16 @@ export function parseSnapshotPayload(value: unknown): AtspiSnapshotPayload | und
   const applications = rawApplications.flatMap((application): AtspiApplicationSnapshot[] => {
     if (!isRecord(application)) return []
     const pid = finiteNumber(application.pid)
+    const index = finiteNumber(application.index)
     return [
       {
         ...(typeof application.name === "string" ? { name: application.name } : {}),
         ...(pid === undefined ? {} : { pid }),
         ...(typeof application.error === "string" ? { error: application.error } : {}),
+        ...(typeof application.key === "string" ? { key: application.key } : {}),
+        ...(typeof application.signature === "string" ? { signature: application.signature } : {}),
+        ...(index === undefined ? {} : { index: Math.trunc(index) }),
+        ...(application.cached === true ? { cached: true } : {}),
         nodes: Array.isArray(application.nodes)
           ? application.nodes.flatMap((node): AtspiNodeSnapshot[] => {
               const parsed = parseNode(node)
@@ -1034,6 +1396,30 @@ export function parseSnapshotPayload(value: unknown): AtspiSnapshotPayload | und
     applications,
     ...(screen === undefined ? {} : { screen }),
     truncated: value.truncated === true,
+  }
+}
+
+export function parseProbePayload(value: unknown): AtspiProbePayload | undefined {
+  if (!isRecord(value) || !Array.isArray(value.apps)) return undefined
+  const apps = value.apps.flatMap((app): AtspiAppSignature[] => {
+    if (!isRecord(app) || typeof app.key !== "string" || typeof app.signature !== "string") return []
+    const index = finiteNumber(app.index)
+    const pid = finiteNumber(app.pid)
+    return [
+      {
+        key: app.key,
+        signature: app.signature,
+        index: index === undefined ? 0 : Math.trunc(index),
+        ...(typeof app.name === "string" ? { name: app.name } : {}),
+        ...(pid === undefined ? {} : { pid }),
+        cached: app.cached === true,
+      },
+    ]
+  })
+  return {
+    apps,
+    fallback: value.fallback === true,
+    ...(typeof value.focused === "string" ? { focused: value.focused } : {}),
   }
 }
 

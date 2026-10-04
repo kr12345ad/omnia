@@ -40,9 +40,98 @@ x11.XQueryPointer.argtypes = [
     ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
     ctypes.POINTER(ctypes.c_uint),
 ]
+# Every declared call is required: without argtypes ctypes truncates the
+# 64-bit Display pointer and the helper segfaults inside libX11.
+x11.XMoveResizeWindow.restype = ctypes.c_int
+x11.XMoveResizeWindow.argtypes = [
+    ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint,
+]
+x11.XGetWindowProperty.restype = ctypes.c_int
+x11.XGetWindowProperty.argtypes = [
+    ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_long, ctypes.c_long,
+    ctypes.c_int, ctypes.c_ulong,
+    ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+    ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+    ctypes.POINTER(ctypes.POINTER(ctypes.c_ulong)),
+]
+x11.XFree.restype = ctypes.c_int
+x11.XFree.argtypes = [ctypes.c_void_p]
+x11.XDisplayWidth.restype = ctypes.c_int
+x11.XDisplayWidth.argtypes = [ctypes.c_void_p, ctypes.c_int]
+x11.XDisplayHeight.restype = ctypes.c_int
+x11.XDisplayHeight.argtypes = [ctypes.c_void_p, ctypes.c_int]
 xtst.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
 xtst.XTestFakeButtonEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
 xtst.XTestFakeMotionEvent.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+xtst.XTestGrabControl.argtypes = [ctypes.c_void_p, ctypes.c_int]
+
+
+class XWindowAttributes(ctypes.Structure):
+    # Only map_state is read; the whole layout is declared so ctypes sizes the
+    # struct the way libX11 does.
+    _fields_ = [
+        ("x", ctypes.c_int),
+        ("y", ctypes.c_int),
+        ("width", ctypes.c_int),
+        ("height", ctypes.c_int),
+        ("border_width", ctypes.c_int),
+        ("depth", ctypes.c_int),
+        ("visual", ctypes.c_void_p),
+        ("root", ctypes.c_ulong),
+        ("class", ctypes.c_int),
+        ("bit_gravity", ctypes.c_int),
+        ("win_gravity", ctypes.c_int),
+        ("backing_store", ctypes.c_int),
+        ("backing_planes", ctypes.c_ulong),
+        ("backing_pixel", ctypes.c_ulong),
+        ("save_under", ctypes.c_int),
+        ("colormap", ctypes.c_ulong),
+        ("map_installed", ctypes.c_int),
+        ("map_state", ctypes.c_int),
+        ("all_event_masks", ctypes.c_long),
+        ("your_event_mask", ctypes.c_long),
+        ("do_not_propagate_mask", ctypes.c_long),
+        ("override_redirect", ctypes.c_int),
+        ("screen", ctypes.c_void_p),
+    ]
+
+
+class XErrorEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_int),
+        ("display", ctypes.c_void_p),
+        ("resourceid", ctypes.c_ulong),
+        ("serial", ctypes.c_ulong),
+        ("error_code", ctypes.c_ubyte),
+        ("request_code", ctypes.c_ubyte),
+        ("minor_code", ctypes.c_ubyte),
+    ]
+
+
+# Xlib's default error handler prints and exits the process, so one transient
+# BadMatch/BadWindow on a window that is still transitioning kills the helper
+# and surfaces as an unexplained transport failure ("helper process failed").
+# Swallowing protocol errors here lets callers inspect return values instead.
+LAST_X_ERROR = {"code": 0, "request": 0}
+
+
+def handle_x_error(_display, event_pointer):
+    try:
+        event = ctypes.cast(event_pointer, ctypes.POINTER(XErrorEvent)).contents
+        LAST_X_ERROR["code"] = int(event.error_code)
+        LAST_X_ERROR["request"] = int(event.request_code)
+    except Exception:
+        pass
+    return 0
+
+
+X_ERROR_HANDLER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(handle_x_error)
+x11.XSetErrorHandler.restype = ctypes.c_void_p
+x11.XSetErrorHandler.argtypes = [ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)]
+x11.XSetErrorHandler(X_ERROR_HANDLER)
+
+x11.XGetWindowAttributes.restype = ctypes.c_int
+x11.XGetWindowAttributes.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(XWindowAttributes)]
 
 SHIFT = "Shift_L"
 MODIFIERS = {
@@ -86,13 +175,22 @@ def emit(payload):
 
 def opt(name):
     if name in sys.argv:
-        return sys.argv[sys.argv.index(name) + 1]
+        index = sys.argv.index(name)
+        # A value flag in final position must not IndexError into a traceback.
+        if index + 1 >= len(sys.argv):
+            fail("missing value for " + name)
+        return sys.argv[index + 1]
     return None
 
 
 DISPLAY = x11.XOpenDisplay(None)
 if not DISPLAY:
     fail("cannot open the X display")
+
+# The input-freeze helper holds pointer and keyboard grabs while the agent
+# works. XTestGrabControl makes this client impervious to server grabs so its
+# synthetic events keep reaching their target during a freeze.
+xtst.XTestGrabControl(DISPLAY, 1)
 
 
 def release_all():
@@ -172,6 +270,15 @@ def resolve_key(token, skipped):
     return key, False
 
 
+def keycode_available(name):
+    # A keysym the layout has no keycode for cannot be typed; the caller falls
+    # back to the clipboard instead of silently dropping the character.
+    try:
+        return x11.XKeysymToKeycode(DISPLAY, keysym(name)) != 0
+    except Exception:
+        return False
+
+
 def cmd_key():
     keys = opt("--keys") or ""
     parts = [part for part in keys.split("+") if part.strip() != ""]
@@ -210,19 +317,29 @@ def cmd_type():
     text = opt("--text") or ""
     skipped = []
     pace = int(opt("--pace") or "12")
+    # --check reports which characters the layout cannot express without
+    # injecting any input, so the caller can paste instead of losing them.
+    check = "--check" in sys.argv
     for char in text:
         if char == "\\n":
-            tap("Return", pace=pace)
+            if not check:
+                tap("Return", pace=pace)
             continue
         if char == "\\t":
-            tap("Tab", pace=pace)
+            if not check:
+                tap("Tab", pace=pace)
             continue
         name, shift = resolve_key(char, skipped)
         if name is None:
             continue
+        if check:
+            if not keycode_available(name):
+                skipped.append(char)
+            continue
         tap(name, shift, pace=pace)
-    x11.XFlush(DISPLAY)
-    x11.XSync(DISPLAY, 0)
+    if not check:
+        x11.XFlush(DISPLAY)
+        x11.XSync(DISPLAY, 0)
     emit({"ok": True, "typed": len(text) - len(skipped), "skipped": skipped})
 
 
@@ -391,6 +508,31 @@ class XEvent(ctypes.Union):
     ]
 
 
+IS_VIEWABLE = 2
+
+
+def window_viewable(window):
+    attributes = XWindowAttributes()
+    # A destroyed or unreadable window reports failure here; the installed
+    # error handler keeps that from killing the process.
+    if not x11.XGetWindowAttributes(DISPLAY, window, ctypes.byref(attributes)):
+        return False
+    return attributes.map_state == IS_VIEWABLE
+
+
+def wait_viewable(window, timeout_ms=500):
+    # A window that was just mapped (or is being deiconified by the WM) is not
+    # viewable yet. XSetInputFocus on a non-viewable window raises BadMatch,
+    # so the focus request must wait for the map to land.
+    deadline = time.time() + timeout_ms / 1000.0
+    while True:
+        if window_viewable(window):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
 def activate_window(window):
     root = x11.XDefaultRootWindow(DISPLAY)
     atom = x11.XInternAtom(DISPLAY, b"_NET_ACTIVE_WINDOW", 0)
@@ -407,7 +549,11 @@ def activate_window(window):
     mask = (1 << 20) | (1 << 19)
     sent = x11.XSendEvent(DISPLAY, root, 0, mask, ctypes.byref(event))
     x11.XRaiseWindow(DISPLAY, window)
-    x11.XSetInputFocus(DISPLAY, window, 1, 0)
+    # Skipping the focus request when the window never becomes viewable keeps
+    # the helper alive for a restore that is still mid-transition; the WM owns
+    # focus for an iconified window anyway.
+    if wait_viewable(window):
+        x11.XSetInputFocus(DISPLAY, window, 1, 0)
     return sent
 
 
@@ -437,9 +583,136 @@ def cmd_restore():
         fail("no window requested")
     window = int(raw, 0)
     x11.XMapRaised(DISPLAY, window)
+    # activate_window waits for the map to become viewable, so a restore that
+    # immediately follows a minimize cannot kill the helper on BadMatch.
     sent = activate_window(window)
     x11.XSync(DISPLAY, 0)
+    emit({"ok": True, "sent": bool(sent), "viewable": window_viewable(window)})
+
+
+def work_area():
+    root = x11.XDefaultRootWindow(DISPLAY)
+    atom = x11.XInternAtom(DISPLAY, b"_NET_WORKAREA", 0)
+    actual_type = ctypes.c_ulong()
+    actual_format = ctypes.c_int()
+    nitems = ctypes.c_ulong()
+    bytes_after = ctypes.c_ulong()
+    prop = ctypes.POINTER(ctypes.c_ulong)()
+    status = x11.XGetWindowProperty(
+        DISPLAY, root, atom, 0, 4, 0, 0,
+        ctypes.byref(actual_type), ctypes.byref(actual_format),
+        ctypes.byref(nitems), ctypes.byref(bytes_after), ctypes.byref(prop))
+    # XGetWindowProperty returns 1 when the property exists in the requested
+    # format and 0 otherwise; testing status == 0 threw the real work area away
+    # and tiled windows over docks and panels.
+    if status == 1 and nitems.value >= 4:
+        values = [int(prop[i]) for i in range(4)]
+        x11.XFree(prop)
+        return values
+    screen = x11.XDefaultScreen(DISPLAY)
+    return [0, 0, x11.XDisplayWidth(DISPLAY, screen), x11.XDisplayHeight(DISPLAY, screen)]
+
+
+def move_resize(window, x, y, width, height):
+    atom = x11.XInternAtom(DISPLAY, b"_NET_MOVERESIZE_WINDOW", 0)
+    flags = (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11)
+    event = XEvent()
+    event.xclient.type = 33
+    event.xclient.serial = 0
+    event.xclient.send_event = 1
+    event.xclient.display = DISPLAY
+    event.xclient.window = window
+    event.xclient.message_type = atom
+    event.xclient.format = 32
+    event.xclient.data[0] = flags
+    event.xclient.data[1] = x
+    event.xclient.data[2] = y
+    event.xclient.data[3] = width
+    event.xclient.data[4] = height
+    root = x11.XDefaultRootWindow(DISPLAY)
+    mask = (1 << 20) | (1 << 19)
+    sent = x11.XSendEvent(DISPLAY, root, 0, mask, ctypes.byref(event))
+    x11.XMoveResizeWindow(DISPLAY, window, x, y, width, height)
+    x11.XSync(DISPLAY, 0)
+    return sent
+
+
+def maximize_window(window, add):
+    root = x11.XDefaultRootWindow(DISPLAY)
+    atom = x11.XInternAtom(DISPLAY, b"_NET_WM_STATE", 0)
+    vertical = x11.XInternAtom(DISPLAY, b"_NET_WM_STATE_MAXIMIZED_VERT", 0)
+    horizontal = x11.XInternAtom(DISPLAY, b"_NET_WM_STATE_MAXIMIZED_HORZ", 0)
+    event = XEvent()
+    event.xclient.type = 33
+    event.xclient.serial = 0
+    event.xclient.send_event = 1
+    event.xclient.display = DISPLAY
+    event.xclient.window = window
+    event.xclient.message_type = atom
+    event.xclient.format = 32
+    event.xclient.data[0] = 1 if add else 0
+    event.xclient.data[1] = vertical
+    event.xclient.data[2] = horizontal
+    event.xclient.data[3] = 1
+    mask = (1 << 20) | (1 << 19)
+    sent = x11.XSendEvent(DISPLAY, root, 0, mask, ctypes.byref(event))
+    x11.XSync(DISPLAY, 0)
+    return sent
+
+
+def cmd_maximize():
+    raw = opt("--window")
+    if not raw:
+        fail("no window requested")
+    sent = maximize_window(int(raw, 0), "--unmaximize" not in sys.argv)
     emit({"ok": True, "sent": bool(sent)})
+
+
+def cmd_tile():
+    raw = opt("--window")
+    position = opt("--position") or "left"
+    if not raw:
+        fail("no window requested")
+    window = int(raw, 0)
+    area = work_area()
+    ax, ay, aw, ah = area[0], area[1], area[2], area[3]
+    half_w = aw // 2
+    half_h = ah // 2
+    tiles = {
+        "left": (ax, ay, half_w, ah),
+        "right": (ax + half_w, ay, aw - half_w, ah),
+        "top": (ax, ay, aw, half_h),
+        "bottom": (ax, ay + half_h, aw, ah - half_h),
+        "top-left": (ax, ay, half_w, half_h),
+        "top-right": (ax + half_w, ay, aw - half_w, half_h),
+        "bottom-left": (ax, ay + half_h, half_w, ah - half_h),
+        "bottom-right": (ax + half_w, ay + half_h, aw - half_w, ah - half_h),
+        "center": (ax + aw // 5, ay + ah // 5, (aw * 3) // 5, (ah * 3) // 5),
+    }
+    tile = tiles.get(position)
+    if tile is None:
+        fail("unknown tile position " + position)
+    sent = move_resize(window, tile[0], tile[1], tile[2], tile[3])
+    emit({"ok": True, "sent": bool(sent), "x": tile[0], "y": tile[1], "width": tile[2], "height": tile[3]})
+
+
+def cmd_move_window():
+    raw = opt("--window")
+    if not raw:
+        fail("no window requested")
+    window = int(raw, 0)
+    area = work_area()
+    x = int(opt("--x") or area[0])
+    y = int(opt("--y") or area[1])
+    width = int(opt("--width") or area[2])
+    height = int(opt("--height") or area[3])
+    sent = move_resize(window, x, y, width, height)
+    emit({"ok": True, "sent": bool(sent)})
+
+
+def cmd_work_area():
+    area = work_area()
+    emit({"ok": True, "x": area[0], "y": area[1], "width": area[2], "height": area[3]})
 
 
 def cmd_close():
@@ -491,7 +764,7 @@ def cmd_drag():
     emit({"ok": True, "duration": duration})
 
 
-COMMANDS = {"key": cmd_key, "type": cmd_type, "move": cmd_move, "click": cmd_click, "scroll": cmd_scroll, "activate": cmd_activate, "close": cmd_close, "drag": cmd_drag, "release": cmd_release, "position": cmd_position, "pointer-window": cmd_pointer_window, "minimize-window": cmd_minimize, "restore-window": cmd_restore, "down": cmd_down, "up": cmd_up}
+COMMANDS = {"key": cmd_key, "type": cmd_type, "move": cmd_move, "click": cmd_click, "scroll": cmd_scroll, "activate": cmd_activate, "close": cmd_close, "drag": cmd_drag, "release": cmd_release, "position": cmd_position, "pointer-window": cmd_pointer_window, "minimize-window": cmd_minimize, "restore-window": cmd_restore, "maximize-window": cmd_maximize, "tile-window": cmd_tile, "move-window": cmd_move_window, "work-area": cmd_work_area, "down": cmd_down, "up": cmd_up}
 
 if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
     fail("unknown command")

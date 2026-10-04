@@ -6,6 +6,7 @@ import { ROLES } from "../../protocol"
 import { DARWIN_AX_HELPER } from "./darwin-ax"
 import { limitSnapshot } from "./snapshot-limit"
 import type {
+  CuaAccessibilityState,
   CuaAction,
   CuaActionResult,
   CuaBackend,
@@ -23,6 +24,7 @@ import type {
 import {
   DARWIN_MAX_DEPTH,
   DARWIN_OBSERVE_SCRIPT,
+  DARWIN_PERMISSION_WARNING,
   DARWIN_PROBE_SCRIPT,
   darwinActionScript,
   darwinClickScript,
@@ -33,10 +35,12 @@ import {
   darwinObserveScript,
   darwinResolveScript,
   darwinScrollScript,
+  darwinSecureInputScript,
   darwinSetValueScript,
   darwinTypeScript,
   darwinValueStepScript,
   darwinWindowScript,
+  parseDarwinNode,
   parseDarwinResolvedPayload,
   parseDarwinResultPayload,
   parseDarwinScriptOutput,
@@ -44,6 +48,7 @@ import {
   type DarwinApplicationSnapshot,
   type DarwinElementSnapshot,
   type DarwinResolvedPayload,
+  type DarwinSnapshotPayload,
   type DarwinWindowAction,
 } from "./darwin-script"
 
@@ -54,7 +59,13 @@ export const DARWIN_SCRIPT_TIMEOUT_MS = 10000
 // falls back to the much slower JXA script.
 export const DARWIN_NATIVE_SNAPSHOT_BUDGET_MS = 15000
 export const DARWIN_NATIVE_SNAPSHOT_TIMEOUT_MS = DARWIN_NATIVE_SNAPSHOT_BUDGET_MS + 5000
+// The generation probe touches only top-level windows; it must never stall an
+// observe behind the full walk budget.
+export const DARWIN_NATIVE_GENERATION_TIMEOUT_MS = 3000
+const DARWIN_NATIVE_TIMEOUT_WARNING =
+  "The macOS accessibility helper timed out while walking the app tree; the accessibility tree may be incomplete."
 const PROBE_TTL_MS = 30000
+const SECURE_INPUT_TTL_MS = 500
 const DEFAULT_MAX_ELEMENTS = 1000
 const DEFAULT_WAIT_TIMEOUT_MS = 5000
 const DEFAULT_WAIT_POLL_MS = 200
@@ -70,6 +81,73 @@ export type DarwinRunner = (
   args: readonly string[],
   timeoutMs: number,
 ) => Promise<CuaRunResult>
+
+// Test seam for the compiled AX helper. Production uses the helper binary via
+// execFile; tests inject a bridge instead of shelling out or compiling Swift.
+export interface DarwinNativeBridge {
+  exec(command: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown>
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+// The helper gates every command on AXIsProcessTrustedWithOptions and reports
+// kAXErrorAPIDisabled when the grant is missing. Recognizing that structured
+// denial is what stops a permission-starved walk from falling through to the
+// slow JXA path and returning an empty tree as success.
+export function darwinPermissionMessage(raw: unknown): string | undefined {
+  if (!isRecord(raw)) return undefined
+  const denied = raw.code === "kAXErrorAPIDisabled" || raw.error === "permission"
+  if (!denied) return undefined
+  return typeof raw.message === "string" && raw.message.length > 0 ? raw.message : DARWIN_PERMISSION_WARNING
+}
+
+function withTimeoutResult<T>(promise: Promise<T>, timeoutMs: number): Promise<{ value?: T; timedOut: boolean }> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve({ value, timedOut: false })
+      },
+      () => {
+        clearTimeout(timer)
+        resolve({ timedOut: false })
+      },
+    )
+  })
+}
+
+function nativeSnapshotPayload(raw: unknown): DarwinSnapshotPayload | undefined {
+  if (!isRecord(raw) || raw.ok !== true) return undefined
+  return parseDarwinSnapshotPayload(raw)
+}
+
+function treeCacheKey(options: CuaSnapshotOptions, maxElements: number): string {
+  return JSON.stringify([options.app ?? null, maxElements])
+}
+
+function patchWindowNode(
+  payload: DarwinSnapshotPayload,
+  pid: number,
+  index: number,
+  node: DarwinElementSnapshot,
+): DarwinSnapshotPayload {
+  return {
+    ...payload,
+    applications: payload.applications.map((application) =>
+      application.pid === pid
+        ? {
+            ...application,
+            nodes: application.nodes.map((candidate, position) =>
+              position === index ? { ...node, index } : candidate,
+            ),
+          }
+        : application,
+    ),
+  }
+}
 
 export function defaultDarwinRunner(
   script: string,
@@ -279,6 +357,7 @@ export interface DarwinSnapshotBuildInput {
   requestedApp?: string
   helperTruncated?: boolean
   warnings?: readonly string[]
+  accessibility?: CuaAccessibilityState
 }
 
 interface ElementBuildInput {
@@ -385,6 +464,13 @@ export function buildDarwinSnapshot(input: DarwinSnapshotBuildInput): CuaSnapsho
   if (input.requestedApp !== undefined && windows.length === 0) {
     warnings.push(`No application matched "${input.requestedApp}"; no elements are available for this snapshot.`)
   }
+  // A zero-element tree must never be indistinguishable from a healthy empty
+  // desktop: if no other warning explains the emptiness, say so explicitly.
+  if (windows.length === 0 && warnings.length === 0) {
+    warnings.push(
+      "No accessibility windows were observed; the app may have no open windows or the accessibility tree may be unavailable.",
+    )
+  }
   return limitSnapshot(
     {
       id: `cap-${input.generation}`,
@@ -396,6 +482,7 @@ export function buildDarwinSnapshot(input: DarwinSnapshotBuildInput): CuaSnapsho
       ...(input.screen === undefined ? {} : { screen: input.screen }),
       truncated: input.helperTruncated === true,
       warnings,
+      accessibility: input.accessibility ?? (windows.length === 0 || elements.length === 0 ? "degraded" : "available"),
     },
     input.maxElements,
   )
@@ -425,10 +512,6 @@ export function hasElementCondition(condition: CuaWaitCondition): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function success(
@@ -468,8 +551,15 @@ function refuse(
   }
 }
 
-function pointInBounds(point: { x: number; y: number }, bounds: { width: number; height: number }): boolean {
-  return point.x >= 0 && point.y >= 0 && point.x < bounds.width && point.y < bounds.height
+function pointInBounds(
+  point: { x: number; y: number },
+  bounds: { x?: number; y?: number; width: number; height: number },
+): boolean {
+  // Negative coordinates are valid when a monitor sits left of or above the
+  // primary monitor; the screen origin carries the offset.
+  const originX = bounds.x ?? 0
+  const originY = bounds.y ?? 0
+  return point.x >= originX && point.y >= originY && point.x < originX + bounds.width && point.y < originY + bounds.height
 }
 
 export interface DarwinCuaBackendOptions {
@@ -477,6 +567,44 @@ export interface DarwinCuaBackendOptions {
   maxElements?: number
   allowForeground?: boolean
   nativeHelper?: string
+  nativeBridge?: DarwinNativeBridge
+  nativeTimeoutMs?: number
+}
+
+function backendBindingOf(action: CuaAction): { observationId?: string; generation?: number } {
+  if (action.type === "click" || action.type === "drag" || action.type === "key" || action.type === "dismiss") {
+    return {}
+  }
+  return {
+    ...(action.observationId === undefined ? {} : { observationId: action.observationId }),
+    ...(action.generation === undefined ? {} : { generation: action.generation }),
+  }
+}
+
+function bindingRefusal(
+  action: CuaAction,
+  ref: string,
+  source: CuaSnapshot,
+  binding: { observationId?: string; generation?: number },
+  generation: number,
+): CuaActionResult | undefined {
+  if (binding.observationId !== undefined && binding.observationId !== source.id) {
+    return refuse(
+      action,
+      "stale_ref",
+      `Target ${ref} is from observation ${binding.observationId}, not the current ${source.id}; re-observe before acting.`,
+      generation,
+    )
+  }
+  if (binding.generation !== undefined && binding.generation !== source.generation) {
+    return refuse(
+      action,
+      "stale_ref",
+      `Target ${ref} is from generation ${binding.generation}, not the current ${source.generation}; re-observe before acting.`,
+      generation,
+    )
+  }
+  return undefined
 }
 
 interface RefResolution {
@@ -506,10 +634,13 @@ const BUTTONS = { left: "left", right: "right", middle: "middle" } as const
 class DarwinCuaBackend implements CuaBackend {
   readonly platform: CuaPlatform = "darwin"
   readonly name = "cua-darwin"
+  readonly defaultMaxElements = DEFAULT_MAX_ELEMENTS
   private readonly maxElements: number
   private readonly allowForeground: boolean
   private readonly runner: DarwinRunner
   private readonly nativeHelper: string | undefined
+  private readonly nativeBridge: DarwinNativeBridge | undefined
+  private readonly nativeTimeoutMs: number
   private nativeHelperPromise: Promise<string | undefined> | undefined
   private readonly injectedRunner: boolean
   private generation = 0
@@ -518,6 +649,8 @@ class DarwinCuaBackend implements CuaBackend {
   private probeStatus: { ok: boolean; error?: string } | undefined
   private probePending: Promise<{ ok: boolean; error?: string }> | undefined
   private probeCheckedAt = 0
+  private secureInput: { at: number; active: boolean } | undefined
+  private treeCache: { key: string; signature: string; payload: DarwinSnapshotPayload } | undefined
 
   constructor(options: DarwinCuaBackendOptions = {}) {
     this.maxElements = options.maxElements ?? DEFAULT_MAX_ELEMENTS
@@ -525,6 +658,8 @@ class DarwinCuaBackend implements CuaBackend {
     this.runner = options.runner ?? defaultDarwinRunner
     this.injectedRunner = options.runner !== undefined
     this.nativeHelper = options.nativeHelper
+    this.nativeBridge = options.nativeBridge
+    this.nativeTimeoutMs = options.nativeTimeoutMs ?? DARWIN_NATIVE_SNAPSHOT_TIMEOUT_MS
   }
 
   async available(): Promise<boolean> {
@@ -587,37 +722,182 @@ class DarwinCuaBackend implements CuaBackend {
     const generation = this.generation
     const takenAt = Date.now()
     const maxElements = options.maxElements ?? this.maxElements
-    const native = await this.runNative(
+    const built = await this.capture(options, generation, takenAt, maxElements)
+    this.latest = built
+    this.latestCaptureId = built.id
+    return built
+  }
+
+  invalidate(): void {
+    this.treeCache = undefined
+  }
+
+  // Targeted refresh for the window an action touched: re-reads that window's
+  // subtree, patches it into the cached tree, and serves a full default-scope
+  // snapshot without re-walking every open window. Returns undefined when no
+  // usable cache exists so the engine falls back to a full snapshot.
+  async refreshWindow(windowRef: string): Promise<CuaSnapshot | undefined> {
+    const cached = this.treeCache
+    const window = this.latest?.windows.find((candidate) => candidate.ref === windowRef)
+    if (cached === undefined || window === undefined) return undefined
+    if (cached.key !== treeCacheKey({}, this.maxElements)) return undefined
+    const target = parseDarwinBackendRef(window.backendRef)
+    if (target === undefined) return undefined
+    const generation = await this.runNativeRaw(
+      "generation",
+      {},
+      Math.min(this.nativeTimeoutMs, DARWIN_NATIVE_GENERATION_TIMEOUT_MS),
+    )
+    if (generation.timedOut || darwinPermissionMessage(generation.raw) !== undefined) return undefined
+    const signature =
+      isRecord(generation.raw) && generation.raw.ok === true && typeof generation.raw.signature === "string"
+        ? generation.raw.signature
+        : undefined
+    this.generation += 1
+    const capturedAt = Date.now()
+    if (signature !== undefined && signature === cached.signature) {
+      const unchanged = this.buildFromPayload(cached.payload, {}, this.generation, capturedAt, this.maxElements, [])
+      this.latest = unchanged
+      return unchanged
+    }
+    const raw = await this.runNative(
+      "window",
+      {
+        pid: target.pid,
+        index: target.path[0] ?? 0,
+        maxElements: this.maxElements,
+        maxDepth: DARWIN_MAX_DEPTH,
+        timeBudgetMs: DARWIN_NATIVE_SNAPSHOT_BUDGET_MS,
+      },
+      this.nativeTimeoutMs,
+    )
+    // A window walk that stopped at its budget returns a partial subtree.
+    // Patching it in would silently drop elements while the snapshot still
+    // claims to be complete, so fall back to a full walk instead.
+    if (isRecord(raw) && raw.truncated === true) return undefined
+    const node = isRecord(raw) && isRecord(raw.node) ? parseDarwinNode(raw.node) : undefined
+    if (node === undefined) return undefined
+    // Window indexes shift when another window closes; patching by index alone
+    // could replace the wrong window. Title identity is the cheap guard.
+    if (node.name !== undefined && node.name !== window.title) return undefined
+    const payload = patchWindowNode(cached.payload, target.pid, target.path[0] ?? 0, node)
+    if (signature !== undefined) this.treeCache = { key: cached.key, signature, payload }
+    const built = this.buildFromPayload(payload, {}, this.generation, capturedAt, this.maxElements, [])
+    this.latest = built
+    return built
+  }
+
+  private async capture(
+    options: CuaSnapshotOptions,
+    generation: number,
+    takenAt: number,
+    maxElements: number,
+  ): Promise<CuaSnapshot> {
+    const tree = await this.loadNativeTree(options, maxElements)
+    if (tree.permission !== undefined) {
+      return this.unavailableSnapshot(generation, takenAt, maxElements, tree.permission, options.app)
+    }
+    // A helper that accepted the command and then blew its own deadline is a
+    // structured failure; falling through to the much slower JXA walk would
+    // hang for another full timeout instead of surfacing the problem.
+    if (tree.timedOut) {
+      return buildDarwinSnapshot({
+        generation,
+        takenAt,
+        applications: [],
+        maxElements,
+        accessibility: "degraded",
+        warnings: [DARWIN_NATIVE_TIMEOUT_WARNING],
+        ...(options.app === undefined ? {} : { requestedApp: options.app }),
+      })
+    }
+    if (tree.payload !== undefined) {
+      return this.buildFromPayload(tree.payload, options, generation, takenAt, maxElements, [])
+    }
+    const raw = await this.runScript(
+      darwinObserveScript({
+        ...(options.app === undefined ? {} : { app: options.app }),
+        maxElements: Math.max(400, maxElements * 2),
+        maxDepth: DARWIN_MAX_DEPTH,
+        timeBudgetMs: 20000,
+      }),
+      DARWIN_OBSERVE_TIMEOUT_MS,
+    )
+    const permission = darwinPermissionMessage(raw)
+    if (permission !== undefined) {
+      return this.unavailableSnapshot(generation, takenAt, maxElements, permission, options.app)
+    }
+    const payload = parseDarwinSnapshotPayload(raw)
+    const warnings =
+      payload === undefined
+        ? [
+            (isRecord(raw) && typeof raw.message === "string" ? raw.message : undefined) ??
+              "The macOS accessibility script did not return a snapshot; grant Accessibility permission and retry.",
+          ]
+        : []
+    return this.buildFromPayload(payload, options, generation, takenAt, maxElements, warnings)
+  }
+
+  // The per-app tree is cached keyed by the app filter plus the helper's cheap
+  // window-generation signature (window count, titles, minimize and focus
+  // flags). A matching signature serves a warm observe without walking AX
+  // again; any window lifecycle or title event changes the signature and
+  // forces a fresh walk.
+  private async loadNativeTree(
+    options: CuaSnapshotOptions,
+    maxElements: number,
+  ): Promise<{ payload?: DarwinSnapshotPayload; permission?: string; timedOut: boolean }> {
+    const appParam = options.app === undefined ? {} : { app: options.app }
+    const generation = await this.runNativeRaw(
+      "generation",
+      appParam,
+      Math.min(this.nativeTimeoutMs, DARWIN_NATIVE_GENERATION_TIMEOUT_MS),
+    )
+    const generationPermission = darwinPermissionMessage(generation.raw)
+    if (generationPermission !== undefined) return { permission: generationPermission, timedOut: false }
+    if (generation.timedOut) return { timedOut: true }
+    const signature =
+      isRecord(generation.raw) && generation.raw.ok === true && typeof generation.raw.signature === "string"
+        ? generation.raw.signature
+        : undefined
+    const key = treeCacheKey(options, maxElements)
+    if (
+      signature !== undefined &&
+      this.treeCache !== undefined &&
+      this.treeCache.key === key &&
+      this.treeCache.signature === signature
+    ) {
+      return { payload: this.treeCache.payload, timedOut: false }
+    }
+    const native = await this.runNativeRaw(
       "snapshot",
       {
         maxElements: Math.max(400, maxElements * 2),
         maxDepth: DARWIN_MAX_DEPTH,
         timeBudgetMs: DARWIN_NATIVE_SNAPSHOT_BUDGET_MS,
-        ...(options.app === undefined ? {} : { app: options.app }),
+        ...appParam,
       },
-      DARWIN_NATIVE_SNAPSHOT_TIMEOUT_MS,
+      this.nativeTimeoutMs,
     )
-    const raw = this.nativeFailed(native)
-      ? await this.runScript(
-          darwinObserveScript({
-            ...(options.app === undefined ? {} : { app: options.app }),
-            maxElements: Math.max(400, maxElements * 2),
-            maxDepth: DARWIN_MAX_DEPTH,
-            timeBudgetMs: 20000,
-          }),
-          DARWIN_OBSERVE_TIMEOUT_MS,
-        )
-      : native
-    const payload = parseDarwinSnapshotPayload(raw)
-    const permission = isRecord(raw) && typeof raw.message === "string" ? raw.message : undefined
-    const warnings =
-      payload === undefined
-        ? [
-            permission ??
-              "The macOS accessibility script did not return a snapshot; grant Accessibility permission and retry.",
-          ]
-        : []
-    const built = buildDarwinSnapshot({
+    const permission = darwinPermissionMessage(native.raw)
+    if (permission !== undefined) return { permission, timedOut: false }
+    if (native.timedOut) return { timedOut: true }
+    const payload = nativeSnapshotPayload(native.raw)
+    if (payload !== undefined && signature !== undefined) {
+      this.treeCache = { key, signature, payload }
+    }
+    return { ...(payload === undefined ? {} : { payload }), timedOut: false }
+  }
+
+  private buildFromPayload(
+    payload: DarwinSnapshotPayload | undefined,
+    options: CuaSnapshotOptions,
+    generation: number,
+    takenAt: number,
+    maxElements: number,
+    warnings: readonly string[],
+  ): CuaSnapshot {
+    return buildDarwinSnapshot({
       generation,
       takenAt,
       applications: payload?.applications ?? [],
@@ -627,9 +907,24 @@ class DarwinCuaBackend implements CuaBackend {
       ...(options.app === undefined ? {} : { requestedApp: options.app }),
       ...(warnings.length === 0 ? {} : { warnings }),
     })
-    this.latest = built
-    this.latestCaptureId = built.id
-    return built
+  }
+
+  private unavailableSnapshot(
+    generation: number,
+    takenAt: number,
+    maxElements: number,
+    warning: string,
+    app: string | undefined,
+  ): CuaSnapshot {
+    return buildDarwinSnapshot({
+      generation,
+      takenAt,
+      applications: [],
+      maxElements,
+      accessibility: "unavailable",
+      warnings: [warning],
+      ...(app === undefined ? {} : { requestedApp: app }),
+    })
   }
 
   async find(query: CuaFindQuery, snapshot?: CuaSnapshot): Promise<CuaElement[]> {
@@ -668,13 +963,19 @@ class DarwinCuaBackend implements CuaBackend {
 
   async waitFor(condition: CuaWaitCondition): Promise<CuaWaitResult> {
     const started = Date.now()
-    const timeoutMs = condition.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS
-    const pollMs = Math.max(MIN_WAIT_POLL_MS, condition.pollMs ?? DEFAULT_WAIT_POLL_MS)
+    const timeoutMs = Math.max(0, condition.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS)
+    // An unbounded poll interval would sleep far past the timeout, and a
+    // snapshot that starts with no budget left to finish in can overshoot the
+    // deadline by the whole observe timeout; cap both.
+    const pollMs = Math.min(1000, Math.max(MIN_WAIT_POLL_MS, condition.pollMs ?? DEFAULT_WAIT_POLL_MS))
     let confirm = false
     let matched: CuaElement | undefined
     while (true) {
-      const snapshot = await this.snapshot()
-      const match = this.matchWait(snapshot, condition)
+      const remaining = timeoutMs - (Date.now() - started)
+      if (remaining <= 0) break
+      const attempt = await withTimeoutResult(this.snapshot(), remaining)
+      if (attempt.timedOut || attempt.value === undefined) break
+      const match = this.matchWait(attempt.value, condition)
       if (match !== undefined) {
         matched = match.element
         if (confirm) {
@@ -689,8 +990,9 @@ class DarwinCuaBackend implements CuaBackend {
         confirm = false
         matched = undefined
       }
-      if (Date.now() - started + pollMs > timeoutMs) break
-      await delay(pollMs)
+      const sleep = Math.min(pollMs, timeoutMs - (Date.now() - started))
+      if (sleep <= 0) break
+      await delay(sleep)
     }
     return {
       ok: false,
@@ -702,6 +1004,7 @@ class DarwinCuaBackend implements CuaBackend {
   async dispose(): Promise<void> {
     this.latest = undefined
     this.latestCaptureId = undefined
+    this.treeCache = undefined
   }
 
   private matchWait(snapshot: CuaSnapshot, condition: CuaWaitCondition): { element?: CuaElement } | undefined {
@@ -769,18 +1072,39 @@ class DarwinCuaBackend implements CuaBackend {
     params: Record<string, unknown>,
     timeoutMs = DARWIN_SCRIPT_TIMEOUT_MS,
   ): Promise<unknown> {
+    return (await this.runNativeRaw(command, params, timeoutMs)).raw
+  }
+
+  // Every helper invocation is bounded, including ones routed through the
+  // test bridge; a hung AX call reports a timeout instead of stalling observe.
+  private async runNativeRaw(
+    command: string,
+    params: Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<{ raw: unknown; timedOut: boolean }> {
+    if (this.nativeBridge !== undefined) {
+      const outcome = await withTimeoutResult(this.nativeBridge.exec(command, params, timeoutMs), timeoutMs)
+      return outcome.timedOut ? { raw: undefined, timedOut: true } : { raw: outcome.value, timedOut: false }
+    }
     const helper = await this.ensureAxHelper()
-    if (helper === undefined) return undefined
-    const stdout = await new Promise<string | undefined>((resolve) => {
+    if (helper === undefined) return { raw: undefined, timedOut: false }
+    return new Promise((resolve) => {
       execFile(
         helper,
         [command, JSON.stringify(params)],
         { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 },
-        (error, out) => resolve(error ? undefined : String(out)),
+        (error, out) => {
+          if (error !== null && error !== undefined) {
+            // execFile flags its own kill; anything else is a plain failure the
+            // JXA fallback may still be able to serve.
+            const killed = error.killed === true || (error.signal !== null && error.signal !== undefined)
+            resolve({ raw: undefined, timedOut: killed })
+            return
+          }
+          resolve({ raw: parseDarwinScriptOutput(String(out)), timedOut: false })
+        },
       )
     })
-    if (stdout === undefined) return undefined
-    return parseDarwinScriptOutput(stdout)
   }
 
   // A native helper that ran but returned {ok:false} is a structured failure;
@@ -827,17 +1151,31 @@ class DarwinCuaBackend implements CuaBackend {
       return Promise.resolve(this.probeStatus)
     }
     if (this.probePending === undefined) {
-      this.probePending = this.runScript(DARWIN_PROBE_SCRIPT, DARWIN_SCRIPT_TIMEOUT_MS)
-        .then((raw) => {
-          const status =
-            isRecord(raw) && raw.ok === true
-              ? { ok: true }
-              : {
-                  ok: false,
-                  error:
-                    (isRecord(raw) && typeof raw.error === "string" ? raw.error : undefined) ??
-                    "macOS accessibility access is unavailable; grant Omnia permission in System Settings > Privacy & Security > Accessibility.",
-                }
+      this.probePending = (async () => {
+        // Snapshots must not require Automation: the native AX helper needs
+        // only Accessibility, while System Events scripting needs Automation
+        // for every target app. Probe native first so an Automation denial
+        // does not gate snapshots that the native path can serve.
+        const native = await this.runNative("apps", {}, DARWIN_SCRIPT_TIMEOUT_MS)
+        if (!this.nativeFailed(native)) {
+          return { ok: true }
+        }
+        const denied = darwinPermissionMessage(native)
+        if (denied !== undefined) return { ok: false, error: denied }
+        const raw = await this.runScript(DARWIN_PROBE_SCRIPT, DARWIN_SCRIPT_TIMEOUT_MS)
+        if (isRecord(raw) && raw.ok === true) return { ok: true }
+        const detail =
+          (isRecord(raw) && typeof raw.error === "string" ? raw.error : undefined) ??
+          "System Events scripting failed."
+        // Name the exact missing permission: Automation failures mention
+        // System Events / Automation, Accessibility failures mention AX.
+        const isAutomation = /automation|system events|not authorized|not permitted|operation not permitted/i.test(detail)
+        const error = isAutomation
+          ? `macOS Automation permission is missing (${detail}); grant Omnia Automation access for the target app in System Settings > Privacy & Security > Automation. Accessibility alone is enough for snapshots via the native helper.`
+          : `macOS Accessibility permission is missing (${detail}); grant Omnia permission in System Settings > Privacy & Security > Accessibility.`
+        return { ok: false, error }
+      })()
+        .then((status: { ok: boolean; error?: string }) => {
           this.probeStatus = status
           this.probeCheckedAt = Date.now()
           return status
@@ -880,10 +1218,18 @@ class DarwinCuaBackend implements CuaBackend {
     if (source === undefined) {
       return refuse(action, "no_snapshot", "Take a snapshot before acting on an element ref.", generation)
     }
+    const binding = backendBindingOf(action)
+    const stale = bindingRefusal(action, ref, source, binding, generation)
+    if (stale !== undefined) return stale
     const element = source.elements.find((candidate) => candidate.ref === ref)
     if (element === undefined) return refuse(action, "stale_ref", `Unknown element ref: ${ref}`, generation)
     if (!(await this.probe()).ok) {
-      return refuse(action, "backend_unavailable", "macOS accessibility access is not available.", generation)
+      return refuse(
+        action,
+        "backend_unavailable",
+        "macOS Accessibility permission is missing; grant Omnia permission in System Settings > Privacy & Security > Accessibility. Automation permission is not required for snapshots via the native helper.",
+        generation,
+      )
     }
     const target = parseDarwinBackendRef(element.backendRef)
     if (target === undefined) {
@@ -915,10 +1261,18 @@ class DarwinCuaBackend implements CuaBackend {
     if (source === undefined) {
       return refuse(action, "no_snapshot", "Take a snapshot before acting on a window ref.", generation)
     }
+    const binding = backendBindingOf(action)
+    const stale = bindingRefusal(action, ref, source, binding, generation)
+    if (stale !== undefined) return stale
     const window = source.windows.find((candidate) => candidate.ref === ref)
     if (window === undefined) return refuse(action, "stale_ref", `Unknown window ref: ${ref}`, generation)
     if (!(await this.probe()).ok) {
-      return refuse(action, "backend_unavailable", "macOS accessibility access is not available.", generation)
+      return refuse(
+        action,
+        "backend_unavailable",
+        "macOS Accessibility permission is missing; grant Omnia permission in System Settings > Privacy & Security > Accessibility. Automation permission is not required for snapshots via the native helper.",
+        generation,
+      )
     }
     const target = parseDarwinBackendRef(window.backendRef)
     if (target === undefined) {
@@ -1092,10 +1446,11 @@ const raw = await this.performTarget(resolved.pid, resolved.path, rawAction)
   ): Promise<CuaActionResult> {
     const resolved = await this.expectElement(action.ref, action, snapshot, generation)
     if (!isRefResolution(resolved)) return resolved
-    const raw = await this.runScript(
-      darwinSetValueScript(resolved.pid, resolved.path, action.value),
-      DARWIN_SCRIPT_TIMEOUT_MS,
-    )
+    // setValueTarget tries the native AX helper first: the JXA path needs
+    // Automation permission, so going straight to it refused every background
+    // set-value on a grant-Accessibility-only install even though the helper
+    // can perform it.
+    const raw = await this.setValueTarget(resolved.pid, resolved.path, action.value)
     const result = parseDarwinResultPayload(raw)
     if (result?.ok === true) {
       return success(action, "background-ax", `Set the value of ${action.ref} in the background.`, generation, true)
@@ -1272,44 +1627,46 @@ const raw = await this.performTarget(resolved.pid, resolved.path, rawAction)
     return success(action, "pointer", `Scrolled ${action.direction}.`, generation, false)
   }
 
+  // Keyboard synthesis is discarded while macOS Secure Input is active, but
+  // System Events still reports success. Probe it (with a short cache) so
+  // keyboard actions refuse instead of claiming delivery they cannot prove.
+  private async secureInputRefusal(action: CuaAction, generation: number): Promise<CuaActionResult | undefined> {
+    const cached = this.secureInput
+    const active =
+      cached !== undefined && Date.now() - cached.at < SECURE_INPUT_TTL_MS
+        ? cached.active
+        : await this.runScript(darwinSecureInputScript(), DARWIN_SCRIPT_TIMEOUT_MS).then((raw) => {
+            const value = isRecord(raw) && raw.secureInput === true
+            this.secureInput = { at: Date.now(), active: value }
+            return value
+          })
+    if (!active) return undefined
+    return refuse(
+      action,
+      "secure_input",
+      "macOS Secure Input is active; keyboard events are discarded by the system. Finish the secure prompt (or disable Secure Keyboard Entry) and retry.",
+      generation,
+      true,
+    )
+  }
+
   private async executeType(
     action: Extract<CuaAction, { type: "type" }>,
     snapshot: CuaSnapshot | undefined,
     generation: number,
   ): Promise<CuaActionResult> {
     if (action.text.length === 0) return success(action, "keyboard", "Nothing to type.", generation, true)
+    const secure = await this.secureInputRefusal(action, generation)
+    if (secure !== undefined) return secure
     if (action.ref !== undefined) {
       const resolved = await this.expectElement(action.ref, action, snapshot, generation)
       if (!isRefResolution(resolved)) return resolved
-      const editable = resolved.element.editable || resolved.element.actions.includes("set_value")
-      if (editable) {
-        const raw = await this.runScript(
-          darwinSetValueScript(resolved.pid, resolved.path, action.text),
-          DARWIN_SCRIPT_TIMEOUT_MS,
-        )
-        const result = parseDarwinResultPayload(raw)
-        if (result?.ok === true) {
-          return success(
-            action,
-            "background-ax",
-            `Typed ${action.text.length} characters in the background.`,
-            generation,
-            true,
-          )
-        }
-        if (!this.allowForeground) {
-          return refuse(
-            action,
-            "background_unavailable",
-            result?.error ?? "Background text input is not supported by this element.",
-            generation,
-          )
-        }
-      } else if (!this.allowForeground) {
+      // NO silent type→set_value: typing is always keyboard input after focus.
+      if (!this.allowForeground) {
         return refuse(
           action,
           "background_unavailable",
-          "Typing into this element needs focus; enable the foreground fallback or type without a ref.",
+          "Typing into this element needs focus and the foreground fallback is disabled; enable it or type without a ref.",
           generation,
         )
       }
@@ -1333,6 +1690,8 @@ const raw = await this.performTarget(resolved.pid, resolved.path, rawAction)
   ): Promise<CuaActionResult> {
     const keys = action.keys.map((key) => key.trim()).filter((key) => key.length > 0)
     if (keys.length === 0) return refuse(action, "invalid_action", "No keys were requested.", generation)
+    const secure = await this.secureInputRefusal(action, generation)
+    if (secure !== undefined) return secure
     const script = darwinKeyScript(keys.join("+"))
     if (script === undefined) {
       return refuse(action, "invalid_action", `Cannot map ${keys.join("+")} to macOS key codes.`, generation)
@@ -1349,6 +1708,8 @@ const raw = await this.performTarget(resolved.pid, resolved.path, rawAction)
     action: Extract<CuaAction, { type: "dismiss" }>,
     generation: number,
   ): Promise<CuaActionResult> {
+    const secure = await this.secureInputRefusal(action, generation)
+    if (secure !== undefined) return secure
     const script = darwinKeyScript("escape")
     if (script === undefined) {
       return refuse(action, "invalid_action", "Cannot map Escape to a macOS key code.", generation)

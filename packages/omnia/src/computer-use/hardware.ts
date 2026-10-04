@@ -64,7 +64,8 @@ async function detectGpus(platform: NodeJS.Platform, probe: DetectHardwareOption
       })
     }
   }
-  gpus.push(...detectAmdGpus())
+  // /sys/class/drm is Linux-only; Windows/macOS have no such tree.
+  if (platform === "linux") gpus.push(...detectAmdGpus())
   if (gpus.length === 0) {
     const lspci = await probe!("lspci", []).catch(() => undefined)
     const parsed = lspci === undefined ? undefined : parseLspciGpu(lspci)
@@ -74,8 +75,8 @@ async function detectGpus(platform: NodeJS.Platform, probe: DetectHardwareOption
 }
 
 function detectAmdGpus(): HardwareGpu[] {
-  const dirs = readdirSync("/sys/class/drm").filter((entry) => /^card\d+$/.test(entry))
-  return dirs.flatMap((entry) => {
+  const entries = readdirSyncSafe("/sys/class/drm")
+  return entries.filter((entry) => /^card\d+$/.test(entry)).flatMap((entry) => {
     const base = `/sys/class/drm/${entry}/device`
     const vendor = readText(`${base}/vendor`)
     if (vendor === undefined || vendor.trim() !== "0x1002") return []
@@ -128,9 +129,21 @@ function readText(file: string): string | undefined {
   }
 }
 
+function readdirSyncSafe(dir: string): string[] {
+  try {
+    return readdirSync(dir)
+  } catch {
+    return []
+  }
+}
+
 function detectDiskFree(path: string): number | undefined {
-  const stats = statfsSync(path)
-  return stats.bavail * stats.bsize
+  try {
+    const stats = statfsSync(path)
+    return stats.bavail * stats.bsize
+  } catch {
+    return undefined
+  }
 }
 
 export function estimateCompatibility(

@@ -42,9 +42,11 @@ export function buildRetrievalHierarchy(input: RetrievalInput, context: Retrieva
   }
   roots.forEach((id) => emit(id, 0, []))
   rawEntries.forEach((entry) => emit(entry.id, 0, []))
-  const normalized = ordered.map((entry) => toIndexed(entry, ordered))
+  // Reuse the parent->children index instead of scanning all entries per
+  // element (the old toIndexed was O(n^2): 5k elements ~= 25M comparisons).
+  const normalized = ordered.map((entry) => toIndexed(entry, children))
   const activeWindowId = resolveActiveWindowId(normalized, children, context, source.observation)
-  const activeElementId = resolveActiveElementId(normalized, children, context, source.observation, activeWindowId)
+  const activeElementId = resolveActiveElementId(normalized, context, source.observation, activeWindowId)
   return {
     elements: normalized,
     byId: new Map(normalized.map((entry) => [entry.id, entry])),
@@ -178,8 +180,7 @@ function resolveParent(
   effectiveParent.set(id, entry.parentId)
 }
 
-function toIndexed(entry: MutableEntry, entries: readonly MutableEntry[]): IndexedRetrievalElement {
-  const children = entries.filter((candidate) => candidate.parentId === entry.id).map((candidate) => candidate.id)
+function toIndexed(entry: MutableEntry, childrenById: ReadonlyMap<string, readonly string[]>): IndexedRetrievalElement {
   return {
     element: entry.element,
     id: entry.id,
@@ -188,7 +189,7 @@ function toIndexed(entry: MutableEntry, entries: readonly MutableEntry[]): Index
     siblingIndex: entry.siblingIndex,
     path: entry.path,
     ...(entry.parentId === undefined ? {} : { parentId: entry.parentId }),
-    children,
+    children: [...(childrenById.get(entry.id) ?? [])],
   }
 }
 
@@ -233,7 +234,6 @@ function resolveActiveWindowId(
 
 function resolveActiveElementId(
   entries: readonly IndexedRetrievalElement[],
-  children: ReadonlyMap<string, readonly string[]>,
   context: RetrievalContext,
   observation: Observation | undefined,
   activeWindowId: string | undefined,
@@ -246,8 +246,9 @@ function resolveActiveElementId(
   if (observationId !== undefined && entries.some((entry) => entry.id === observationId)) return observationId
   const focused = entries.find((entry) => entry.element.states?.includes("focused") === true || entry.element.states?.includes("selected") === true || entry.element.state?.focused === true || entry.element.state?.selected === true)
   if (focused !== undefined && (activeWindowId === undefined || isWithinWindow(focused, activeWindowId))) return focused.id
-  if (activeWindowId === undefined) return undefined
-  return children.get(activeWindowId)?.[0]
+  // Never promote the first child of the active window: that silently boosts
+  // an unrelated element when no element is actually focused.
+  return undefined
 }
 
 function isWindowRole(role: string | undefined): boolean {

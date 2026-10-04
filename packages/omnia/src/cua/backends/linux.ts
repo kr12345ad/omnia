@@ -32,10 +32,12 @@ import type {
 import {
   LINUX_CUA_SCRIPT,
   parseHelperLine,
+  parseProbePayload,
   parseResolvedPayload,
   parseSnapshotPayload,
   type AtspiApplicationSnapshot,
   type AtspiNodeSnapshot,
+  type AtspiSnapshotPayload,
   type HelperLine,
   type HelperReady,
   type ResolvedElementPayload,
@@ -819,6 +821,9 @@ export interface LinuxCuaBackendOptions {
   // Tests use a fake runner and no X server; production keeps the socket
   // probe on so a stale DISPLAY is not reported as available.
   probeDisplay?: boolean
+  // Generation-scoped refs refuse by default. Same-name slug re-resolution
+  // (occurrence-shifted refs) is only attempted when this is explicitly true.
+  allowRebind?: boolean
 }
 
 interface RefResolution {
@@ -890,15 +895,43 @@ function helperErrorCode(error: string | undefined): string {
   return "action_failed"
 }
 
+function bindingOf(action: CuaAction): { observationId?: string; generation?: number; allowRebind?: boolean } {
+  if (action.type === "click" || action.type === "drag" || action.type === "key" || action.type === "dismiss") {
+    return {}
+  }
+  return {
+    ...(action.observationId === undefined ? {} : { observationId: action.observationId }),
+    ...(action.generation === undefined ? {} : { generation: action.generation }),
+    ...(action.allowRebind === undefined ? {} : { allowRebind: action.allowRebind }),
+  }
+}
+
 function parseClipboardValue(stdout: string): string | undefined {
   const line = parseHelperLine(stdout.trim())
   if (line === undefined || !line.ok || line.payload.complete === false) return undefined
   return typeof line.payload.text === "string" ? line.payload.text : undefined
 }
 
+export interface WaylandMonitor {
+  // Logical bounds as reported by the compositor (x/y may be negative when
+  // a monitor sits left of or above the primary).
+  x: number
+  y: number
+  width: number
+  height: number
+  scale: number
+  // Device-pixel bounds derived from the logical origin and the device mode
+  // size: exactly one scale conversion, never two.
+  deviceX: number
+  deviceY: number
+  deviceWidth: number
+  deviceHeight: number
+}
+
 export interface WaylandGeometry {
   scale: number
   device?: { x: number; y: number; width: number; height: number }
+  monitors?: WaylandMonitor[]
 }
 
 // wlr-randr --json reports the logical output position but a device-pixel mode
@@ -916,6 +949,7 @@ export function parseWlrRandrGeometry(output: string): WaylandGeometry | undefin
   let minY = Number.POSITIVE_INFINITY
   let maxX = Number.NEGATIVE_INFINITY
   let maxY = Number.NEGATIVE_INFINITY
+  const monitors: WaylandMonitor[] = []
   for (const entry of parsed) {
     if (typeof entry !== "object" || entry === null) continue
     const record = entry as Record<string, unknown>
@@ -932,19 +966,35 @@ export function parseWlrRandrGeometry(output: string): WaylandGeometry | undefin
     const positionRecord = typeof position === "object" && position !== null ? (position as Record<string, unknown>) : {}
     const x = typeof positionRecord.x === "number" && Number.isFinite(positionRecord.x) ? positionRecord.x : 0
     const y = typeof positionRecord.y === "number" && Number.isFinite(positionRecord.y) ? positionRecord.y : 0
-    const deviceX = Math.round(x * (entryScale > 0 ? entryScale : 1))
-    const deviceY = Math.round(y * (entryScale > 0 ? entryScale : 1))
+    const factor = entryScale > 0 ? entryScale : 1
+    // ONE conversion: the logical origin scales to device, the mode size is
+    // already device pixels and must not be scaled again.
+    const deviceX = Math.round(x * factor)
+    const deviceY = Math.round(y * factor)
     minX = Math.min(minX, deviceX)
     minY = Math.min(minY, deviceY)
     maxX = Math.max(maxX, deviceX + width)
     maxY = Math.max(maxY, deviceY + height)
+    const logicalWidth = width / factor
+    const logicalHeight = height / factor
+    monitors.push({
+      x,
+      y,
+      width: logicalWidth,
+      height: logicalHeight,
+      scale: factor,
+      deviceX,
+      deviceY,
+      deviceWidth: width,
+      deviceHeight: height,
+    })
   }
   if (scale <= 0) return undefined
   const device =
     Number.isFinite(minX) && Number.isFinite(minY) && maxX > minX && maxY > minY
       ? { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
       : undefined
-  return { scale, ...(device === undefined ? {} : { device }) }
+  return { scale, ...(device === undefined ? {} : { device }), ...(monitors.length === 0 ? {} : { monitors }) }
 }
 
 export function scalePointToDevice(
@@ -989,6 +1039,12 @@ const BUTTON_CODES = { left: 1, middle: 2, right: 3 } as const
 export class LinuxCuaBackend implements CuaBackend {
   readonly platform: CuaPlatform = "linux"
   readonly name = "cua-linux"
+  readonly defaultMaxElements = DEFAULT_MAX_ELEMENTS
+  // Raw full walks keyed by the helper's per-application cache identity. A
+  // probe (cheap signature read) decides whether the payload is still valid,
+  // so a find never re-walks a tree an observe just produced.
+  private readonly walkCache = new Map<string, { signature: string; payload: AtspiSnapshotPayload }>()
+  private activePidLookup: { id: string; pid: number | undefined } | undefined
   private readonly display: string | undefined
   private readonly maxElements: number
   private readonly allowForeground: boolean
@@ -1000,6 +1056,7 @@ export class LinuxCuaBackend implements CuaBackend {
   private readonly mergeWindows: boolean
   private readonly interpreter: string | undefined
   private readonly probeDisplay: boolean
+  private readonly allowRebind: boolean
   private helper: CuaHelper | undefined
   private helperPending: Promise<CuaHelper | undefined> | undefined
   private helperFailures = 0
@@ -1039,6 +1096,7 @@ export class LinuxCuaBackend implements CuaBackend {
     this.mergeWindows = options.x11Windows !== false
     this.interpreter = options.interpreter
     this.probeDisplay = options.probeDisplay !== false
+    this.allowRebind = options.allowRebind === true
   }
 
   async available(): Promise<boolean> {
@@ -1193,6 +1251,30 @@ export class LinuxCuaBackend implements CuaBackend {
   }
 
   async snapshot(options: CuaSnapshotOptions = {}): Promise<CuaSnapshot> {
+    return this.buildSnapshot(options, false)
+  }
+
+  // Targeted refresh hooks the engine can call after an action. Both force a
+  // fresh AT-SPI walk of the focused application (the default snapshot scope)
+  // past the helper and backend caches, so an action verification does not pay
+  // for a second full walk. They return undefined when the requested
+  // window/application is not part of that scope, which tells the engine to
+  // fall back to a complete snapshot instead of trusting the wrong scope.
+  async refreshWindow(ref: string): Promise<CuaSnapshot | undefined> {
+    const window = this.latest?.windows.find((candidate) => candidate.ref === ref)
+    if (window === undefined) return undefined
+    const snapshot = await this.buildSnapshot({}, true)
+    if (!snapshot.windows.some((candidate) => appMatchesFragment(window.app, candidate.app))) return undefined
+    return snapshot
+  }
+
+  async refreshApplication(app: string): Promise<CuaSnapshot | undefined> {
+    const snapshot = await this.buildSnapshot({}, true)
+    if (!snapshot.windows.some((candidate) => appMatchesFragment(app, candidate.app))) return undefined
+    return snapshot
+  }
+
+  private async buildSnapshot(options: CuaSnapshotOptions, force: boolean): Promise<CuaSnapshot> {
     this.generation += 1
     const generation = this.generation
     const takenAt = Date.now()
@@ -1218,21 +1300,24 @@ export class LinuxCuaBackend implements CuaBackend {
       this.latestCaptureId = empty.id
       return empty
     }
-    const response = (
-      await this.requestHelper("snapshot", {
-        max_apps: MAX_HELPER_APPS,
-        max_depth: MAX_HELPER_DEPTH,
-        max_nodes: Math.min(MAX_HELPER_NODES, Math.max(1000, maxElements * 2)),
-        ...(options.app === undefined ? {} : { app: options.app }),
-      })
-    ).response
-    const payload = response === undefined ? undefined : parseSnapshotPayload(response.payload)
-    const warnings =
-      response === undefined
-        ? ["The snapshot command failed or timed out."]
-        : response.ok
-          ? []
-          : [response.error ?? "The snapshot command failed."]
+    // Default observation walks only the application that owns the focused
+    // window; other desktops apps are only read when an app filter asks for
+    // them. The X11 active window's pid is the cheap, honest selector.
+    const scope = options.app === undefined ? "focused" : "app"
+    const activePid = scope === "focused" ? await this.activeWindowPid() : undefined
+    const snapshotResult = await this.atspiSnapshot({
+      max_apps: MAX_HELPER_APPS,
+      max_depth: MAX_HELPER_DEPTH,
+      // Always ask for the full walk: one cached tree then satisfies both the
+      // observe budget and a larger find, instead of re-walking per budget.
+      max_nodes: MAX_HELPER_NODES,
+      scope,
+      ...(options.app === undefined ? {} : { app: options.app }),
+      ...(activePid === undefined ? {} : { active_pid: activePid }),
+      ...(force ? { force: true } : {}),
+    })
+    const payload = snapshotResult.payload
+    const warnings = snapshotResult.warnings
     // The helper's desktop extents can be a stale 1024x768 while the X11 root
     // is larger; store the union so observations and point validation agree on
     // the real desktop instead of permanently shrinking to the helper value.
@@ -1267,14 +1352,19 @@ export class LinuxCuaBackend implements CuaBackend {
             warnings: mergedRaw.warnings.filter((warning) => !warning.startsWith("No application matched")),
           }
         : mergedRaw
-    const limited = limitSnapshot(merged, maxElements)
-    // Put the active window first so observe/truncation never buries it.
+    // The WM's active window is the only authority for focus on X11. AT-SPI can
+    // report a toolkit-focused window while the WM still has another window
+    // active (often Omnia), so resolving it first lets the limiter keep that
+    // window's controls and lets the ordering below put it first.
     const activeWindow =
       this.session === "x11" && this.mergeWindows
         ? await this.legacyX11().activeWindowId().catch(() => undefined)
         : undefined
     const activeRef =
-      activeWindow === undefined ? undefined : await this.activeWindowRef(limited.windows, activeWindow)
+      activeWindow === undefined ? undefined : await this.activeWindowRef(merged.windows, activeWindow)
+    const focusedWindowBackendRef =
+      activeRef === undefined ? undefined : merged.windows.find((window) => window.ref === activeRef)?.backendRef
+    const limited = limitSnapshot(merged, maxElements, focusedWindowBackendRef, true)
     const ordered =
       activeRef === undefined
         ? limited
@@ -1285,10 +1375,6 @@ export class LinuxCuaBackend implements CuaBackend {
               ...limited.windows.filter((window) => window.ref !== activeRef),
             ],
           }
-    // The WM's active window is the only authority for focus on X11. AT-SPI can
-    // report a toolkit-focused window while the WM still has another window
-    // active (often Omnia), so replacing the flags keeps focus verification
-    // honest instead of trusting the toolkit.
     const focused =
       activeWindow === undefined
         ? ordered
@@ -1296,6 +1382,66 @@ export class LinuxCuaBackend implements CuaBackend {
     this.latest = focused
     this.latestCaptureId = focused.id
     return focused
+  }
+
+  // The persistent helper owns a per-application walk cache. Probing first
+  // reads only cheap signatures; a matching signature reuses the full payload
+  // already held here, so a find or a repeated observe never re-serializes the
+  // tree.
+  private async atspiSnapshot(
+    params: Record<string, unknown>,
+  ): Promise<{ payload?: AtspiSnapshotPayload; warnings: string[] }> {
+    if (params.force !== true) {
+      const probe = await this.requestHelper("probe", params)
+      if (probe.response !== undefined && probe.response.ok) {
+        const signatures = parseProbePayload(probe.response.payload)
+        if (signatures !== undefined && signatures.apps.length > 0) {
+          const key = signatures.apps.map((app) => app.key).join("|")
+          const signature = signatures.apps.map((app) => `${app.index}:${app.signature}`).join("|")
+          const cached = this.walkCache.get(key)
+          if (cached !== undefined && cached.signature === signature) {
+            return { payload: cached.payload, warnings: [] }
+          }
+        }
+      }
+    }
+    const response = (await this.requestHelper("snapshot", params)).response
+    const warnings =
+      response === undefined
+        ? ["The snapshot command failed or timed out."]
+        : response.ok
+          ? []
+          : [response.error ?? "The snapshot command failed."]
+    const payload = response === undefined || !response.ok ? undefined : parseSnapshotPayload(response.payload)
+    if (payload === undefined) return { warnings }
+    const metas = payload.applications.filter((app) => app.key !== undefined && app.signature !== undefined)
+    if (metas.length > 0 && metas.length === payload.applications.length) {
+      const key = metas.map((app) => app.key).join("|")
+      const signature = metas.map((app) => `${app.index ?? -1}:${app.signature}`).join("|")
+      this.walkCache.set(key, { signature, payload })
+      if (this.walkCache.size > 8) {
+        const oldest = this.walkCache.keys().next().value
+        if (oldest !== undefined) this.walkCache.delete(oldest)
+      }
+    }
+    return { payload, warnings }
+  }
+
+  // Cached by active window id so repeated snapshots do not pay for two xprop
+  // spawns each. Undefined means the focused AT-SPI app cannot be identified
+  // cheaply; the helper then falls back to walking every application.
+  private async activeWindowPid(): Promise<number | undefined> {
+    if (!this.mergeWindows || this.session === "wayland") return undefined
+    const activeId = await this.legacyX11().activeWindowId().catch(() => undefined)
+    if (activeId === undefined) return undefined
+    if (this.activePidLookup?.id === activeId) return this.activePidLookup.pid
+    const props = await this.runner("xprop", ["-id", activeId, "_NET_WM_PID"], PROBE_TIMEOUT_MS, this.env()).catch(
+      () => undefined,
+    )
+    const parsed = props === undefined ? undefined : Number(props.stdout.match(/_NET_WM_PID\(CARDINAL\)\s*=\s*(\d+)/)?.[1])
+    const pid = parsed === undefined || !Number.isFinite(parsed) ? undefined : parsed
+    this.activePidLookup = { id: activeId, pid }
+    return pid
   }
 
   private async activeWindowRef(windows: readonly CuaWindow[], activeId: string): Promise<string | undefined> {
@@ -1327,20 +1473,30 @@ export class LinuxCuaBackend implements CuaBackend {
               )
               .map((window) => window.ref),
           )
-    return source.elements
-      .filter((element) => {
-        if (windowRefs !== undefined && (element.windowRef === undefined || !windowRefs.has(element.windowRef))) {
-          return false
-        }
-        if (role !== undefined && element.role !== role) return false
-        if (name !== undefined && name.length > 0 && !element.name.toLowerCase().includes(name)) return false
-        if (text !== undefined && text.length > 0) {
-          const haystack = `${element.name} ${element.text ?? ""} ${element.value ?? ""}`.toLowerCase()
-          if (!haystack.includes(text)) return false
-        }
-        return true
-      })
-      .slice(0, limit)
+    const matches = (element: CuaElement, tokens: boolean): boolean => {
+      if (windowRefs !== undefined && (element.windowRef === undefined || !windowRefs.has(element.windowRef))) {
+        return false
+      }
+      if (role !== undefined && element.role !== role) return false
+      if (name !== undefined && name.length > 0 && !element.name.toLowerCase().includes(name)) return false
+      if (text !== undefined && text.length > 0) {
+        // AT-SPI often carries the human label in the description ("Aligns the
+        // selected paragraph(s) to the left page margin") while the name is a
+        // terse "Left", so the haystack includes it.
+        const haystack =
+          `${element.name} ${element.text ?? ""} ${element.value ?? ""} ${element.description ?? ""}`.toLowerCase()
+        if (tokens) {
+          if (!text.split(/\s+/).every((token) => token.length === 0 || haystack.includes(token))) return false
+        } else if (!haystack.includes(text)) return false
+      }
+      return true
+    }
+    const direct = source.elements.filter((element) => matches(element, false)).slice(0, limit)
+    // A multi-word query with no literal match falls back to requiring every
+    // token, so "Align Left" resolves the "Left" toolbar toggle without
+    // matching unrelated half-phrases.
+    if (direct.length > 0 || text === undefined || text.length === 0 || !text.includes(" ")) return direct
+    return source.elements.filter((element) => matches(element, true)).slice(0, limit)
   }
 
   async waitFor(condition: CuaWaitCondition): Promise<CuaWaitResult> {
@@ -1395,6 +1551,8 @@ export class LinuxCuaBackend implements CuaBackend {
     this.clipboardHolders.clear()
     this.latest = undefined
     this.latestCaptureId = undefined
+    this.walkCache.clear()
+    this.activePidLookup = undefined
   }
   private env(): Record<string, string> {
     return this.display === undefined ? {} : { DISPLAY: this.display }
@@ -1577,8 +1735,30 @@ export class LinuxCuaBackend implements CuaBackend {
     if (source === undefined) {
       return refuse(action, "no_snapshot", "Take a snapshot before acting on an element ref.", generation)
     }
-    const element =
-      source.elements.find((candidate) => candidate.ref === ref) ?? resolveLooseElement(source, ref)
+    // Generation-scoped identity: when the caller binds to an observation or
+    // generation, any other generation must refuse instead of rebinding.
+    const binding = bindingOf(action)
+    if (binding.observationId !== undefined && binding.observationId !== source.id) {
+      return refuse(
+        action,
+        "stale_ref",
+        `Target ${ref} is from observation ${binding.observationId}, not the current ${source.id}; re-observe before acting.`,
+        generation,
+      )
+    }
+    if (binding.generation !== undefined && binding.generation !== source.generation) {
+      return refuse(
+        action,
+        "stale_ref",
+        `Target ${ref} is from generation ${binding.generation}, not the current ${source.generation}; re-observe before acting.`,
+        generation,
+      )
+    }
+    const exact = source.elements.find((candidate) => candidate.ref === ref)
+    // Same-name slug re-resolution is only allowed with explicit allowRebind;
+    // otherwise a shifted occurrence index must refuse instead of guessing.
+    const looseAllowed = this.allowRebind || binding.allowRebind === true
+    const element = exact ?? (looseAllowed ? resolveLooseElement(source, ref) : undefined)
     if (element === undefined) return refuse(action, "stale_ref", `Unknown element ref: ${ref}`, generation)
     if ((await this.ensureHelper()) === undefined) {
       return refuse(action, "backend_unavailable", "The Linux accessibility helper is not available.", generation)
@@ -1614,7 +1794,26 @@ export class LinuxCuaBackend implements CuaBackend {
     if (source === undefined) {
       return refuse(action, "no_snapshot", "Take a snapshot before acting on a window ref.", generation)
     }
-    const window = source.windows.find((candidate) => candidate.ref === ref) ?? resolveLooseWindow(source, ref)
+    const binding = bindingOf(action)
+    if (binding.observationId !== undefined && binding.observationId !== source.id) {
+      return refuse(
+        action,
+        "stale_ref",
+        `Target ${ref} is from observation ${binding.observationId}, not the current ${source.id}; re-observe before acting.`,
+        generation,
+      )
+    }
+    if (binding.generation !== undefined && binding.generation !== source.generation) {
+      return refuse(
+        action,
+        "stale_ref",
+        `Target ${ref} is from generation ${binding.generation}, not the current ${source.generation}; re-observe before acting.`,
+        generation,
+      )
+    }
+    const exact = source.windows.find((candidate) => candidate.ref === ref)
+    const looseAllowed = this.allowRebind || binding.allowRebind === true
+    const window = exact ?? (looseAllowed ? resolveLooseWindow(source, ref) : undefined)
     if (window === undefined) return refuse(action, "stale_ref", `Unknown window ref: ${ref}`, generation)
     if ((await this.ensureHelper()) === undefined) {
       return refuse(action, "backend_unavailable", "The Linux accessibility helper is not available.", generation)
@@ -1786,6 +1985,35 @@ export class LinuxCuaBackend implements CuaBackend {
     screen: { x?: number; y?: number; width: number; height: number } | undefined,
   ): Promise<{ device: { x: number; y: number }; error?: string }> {
     const geometry = await this.waylandScale()
+    // Per-monitor conversion: exactly one scale factor, chosen by the monitor
+    // that contains the logical point. Negative logical coordinates are valid
+    // when a monitor sits left of or above the primary.
+    const monitors = geometry.monitors ?? []
+    const owner = monitors.find(
+      (monitor) =>
+        point.x >= monitor.x &&
+        point.x < monitor.x + monitor.width &&
+        point.y >= monitor.y &&
+        point.y < monitor.y + monitor.height,
+    )
+    if (owner !== undefined) {
+      const device = scalePointToDevice(point, owner.scale)
+      const inDevice =
+        device.x >= owner.deviceX &&
+        device.x < owner.deviceX + owner.deviceWidth &&
+        device.y >= owner.deviceY &&
+        device.y < owner.deviceY + owner.deviceHeight
+      if (!inDevice) {
+        return {
+          device,
+          error: `Point ${point.x},${point.y} converts to ${device.x},${device.y} outside its ${owner.deviceWidth}x${owner.deviceHeight} monitor.`,
+        }
+      }
+      return { device }
+    }
+    // No per-monitor owner (single-monitor fallback or gsettings scale): one
+    // conversion with the desktop scale, validated against the device union
+    // or the scaled screen. Negative origins are allowed via pointInBounds.
     const device = scalePointToDevice(point, geometry.scale)
     const bounds =
       geometry.device ??
@@ -1813,11 +2041,18 @@ export class LinuxCuaBackend implements CuaBackend {
       return Promise.resolve(this.captureStatus)
     }
     if (this.capturePending === undefined) {
-      this.capturePending = this.probeCapture().then((available) => {
-        this.captureStatus = available
-        this.captureCheckedAt = Date.now()
-        return available
-      })
+      // The in-flight probe is released once it settles; a promise cached for
+      // the process lifetime would make the cooldown above unreachable and pin
+      // capabilities to the first probe's answer forever.
+      this.capturePending = this.probeCapture()
+        .then((available) => {
+          this.captureStatus = available
+          this.captureCheckedAt = Date.now()
+          return available
+        })
+        .finally(() => {
+          this.capturePending = undefined
+        })
     }
     return this.capturePending
   }
@@ -1905,7 +2140,10 @@ export class LinuxCuaBackend implements CuaBackend {
     )
   }
 
-  private async typeText(text: string): Promise<{ ok: boolean; error?: string; skipped?: string[] }> {
+  private async typeText(
+    text: string,
+    allowClipboardPaste = false,
+  ): Promise<{ ok: boolean; error?: string; skipped?: string[] }> {
     if (this.session === "wayland") {
       // Prefer AT-SPI character events (no ydotool daemon needed); fall back
       // to ydotool for non-ASCII and toolkits that ignore synthetic key events.
@@ -1952,9 +2190,9 @@ export class LinuxCuaBackend implements CuaBackend {
       return { ok: true }
     }
     // Characters the X11 keyboard layout cannot express (emoji, symbols
-    // without a keycode) are detected before typing, then the whole text is
-    // pasted through the clipboard so the result is not a silently truncated
-    // string. The previous clipboard content is restored afterwards.
+    // without a keycode) are detected before typing. Clipboard pasting is
+    // NEVER silent: it requires explicit allowClipboardPaste, otherwise the
+    // call fails instead of overwriting the clipboard behind the caller's back.
     const unsupported: string[] = []
     for (const chunk of chunkText(text, CUA_TYPE_CHUNK_SIZE)) {
       const check = await this.runXTest(["type", "--check", "--text", chunk])
@@ -1962,16 +2200,32 @@ export class LinuxCuaBackend implements CuaBackend {
       if (check.skipped !== undefined) unsupported.push(...check.skipped)
     }
     if (unsupported.length > 0) {
+      if (!allowClipboardPaste) {
+        return {
+          ok: false,
+          error: `Text contains ${unsupported.length} character(s) the keyboard layout cannot type (${unsupported.slice(0, 5).join(" ")}); re-issue with allowClipboardPaste:true to paste explicitly via the clipboard.`,
+        }
+      }
       const pasted = await this.pasteText(text)
       if (pasted.ok) return { ok: true }
+      return { ok: false, error: pasted.error ?? "Explicit clipboard paste failed." }
     }
-    const skipped: string[] = [...unsupported]
+    const skipped: string[] = []
     for (const chunk of chunkText(text, CUA_TYPE_CHUNK_SIZE)) {
       const xtest = await this.runXTest(["type", "--text", chunk])
       if (!xtest.ok) return { ok: false, error: xtest.error }
       if (xtest.skipped !== undefined) skipped.push(...xtest.skipped)
     }
-    return { ok: true, ...(skipped.length === 0 ? {} : { skipped }) }
+    // NO silent unknown-key drop: any skipped character is a failure, not a
+    // warning with ok:true.
+    if (skipped.length > 0) {
+      return {
+        ok: false,
+        error: `Unsupported characters were not typed: ${skipped.slice(0, 20).join(" ")}`,
+        skipped,
+      }
+    }
+    return { ok: true }
   }
 
   private spawnClipboardHolder(
@@ -2478,56 +2732,27 @@ export class LinuxCuaBackend implements CuaBackend {
       if ((await this.ensureHelper()) === undefined) {
         return refuse(action, "backend_unavailable", "The Linux accessibility helper is not available.", generation)
       }
-      const editable = resolved.element.editable || resolved.element.actions.includes("set_value")
-      if (editable) {
-        const response = (await this.requestHelper("set-text", { path: resolved.path, text: action.text })).response
-        if (response !== undefined && response.ok && response.payload.result !== false) {
-          return success(
-            action,
-            "background-ax",
-            `Typed ${action.text.length} characters in the background.`,
-            generation,
-            true,
-          )
-        }
-        if (!this.allowForeground) {
-          return refuse(
-            action,
-            "background_unavailable",
-            response?.error ?? "Background text input is not supported by this element.",
-            generation,
-          )
-        }
-        const focused = (await this.requestHelper("focus", { path: resolved.path })).response
-        if (focused === undefined || !focused.ok) {
-          return refuse(action, "focus_failed", focused?.error ?? "Focusing the element failed.", generation, true)
-        }
-      } else if (!this.allowForeground) {
+      // NO silent type→set_value: typing is always keyboard input after focus.
+      // Background set-text is only for explicit set_value actions.
+      if (!this.allowForeground) {
         return refuse(
           action,
           "background_unavailable",
           "Typing into this element needs focus; enable foreground fallback or type without a ref.",
           generation,
         )
-      } else {
-        const focused = (await this.requestHelper("focus", { path: resolved.path })).response
-        if (focused === undefined || !focused.ok) {
-          return refuse(action, "focus_failed", focused?.error ?? "Focusing the element failed.", generation, true)
-        }
+      }
+      const focused = (await this.requestHelper("focus", { path: resolved.path })).response
+      if (focused === undefined || !focused.ok) {
+        return refuse(action, "focus_failed", focused?.error ?? "Focusing the element failed.", generation, true)
       }
     }
-    const typed = await this.typeText(action.text)
-    if (!typed.ok) return refuse(action, "input_failed", typed.error ?? "Text input failed.", generation, true)
-    return success(
-      action,
-      "keyboard",
-      `Typed ${action.text.length} characters.`,
-      generation,
-      false,
-      typed.skipped === undefined
-        ? undefined
-        : [`Unsupported characters were skipped: ${typed.skipped.slice(0, 20).join(" ")}`],
-    )
+    const typed = await this.typeText(action.text, action.allowClipboardPaste === true)
+    if (!typed.ok) {
+      const code = typed.error?.includes("allowClipboardPaste") === true ? "clipboard_paste_required" : "input_failed"
+      return refuse(action, code, typed.error ?? "Text input failed.", generation, code === "clipboard_paste_required")
+    }
+    return success(action, "keyboard", `Typed ${action.text.length} characters.`, generation, false)
   }
 
   private async executeKey(

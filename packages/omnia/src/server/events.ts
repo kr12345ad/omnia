@@ -8,14 +8,26 @@ export const SERVER_EVENT_TYPES = [
   "computer.connected",
   "computer.disconnected",
   "computer.capabilities",
+  "computer.stopped",
+  "computer.paired",
+  "computer.pairing_created",
+  "computer.pairing_claimed",
+  "computer.pairing_cancelled",
   "observation.created",
   "action.requested",
   "action.started",
   "action.completed",
   "action.verified",
   "action.failed",
+  "action.cancelled",
   "permission.requested",
   "permission.decided",
+  "input.frozen",
+  "input.released",
+  "credential.created",
+  "credential.updated",
+  "credential.removed",
+  "credential.used",
   "session.attached",
   "environment.changed",
   "browser.action",
@@ -24,6 +36,17 @@ export const SERVER_EVENT_TYPES = [
   "memory.forgotten",
   "browser.launched",
   "browser.navigated",
+  "computer_use.ready",
+  "computer_use.model",
+  "computer_use.runtime",
+  "computer_use.routed",
+  "computer_use.analyzed",
+  "computer_use.executed",
+  "computer_use.settings",
+  "auth.signed_in",
+  "auth.signed_out",
+  "auth.device_failed",
+  "auth.oauth_client_saved",
 ] as const
 
 export type ServerEventType = (typeof SERVER_EVENT_TYPES)[number]
@@ -76,7 +99,15 @@ export class EventBus {
     }
     this.history.push(event)
     if (this.history.length > this.limit) this.history.splice(0, this.history.length - this.limit)
-    for (const listener of this.listeners) listener(event)
+    for (const listener of this.listeners) {
+      // A misbehaving subscriber must not abort the other listeners or the
+      // action that emitted the event.
+      try {
+        listener(event)
+      } catch {
+        this.listeners.delete(listener)
+      }
+    }
     return event
   }
 

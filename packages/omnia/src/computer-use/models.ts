@@ -18,14 +18,14 @@ export interface QuantSpec {
 // has to answer "what is this?" with text. Its vision projector is only
 // published as f16 upstream; there is no quantized mmproj.
 export const MOONDREAM_MODEL_BYTES = 919_494_048
-export const MOONDREAM_MMPROJ_BYTES = 910_000_000
+export const MOONDREAM_MMPROJ_BYTES = 909_777_984
 export const MOONDREAM_RECOMMENDED_QUANT = "Q4_K"
 
-// Byte sizes verified against bartowski/UI-TARS-2B-SFT-GGUF and the weights
-// bundled under packages/desktop/resources/models/computer-use/ui-tars.
-// checkFile() in local.ts tolerates files larger than 90% of these values,
-// and download() skips files that already exist, so the on-disk weights are
-// reused and never re-downloaded.
+// Byte sizes and sha256 pins are the authoritative values from the
+// HuggingFace API (`lfs.oid` is the sha256 of the file content) for the exact
+// files referenced below. checkFile() in local.ts tolerates files larger than
+// 90% of these values, and download() skips already-present verified files, so
+// the bundled weights are reused and never re-downloaded.
 export const UI_TARS_MODEL_BYTES = 1_117_319_712
 export const UI_TARS_MMPROJ_BYTES = 1_331_656_192
 
@@ -138,8 +138,10 @@ export function createComputerUseCatalog(options: CatalogOptions = {}): Computer
       type: "huggingface",
       repo: "salivosa/moondream2-gguf",
       file: "moondream2-q4_k.gguf",
+      sha256: "77baaa54e41cbfc24e305ee15f58ff2aca198517f658368f1be072d07b51f99d",
       mmprojFile: "moondream2-mmproj-f16.gguf",
       mmprojBytes: MOONDREAM_MMPROJ_BYTES,
+      mmprojSha256: "4cc1cb3660d87ff56432ebeb7884ad35d67c48c7b9f6b2856f305e39c38eed8f",
     },
     coordinateSpace: "normalized-1",
     chatTemplate:
@@ -164,8 +166,10 @@ export function createComputerUseCatalog(options: CatalogOptions = {}): Computer
       type: "huggingface",
       repo: "bartowski/UI-TARS-2B-SFT-GGUF",
       file: "UI-TARS-2B-SFT-Q4_K_M.gguf",
+      sha256: "f316ecef2e2e8fa9a29e81ba2c9efa8ea6f408241e175331332960c7160e9c53",
       mmprojFile: "mmproj-UI-TARS-2B-SFT-f16.gguf",
       mmprojBytes: UI_TARS_MMPROJ_BYTES,
+      mmprojSha256: "b9c248c4ff9770b3cd82d0ed5b5d377ea02500d8d22368db9b7c2d4476b32ce8",
     },
     coordinateSpace: "normalized-1000",
     quality: 0.9,

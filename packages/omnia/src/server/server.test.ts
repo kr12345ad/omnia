@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { startOmniaServer } from "./server"
+import { sessionProof } from "./api"
+import { OMNIA_ACTION_CATALOG } from "./catalog"
 import { sliceTypeText } from "./computers"
-import { parseActionScript } from "./text-protocol"
+import { parseActionScript, renderToolSchemas } from "./text-protocol"
 import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -149,9 +151,10 @@ async function withServer<T>(fn: (server: Awaited<ReturnType<typeof startOmniaSe
   }
 }
 
-const headers = (server: { token: string }) => ({
+const headers = (server: { token: string }, sessionId?: string) => ({
   authorization: `Bearer ${server.token}`,
   "content-type": "application/json",
+  ...(sessionId === undefined ? {} : { "x-omnia-session-proof": sessionProof(server.token, sessionId) }),
 })
 
 describe("omnia server", () => {
@@ -177,6 +180,105 @@ describe("omnia server", () => {
       const response = await fetch(`${server.url}/v1/health`)
       expect(response.status).toBe(401)
     })
+  })
+
+  test("answers CORS preflight before the bearer check", async () => {
+    await withServer(async (server) => {
+      const response = await fetch(`${server.url}/v1/computers/local/actions`, { method: "OPTIONS" })
+      expect(response.status).toBe(204)
+      expect(response.headers.get("access-control-allow-origin")).toBe("*")
+      expect(response.headers.get("access-control-allow-methods")).toContain("POST")
+    })
+  })
+
+  test("maps invalid JSON and oversized bodies to typed errors", async () => {
+    await withServer(async (server) => {
+      const invalid = await fetch(`${server.url}/v1/computers/pair`, {
+        method: "POST",
+        headers: headers(server),
+        body: "{ not json",
+      })
+      expect(invalid.status).toBe(400)
+      const invalidBody = (await invalid.json()) as { error: string }
+      expect(invalidBody.error).toBe("Request body is not valid JSON.")
+
+      const oversized = await fetch(`${server.url}/v1/computers/pair`, {
+        method: "POST",
+        headers: headers(server),
+        body: JSON.stringify({ name: "x".repeat(16 * 1024 * 1024 + 1) }),
+      })
+      expect(oversized.status).toBe(413)
+      const oversizedBody = (await oversized.json()) as { error: string }
+      expect(oversizedBody.error).toBe("Request body too large.")
+    })
+  })
+
+  test("maps browser failures to per-code HTTP statuses", async () => {
+    const browser: BrowserController = {
+      ...createFakeBrowser(),
+      read: async () => {
+        throw new Error("browser read exploded")
+      },
+    }
+    const server = await startOmniaServer({ drivers: [createFakeDriver()], browser })
+    try {
+      const invalid = await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "POST",
+        headers: headers(server),
+        body: JSON.stringify({ action: "browser_navigate", approve: true, approvedScopes: ["BROWSER"] }),
+      })
+      expect(invalid.status).toBe(400)
+      expect(((await invalid.json()) as { result: { error: { code: string } } }).result.error.code).toBe("invalid_action")
+
+      const unavailable = await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "POST",
+        headers: headers(server),
+        body: JSON.stringify({ action: "browser_bogus", approve: true, approvedScopes: ["BROWSER"] }),
+      })
+      expect(unavailable.status).toBe(501)
+      expect(((await unavailable.json()) as { result: { error: { code: string } } }).result.error.code).toBe("operation_unavailable")
+
+      const failed = await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "POST",
+        headers: headers(server),
+        body: JSON.stringify({ action: "browser_read", approve: true, approvedScopes: ["BROWSER"] }),
+      })
+      expect(failed.status).toBe(500)
+      expect(((await failed.json()) as { result: { error: { code: string } } }).result.error.code).toBe("browser_error")
+    } finally {
+      await server.stop()
+    }
+  })
+
+  test("reports image saves outside the sandbox as files_write_required", async () => {
+    const browser: BrowserController = {
+      ...createFakeBrowser(),
+      saveImage: async (target) => ({
+        path: target.path ?? "/tmp/image.png",
+        bytes: 3,
+        src: "https://example.com/image.png",
+        alt: "",
+        method: "fetch",
+      }),
+    }
+    const server = await startOmniaServer({ drivers: [createFakeDriver()], browser })
+    try {
+      const response = await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "POST",
+        headers: headers(server),
+        body: JSON.stringify({
+          action: "browser_save_image",
+          path: "/etc/omnia-image.png",
+          approve: true,
+          approvedScopes: ["BROWSER"],
+        }),
+      })
+      expect(response.status).toBe(428)
+      const body = (await response.json()) as { result: { error: { code: string } } }
+      expect(body.result.error.code).toBe("files_write_required")
+    } finally {
+      await server.stop()
+    }
   })
 
   test("observes, finds, and lists computers", async () => {
@@ -217,8 +319,14 @@ describe("omnia server", () => {
 
       const approved = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "click", target: { elementId: "el-1" }, approve: true, sessionId: "session-1" }),
+        headers: headers(server, "session-1"),
+        body: JSON.stringify({
+          action: "click",
+          target: { elementId: "el-1" },
+          approve: true,
+          approvedScopes: ["UI_CONTROL"],
+          sessionId: "session-1",
+        }),
       })
       expect(approved.status).toBe(200)
       const approvedBody = (await approved.json()) as {
@@ -233,6 +341,71 @@ describe("omnia server", () => {
         sessions: Array<{ id: string; actions: number }>
       }
       expect(sessions.sessions[0]).toMatchObject({ id: "session-1", actions: 1 })
+    })
+  })
+
+  test("gates connect and disconnect for agent sessions, desktop stays allowed", async () => {
+    await withServer(async (server) => {
+      const denied = await fetch(`${server.url}/v1/computers/local/disconnect`, {
+        method: "POST",
+        headers: headers(server, "session-connect"),
+        body: JSON.stringify({ approve: true, approvedScopes: ["UI_CONTROL"], sessionId: "session-connect" }),
+      })
+      expect(denied.status).toBe(428)
+
+      const allowed = await fetch(`${server.url}/v1/computers/local/disconnect`, {
+        method: "POST",
+        headers: headers(server, "session-connect"),
+        body: JSON.stringify({ approve: true, approvedScopes: ["PROCESS_EXECUTE"], sessionId: "session-connect" }),
+      })
+      expect(allowed.status).toBe(200)
+
+      const desktop = await fetch(`${server.url}/v1/computers/local/connect`, {
+        method: "POST",
+        headers: headers(server),
+      })
+      expect(desktop.status).toBe(200)
+    })
+  })
+
+  test("answers an unsupported freeze with 501 instead of 200", async () => {
+    await withServer(async (server) => {
+      const response = await fetch(`${server.url}/v1/input/freeze`, {
+        method: "POST",
+        headers: headers(server),
+        body: JSON.stringify({ computerId: "local" }),
+      })
+      expect(response.status).toBe(501)
+      const body = (await response.json()) as { ok: boolean }
+      expect(body.ok).toBe(false)
+    })
+  })
+
+  test("get_context requires pointer and browser scopes", async () => {
+    await withServer(async (server) => {
+      const denied = await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "POST",
+        headers: headers(server, "session-context"),
+        body: JSON.stringify({
+          action: "get_context",
+          approve: true,
+          approvedScopes: ["UI_READ"],
+          sessionId: "session-context",
+        }),
+      })
+      expect(denied.status).toBe(428)
+
+      const allowed = await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "POST",
+        headers: headers(server, "session-context"),
+        body: JSON.stringify({
+          action: "get_context",
+          approve: true,
+          approvedScopes: ["UI_READ", "POINTER", "BROWSER"],
+          sessionId: "session-context",
+        }),
+      })
+      expect(allowed.status).toBe(200)
     })
   })
 
@@ -260,7 +433,12 @@ describe("omnia server", () => {
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
         headers: headers(server),
-        body: JSON.stringify({ action: "click", target: { elementId: "gone" }, approve: true }),
+        body: JSON.stringify({
+          action: "click",
+          target: { elementId: "gone" },
+          approve: true,
+          approvedScopes: ["UI_CONTROL"],
+        }),
       })
       expect(response.status).toBe(409)
       const body = (await response.json()) as { result: { error: { code: string } } }
@@ -280,8 +458,14 @@ describe("omnia server", () => {
       driver.rename("Delete Everything")
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "click", target: { elementId: "el-1" }, approve: true, sessionId: "session-id" }),
+        headers: headers(server, "session-id"),
+        body: JSON.stringify({
+          action: "click",
+          target: { elementId: "el-1" },
+          approve: true,
+          approvedScopes: ["UI_CONTROL"],
+          sessionId: "session-id",
+        }),
       })
       expect(response.status).toBe(409)
       const body = (await response.json()) as {
@@ -299,12 +483,13 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-type"),
         body: JSON.stringify({
           action: "type",
           target: { elementId: "el-1" },
           text: "hello document",
           approve: true,
+          approvedScopes: ["UI_CONTROL", "KEYBOARD"],
           sessionId: "session-type",
         }),
       })
@@ -319,14 +504,25 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const write = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "write_clipboard", text: "shared text", approve: true, sessionId: "session-clip" }),
+        headers: headers(server, "session-clip"),
+        body: JSON.stringify({
+          action: "write_clipboard",
+          text: "shared text",
+          approve: true,
+          approvedScopes: ["CLIPBOARD_WRITE", "KEYBOARD"],
+          sessionId: "session-clip",
+        }),
       })
       expect(write.status).toBe(200)
       const read = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "read_clipboard", approve: true, sessionId: "session-clip" }),
+        headers: headers(server, "session-clip"),
+        body: JSON.stringify({
+          action: "read_clipboard",
+          approve: true,
+          approvedScopes: ["CLIPBOARD_READ"],
+          sessionId: "session-clip",
+        }),
       })
       const body = (await read.json()) as { result: { text?: string; metadata?: { length?: number } } }
       expect(body.result.text).toBe("shared text")
@@ -338,7 +534,7 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const cursor = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-pointer"),
         body: JSON.stringify({ action: "get_cursor", approve: true, sessionId: "session-pointer" }),
       })
       const cursorBody = (await cursor.json()) as { result: { metadata: { x?: number; y?: number } } }
@@ -347,13 +543,19 @@ describe("omnia server", () => {
 
       const hover = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "hover", target: { elementId: "el-1" }, approve: true, sessionId: "session-pointer" }),
+        headers: headers(server, "session-pointer"),
+        body: JSON.stringify({
+          action: "hover",
+          target: { elementId: "el-1" },
+          approve: true,
+          approvedScopes: ["POINTER"],
+          sessionId: "session-pointer",
+        }),
       })
       expect(hover.status).toBe(200)
       const after = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-pointer"),
         body: JSON.stringify({ action: "get_cursor", approve: true, sessionId: "session-pointer" }),
       })
       const afterBody = (await after.json()) as { result: { metadata: { x?: number } } }
@@ -367,8 +569,14 @@ describe("omnia server", () => {
     try {
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "middle_click", target: { elementId: "el-1" }, approve: true, sessionId: "session-mid" }),
+        headers: headers(server, "session-mid"),
+        body: JSON.stringify({
+          action: "middle_click",
+          target: { elementId: "el-1" },
+          approve: true,
+          approvedScopes: ["POINTER"],
+          sessionId: "session-mid",
+        }),
       })
       expect(response.status).toBe(200)
       expect(driver.lastAction()).toMatchObject({ type: "click", button: "middle" })
@@ -381,21 +589,31 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const down = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "mouse_down", approve: true, sessionId: "session-mouse" }),
+        headers: headers(server, "session-mouse"),
+        body: JSON.stringify({
+          action: "mouse_down",
+          approve: true,
+          approvedScopes: ["POINTER"],
+          sessionId: "session-mouse",
+        }),
       })
       expect(down.status).toBe(200)
       const cursor = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-mouse"),
         body: JSON.stringify({ action: "get_cursor", approve: true, sessionId: "session-mouse" }),
       })
       const cursorBody = (await cursor.json()) as { result: { metadata: { held?: boolean } } }
       expect(cursorBody.result.metadata.held).toBe(true)
       const up = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "mouse_up", approve: true, sessionId: "session-mouse" }),
+        headers: headers(server, "session-mouse"),
+        body: JSON.stringify({
+          action: "mouse_up",
+          approve: true,
+          approvedScopes: ["POINTER"],
+          sessionId: "session-mouse",
+        }),
       })
       expect(up.status).toBe(200)
     })
@@ -405,7 +623,7 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-focus"),
         body: JSON.stringify({ action: "get_focus", approve: true, sessionId: "session-focus" }),
       })
       const body = (await response.json()) as { result: { metadata: { focused: { id?: string } } } }
@@ -418,8 +636,14 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "click", query: "Export", approve: true, sessionId: "session-q" }),
+        headers: headers(server, "session-q"),
+        body: JSON.stringify({
+          action: "click",
+          query: "Export",
+          approve: true,
+          approvedScopes: ["UI_CONTROL"],
+          sessionId: "session-q",
+        }),
       })
       expect(response.status).toBe(200)
       const body = (await response.json()) as {
@@ -435,7 +659,7 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const response = await fetch(`${server.url}/v1/computers/local/do`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-batch"),
         body: JSON.stringify({
           approve: true,
           sessionId: "session-batch",
@@ -462,7 +686,7 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const response = await fetch(`${server.url}/v1/computers/local/do`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-expect"),
         body: JSON.stringify({
           approve: true,
           sessionId: "session-expect",
@@ -492,8 +716,14 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "focus_window", window: "Other", approve: true, sessionId: "session-focus" }),
+        headers: headers(server, "session-focus"),
+        body: JSON.stringify({
+          action: "focus_window",
+          window: "Other",
+          approve: true,
+          approvedScopes: ["UI_CONTROL"],
+          sessionId: "session-focus",
+        }),
       })
       expect(response.status).toBe(200)
       const body = (await response.json()) as { result: { success: boolean; message?: string } }
@@ -511,7 +741,12 @@ describe("omnia server", () => {
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
         headers: headers(server),
-        body: JSON.stringify({ action: "focus_window", window: "Nonexistent", approve: true }),
+        body: JSON.stringify({
+          action: "focus_window",
+          window: "Nonexistent",
+          approve: true,
+          approvedScopes: ["UI_CONTROL"],
+        }),
       })
       expect(response.status).toBe(404)
       const body = (await response.json()) as { result: { error: { code: string; details?: { windows: string[] } } } }
@@ -532,12 +767,13 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-marker"),
         body: JSON.stringify({
           action: "type",
           text: "hello world",
           stop: "absent-marker",
           approve: true,
+          approvedScopes: ["UI_CONTROL", "KEYBOARD"],
           sessionId: "session-marker",
         }),
       })
@@ -551,35 +787,52 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const status = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "browser_status", approve: true, sessionId: "session-browser" }),
+        headers: headers(server, "session-browser"),
+        body: JSON.stringify({
+          action: "browser_status",
+          approve: true,
+          approvedScopes: ["BROWSER"],
+          sessionId: "session-browser",
+        }),
       })
       const statusBody = (await status.json()) as { result: { metadata: { status?: { running: boolean } } } }
       expect(statusBody.result.metadata.status?.running).toBe(true)
 
       const read = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "browser_read", approve: true, sessionId: "session-browser" }),
+        headers: headers(server, "session-browser"),
+        body: JSON.stringify({
+          action: "browser_read",
+          approve: true,
+          approvedScopes: ["BROWSER"],
+          sessionId: "session-browser",
+        }),
       })
       const readBody = (await read.json()) as { result: { metadata: { text?: string; length?: number } } }
       expect(readBody.result.metadata.text).toBe("hello page")
 
       const find = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
-        body: JSON.stringify({ action: "browser_find", query: "Export", approve: true, sessionId: "session-browser" }),
+        headers: headers(server, "session-browser"),
+        body: JSON.stringify({
+          action: "browser_find",
+          query: "Export",
+          approve: true,
+          approvedScopes: ["BROWSER"],
+          sessionId: "session-browser",
+        }),
       })
       const findBody = (await find.json()) as { result: { metadata: { candidates?: Array<{ id: string }> } } }
       expect(findBody.result.metadata.candidates?.[0]?.id).toBe("omnia-1")
 
       const click = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-browser"),
         body: JSON.stringify({
           action: "browser_click",
           target: { elementId: "omnia-1" },
           approve: true,
+          approvedScopes: ["BROWSER"],
           sessionId: "session-browser",
         }),
       })
@@ -593,18 +846,141 @@ describe("omnia server", () => {
     await withServer(async (server) => {
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-browser-type"),
         body: JSON.stringify({
           action: "browser_type",
           target: { elementId: "omnia-1" },
           text: "acme industrial",
           approve: true,
+          approvedScopes: ["BROWSER"],
           sessionId: "session-browser-type",
         }),
       })
       const body = (await response.json()) as { result: { verification?: { status: string; method?: string } } }
       expect(body.result.verification?.status).toBe("verified")
       expect(body.result.verification?.method).toBe("browser-value-readback")
+    })
+  })
+
+  test("forwards browser read paging and reports real paging metadata", async () => {
+    const reads: Array<{ sessionId?: string; offset?: number; limit?: number; maxChars?: number }> = []
+    const browser = createFakeBrowser()
+    browser.read = async (_tabId, options) => {
+      reads.push(options ?? {})
+      return {
+        url: "https://example.com",
+        title: "Example",
+        text: "efgh",
+        length: 4,
+        hash: "hash-page",
+        offset: 4,
+        totalLength: 10,
+        truncated: true,
+        sourceTruncated: false,
+      }
+    }
+    const server = await startOmniaServer({ drivers: [createFakeDriver()], browser })
+    try {
+      const response = await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "POST",
+        headers: headers(server, "session-page"),
+        body: JSON.stringify({
+          action: "browser_read",
+          offset: 4,
+          maxChars: 4,
+          approve: true,
+          approvedScopes: ["BROWSER"],
+          sessionId: "session-page",
+        }),
+      })
+      expect(response.status).toBe(200)
+      const body = (await response.json()) as {
+        result: { metadata: { text?: string; offset?: number; totalLength?: number; truncated?: boolean } }
+      }
+      expect(body.result.metadata.text).toBe("efgh")
+      expect(body.result.metadata.offset).toBe(4)
+      expect(body.result.metadata.totalLength).toBe(10)
+      expect(body.result.metadata.truncated).toBe(true)
+      expect(reads[0]).toEqual({ sessionId: "session-page", offset: 4, limit: 4, maxChars: 4 })
+    } finally {
+      await server.stop()
+    }
+  })
+
+  test("enforces the browser target observation binding over HTTP", async () => {
+    await withServer(async (server) => {
+      const stale = await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "POST",
+        headers: headers(server, "session-bind"),
+        body: JSON.stringify({
+          action: "browser_click",
+          target: { elementId: "omnia-1@doc-42", observationId: "doc-7" },
+          approve: true,
+          approvedScopes: ["BROWSER"],
+          sessionId: "session-bind",
+        }),
+      })
+      expect(stale.status).toBe(409)
+      const staleBody = (await stale.json()) as { result: { error?: { code?: string } } }
+      expect(staleBody.result.error?.code).toBe("target_stale")
+
+      const matched = await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "POST",
+        headers: headers(server, "session-bind"),
+        body: JSON.stringify({
+          action: "browser_click",
+          target: { elementId: "omnia-1@doc-42", observationId: "doc-42" },
+          approve: true,
+          approvedScopes: ["BROWSER"],
+          sessionId: "session-bind",
+        }),
+      })
+      expect(matched.status).toBe(200)
+      const matchedBody = (await matched.json()) as { result: { success: boolean; verification?: { status: string } } }
+      expect(matchedBody.result.success).toBe(true)
+      expect(matchedBody.result.verification?.status).toBe("verified")
+    })
+  })
+
+  test("do fails an unverified step unless the step allows it", async () => {
+    await withServer(async (server) => {
+      await fetch(`${server.url}/v1/computers/local/observe`, { method: "POST", headers: headers(server), body: "{}" })
+      const run = async (step: Record<string, unknown>) => {
+        const response = await fetch(`${server.url}/v1/computers/local/do`, {
+          method: "POST",
+          headers: headers(server, "session-plan"),
+          body: JSON.stringify({
+            approve: true,
+            approvedScopes: ["UI_CONTROL"],
+            sessionId: "session-plan",
+            steps: [step],
+          }),
+        })
+        return (await response.json()) as {
+          ok: boolean
+          result: {
+            success: boolean
+            verified: boolean
+            steps: Array<{ success: boolean; verified: boolean; allowUnverified?: boolean; error?: { code?: string } }>
+          }
+        }
+      }
+
+      const failed = await run({ action: "click", target: { elementId: "x11:0x1" } })
+      expect(failed.ok).toBe(false)
+      expect(failed.result.success).toBe(false)
+      expect(failed.result.verified).toBe(false)
+      expect(failed.result.steps[0]?.verified).toBe(false)
+      expect(failed.result.steps[0]?.error?.code).toBe("unverified")
+
+      const allowed = await run({ action: "click", target: { elementId: "x11:0x1" }, allowUnverified: true })
+      expect(allowed.ok).toBe(true)
+      expect(allowed.result.success).toBe(true)
+      expect(allowed.result.steps[0]?.success).toBe(true)
+      expect(allowed.result.steps[0]?.verified).toBe(false)
+      expect(allowed.result.steps[0]?.allowUnverified).toBe(true)
+      // An opted-out step passes its step, but the plan is never marked verified.
+      expect(allowed.result.verified).toBe(false)
     })
   })
 
@@ -631,13 +1007,60 @@ describe("omnia server", () => {
     expect(broken.errors[0]?.line).toBe(2)
   })
 
+  test("rejects non-finite and out-of-range numeric arguments", () => {
+    const parsed = parseActionScript(
+      ["wait amount=Infinity", "wait amount=-5", "read_text limit=NaN", "move x=Infinity y=10"].join("\n"),
+    )
+    expect(parsed.steps).toHaveLength(0)
+    expect(parsed.errors).toHaveLength(4)
+    expect(parsed.errors[0]?.message).toContain('"amount"')
+
+    const negative = parseActionScript("move x=-10 y=-20")
+    expect(negative.errors).toEqual([])
+    expect(negative.steps[0]).toMatchObject({ action: "move", x: -10, y: -20 })
+  })
+
+  test("parses observation, paging, and allow_unverified script arguments", () => {
+    const parsed = parseActionScript(
+      ["browser_read offset=5 maxChars=100 observation_id=obs-2", "click target=el-1 allow_unverified=true"].join("\n"),
+    )
+    expect(parsed.errors).toEqual([])
+    expect(parsed.steps[0]).toMatchObject({ action: "browser_read", offset: 5, maxChars: 100, observationId: "obs-2" })
+    expect(parsed.steps[1]).toMatchObject({ action: "click", target: { kind: "element", elementId: "el-1" }, allowUnverified: true })
+  })
+
+  test("advertises real parameter types and the window/calibration/cua surfaces", () => {
+    const schemas = renderToolSchemas()
+    const names = schemas.map((schema) => schema.name)
+    expect(names).toContain("omnia_window_tile")
+    expect(names).toContain("omnia_window_close")
+    expect(names).toContain("omnia_calibration_measure")
+    expect(names).toContain("omnia_cua_snapshot")
+    expect(names).toContain("omnia_cua_act")
+
+    const properties = (name: string) => {
+      const schema = schemas.find((entry) => entry.name === name)
+      return (schema?.parameters as { properties: Record<string, { type: string }> }).properties
+    }
+    expect(properties("omnia_wait").amount?.type).toBe("number")
+    expect(properties("omnia_click").action?.type).toBe("string")
+    expect(properties("omnia_cua_snapshot").includeScreenshot?.type).toBe("boolean")
+    expect(properties("omnia_cua_snapshot").maxElements?.type).toBe("number")
+    expect(properties("omnia_cua_wait").timeoutMs?.type).toBe("number")
+
+    expect(OMNIA_ACTION_CATALOG.find((entry) => entry.action === "window_close")?.requires).toEqual(["PROCESS_EXECUTE"])
+    expect(OMNIA_ACTION_CATALOG.find((entry) => entry.action === "get_context")?.requires).toEqual(["UI_READ", "POINTER", "BROWSER"])
+    expect(OMNIA_ACTION_CATALOG.find((entry) => entry.action === "paste_table")?.requires).toContain("POINTER")
+    expect(OMNIA_ACTION_CATALOG.find((entry) => entry.action === "scroll_into_view")?.requires).toEqual(["POINTER"])
+  })
+
   test("executes a text action script and refuses malformed ones", async () => {
     const driver = createFakeDriver()
     const server = await startOmniaServer({ drivers: [driver], browser: createFakeBrowser() })
     try {
       const response = await fetch(`${server.url}/v1/computers/local/text`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-text"),
         body: JSON.stringify({
           approve: true,
           sessionId: "session-text",
@@ -746,6 +1169,10 @@ describe("omnia server", () => {
         }),
       })
       expect(saved.status).toBe(200)
+      const savedBody = (await saved.json()) as { superskill: { bridge: Record<string, unknown> } }
+      expect(savedBody.superskill.bridge.command).toBeUndefined()
+      expect(savedBody.superskill.bridge.envKeys).toBeUndefined()
+      expect(savedBody.superskill.bridge.type).toBe("stdio")
 
       const list = (await (await fetch(`${server.url}/v1/superskills`, { headers: headers(server) })).json()) as {
         superskills: Array<{ id: string; methods: string[] }>
@@ -754,14 +1181,14 @@ describe("omnia server", () => {
 
       const denied = await fetch(`${server.url}/v1/superskills/echo/call`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-skill"),
         body: JSON.stringify({ method: "ping", params: { value: 1 }, sessionId: "session-skill" }),
       })
       expect(denied.status).toBe(428)
 
       const called = await fetch(`${server.url}/v1/superskills/echo/call`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-skill"),
         body: JSON.stringify({
           method: "ping",
           params: { value: 7 },
@@ -783,6 +1210,64 @@ describe("omnia server", () => {
     }
   })
 
+  test("empty superskill scopes default to the bridge's PROCESS_EXECUTE gate", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omnia-superskill-scopes-"))
+    const script = join(dir, "echo.py")
+    writeFileSync(
+      script,
+      `import json\nimport sys\nfor line in sys.stdin:\n    request = json.loads(line)\n    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": request.get("params")}), flush=True)\n`,
+    )
+    const server = await startOmniaServer({
+      drivers: [createFakeDriver()],
+      browser: createFakeBrowser(),
+      superskillFile: join(dir, "superskills.json"),
+    })
+    try {
+      const saved = await fetch(`${server.url}/v1/superskills`, {
+        method: "POST",
+        headers: headers(server),
+        body: JSON.stringify({
+          id: "empty",
+          name: "Empty",
+          description: "Declares no scopes.",
+          enabled: true,
+          scopes: [],
+          bridge: { type: "stdio", command: `python3 ${script}` },
+          methods: [{ name: "ping", description: "Echo.", scopes: [] }],
+        }),
+      })
+      expect(saved.status).toBe(200)
+
+      const denied = await fetch(`${server.url}/v1/superskills/empty/call`, {
+        method: "POST",
+        headers: headers(server, "session-skill"),
+        body: JSON.stringify({
+          method: "ping",
+          approve: true,
+          approvedScopes: ["UI_READ"],
+          sessionId: "session-skill",
+        }),
+      })
+      expect(denied.status).toBe(428)
+      const deniedBody = (await denied.json()) as { result?: { error?: { details?: { missing?: string[] } } } }
+      expect(deniedBody.result?.error?.details?.missing).toContain("PROCESS_EXECUTE")
+
+      const allowed = await fetch(`${server.url}/v1/superskills/empty/call`, {
+        method: "POST",
+        headers: headers(server, "session-skill"),
+        body: JSON.stringify({
+          method: "ping",
+          approve: true,
+          approvedScopes: ["PROCESS_EXECUTE"],
+          sessionId: "session-skill",
+        }),
+      })
+      expect(allowed.status).toBe(200)
+    } finally {
+      await server.stop()
+    }
+  })
+
   test("stores and recalls memories with permission checks", async () => {
     const dir = mkdtempSync(join(tmpdir(), "omnia-memory-api-"))
     const server = await startOmniaServer({
@@ -793,14 +1278,14 @@ describe("omnia server", () => {
     try {
       const denied = await fetch(`${server.url}/v1/memories`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-mem"),
         body: JSON.stringify({ scope: "task", text: "supplier comparison notes", sessionId: "session-mem" }),
       })
       expect(denied.status).toBe(428)
 
       const written = await fetch(`${server.url}/v1/memories`, {
         method: "POST",
-        headers: headers(server),
+        headers: headers(server, "session-mem"),
         body: JSON.stringify({
           scope: "task",
           text: "supplier comparison notes: prefer CSV exports",
@@ -833,7 +1318,7 @@ describe("omnia server", () => {
       const forgotten = (await (
         await fetch(`${server.url}/v1/memories/forget`, {
           method: "POST",
-          headers: headers(server),
+          headers: headers(server, "session-mem"),
           body: JSON.stringify({ query: "supplier", sessionId: "session-mem", approve: true, approvedScopes: ["FILES_WRITE"] }),
         })
       ).json()) as { removed: number }

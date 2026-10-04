@@ -158,10 +158,10 @@ describe("element normalization", () => {
     expect(result.warnings).toEqual(["Element orphan references missing parent missing; attached at root"])
   })
 
-  test("rejects duplicate IDs and hierarchy cycles", () => {
-    expect(() => observe(observation({ elements: [{ id: "same" }, { id: "same" }] }))).toThrow(
-      "Duplicate element id: same",
-    )
+  test("dedupes duplicate IDs with a warning and rejects hierarchy cycles", () => {
+    const deduped = observe(observation({ elements: [{ id: "same" }, { id: "same" }] }))
+    expect(deduped.elements).toHaveLength(1)
+    expect(deduped.warnings).toContain("Duplicate element id: same; later duplicate ignored")
     expect(() =>
       observe(
         observation({
@@ -381,5 +381,55 @@ describe("content provenance", () => {
       source: { kind: "web", url: "https://example.test/editor" },
       locator: { css: "#editor" },
     })
+  })
+})
+describe("enabled/disabled normalization", () => {
+  test("disabled:false means enabled, disabled:true means disabled", () => {
+    const result = observe(
+      observation({
+        elements: [
+          { id: "a", disabled: false },
+          { id: "b", disabled: true },
+          { id: "c", enabled: false },
+          { id: "d", enabled: true },
+          { id: "e", states: ["disabled"] },
+        ],
+      }),
+    )
+    expect(result.byId.get("a")?.enabled).toBe(true)
+    expect(result.byId.get("b")?.enabled).toBe(false)
+    expect(result.byId.get("c")?.enabled).toBe(false)
+    expect(result.byId.get("d")?.enabled).toBe(true)
+    expect(result.byId.get("e")?.enabled).toBe(false)
+  })
+})
+
+describe("stable diff comparison", () => {
+  test("reordered metadata keys do not count as a change", () => {
+    const original = content({ content: "same text" })
+    const reordered = {
+      ...original,
+      // Same keys, reversed insertion order: JSON.stringify would call this a
+      // change, stableJson must not.
+      metadata: Object.fromEntries(Object.entries(original.metadata).reverse()) as typeof original.metadata,
+    }
+    const previous = observe(observation({ content: [original] }))
+    const current = observe(observation({ content: [reordered] }))
+    const result = diffObservations(previous, current)
+    expect(result.content.changed).toEqual([])
+    expect(result.hasChanges).toBe(false)
+  })
+
+  test("generated observation ids do not collide within a millisecond", () => {
+    const timestamp = Date.parse("2026-09-24T10:00:00.000Z")
+    const first = fromProtocolObservation({
+      observation: { timestamp, elements: [] },
+      target: { kind: "application", id: "editor" },
+    })
+    const second = fromProtocolObservation({
+      observation: { timestamp, elements: [] },
+      target: { kind: "application", id: "editor" },
+    })
+    expect(first.metadata.id).not.toBe(second.metadata.id)
   })
 })

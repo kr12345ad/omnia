@@ -64,6 +64,10 @@ const secretPatterns: readonly { readonly kind: SecretKind; readonly pattern: Re
   { kind: "api_key", pattern: /\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b/g },
   { kind: "api_key", pattern: /\bAIza[0-9A-Za-z_-]{20,}\b/g },
   { kind: "api_key", pattern: /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g },
+  { kind: "api_key", pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g },
+  { kind: "token", pattern: /\bglpat-[A-Za-z0-9_-]{16,}\b/g },
+  { kind: "api_key", pattern: /\bnpm_[A-Za-z0-9]{20,}\b/g },
+  { kind: "api_key", pattern: /\bpypi-[A-Za-z0-9_-]{16,}\b/g },
   { kind: "token", pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g },
   { kind: "token", pattern: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{12,}\b/g },
 ]
@@ -167,6 +171,21 @@ const redactValue = (
   if (seen.has(value)) return "[Circular]"
   if (depth >= (options.maxDepth ?? 20)) return "[REDACTED_DEPTH]"
   seen.add(value)
+  const result = redactContainer(value, options, path, depth, seen)
+  // Cycle tracking is scoped to the current path: a value referenced from two
+  // places is redacted in both places instead of collapsing into "[Circular]"
+  // and silently dropping the second copy.
+  seen.delete(value)
+  return result
+}
+
+const redactContainer = (
+  value: object,
+  options: RedactionOptions,
+  path: string,
+  depth: number,
+  seen: WeakSet<object>,
+): unknown => {
   if (value instanceof Date) return new Date(value.getTime())
   if (value instanceof Map) {
     return Object.fromEntries(

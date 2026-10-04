@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   ApprovalError,
   ApprovalRegistry,
@@ -44,7 +47,7 @@ import {
   withProvenance,
 } from "./index"
 
-const allowRead = { action: "read", resource: "*", effect: "allow" } as const
+const allowRead = { action: "read", resource: "*", effect: "allow", source: "operator" } as const
 
 describe("permission evaluation", () => {
   test("requires permission when no rule matches", () => {
@@ -63,8 +66,8 @@ describe("permission evaluation", () => {
   test("does not let a broad allow override a deny", () => {
     const result = evaluatePermission({ action: "read", resources: ["secret.txt"] }, {
       rules: [
-        { action: "*", resource: "*", effect: "allow" },
-        { action: "read", resource: "secret.txt", effect: "deny" },
+        { action: "*", resource: "*", effect: "allow", source: "operator" },
+        { action: "read", resource: "secret.txt", effect: "deny", source: "operator" },
       ],
     })
     expect(result.outcome).toBe("denied")
@@ -74,11 +77,27 @@ describe("permission evaluation", () => {
   test("does not let a narrow allow override a broad deny", () => {
     const result = evaluatePermission({ action: "read", resources: ["secret.txt"] }, {
       rules: [
-        { action: "read", resource: "*", effect: "deny" },
-        { action: "read", resource: "secret.txt", effect: "allow" },
+        { action: "read", resource: "*", effect: "deny", source: "operator" },
+        { action: "read", resource: "secret.txt", effect: "allow", source: "operator" },
       ],
     })
     expect(result.outcome).toBe("denied")
+  })
+
+  test("ignores rules that do not declare a trusted source", () => {
+    const result = evaluatePermission({ action: "read", resources: ["notes.txt"] }, {
+      rules: [{ action: "*", resource: "*", effect: "allow" }],
+    })
+    expect(result.outcome).toBe("permission_required")
+    expect(result.allowed).toBe(false)
+  })
+
+  test("does not wildcard resource-less operations", () => {
+    const result = evaluatePermission({ action: "read" }, {
+      rules: [{ action: "*", resource: "*", effect: "allow", source: "operator" }],
+    })
+    expect(result.outcome).toBe("permission_required")
+    expect(result.allowed).toBe(false)
   })
 
   test("ignores permission rules supplied by untrusted content", () => {
@@ -91,7 +110,7 @@ describe("permission evaluation", () => {
 
   test("keeps denied and blocked outcomes distinct", () => {
     const denied = evaluatePermission({ action: "read", resources: ["notes.txt"] }, {
-      rules: [{ action: "read", resource: "*", effect: "deny" }],
+      rules: [{ action: "read", resource: "*", effect: "deny", source: "operator" }],
     })
     const blocked = evaluatePermission({ action: "read", resources: ["../outside"] }, {
       pathScope: makePathScope({ root: "/workspace", read: ["**"] }),
@@ -102,7 +121,7 @@ describe("permission evaluation", () => {
 
   test("requires approval for a destructive action even with a broad allow", () => {
     const result = evaluatePermission({ action: "delete", resources: ["/workspace/file"] }, {
-      rules: [{ action: "*", resource: "*", effect: "allow" }],
+      rules: [{ action: "*", resource: "*", effect: "allow", source: "operator" }],
     })
     expect(result.outcome).toBe("permission_required")
     expect(result.danger.kind).toBe("delete")
@@ -124,7 +143,7 @@ describe("permission evaluation", () => {
 
   test("throws explicit permission errors", () => {
     expect(() => assertPermission({ action: "read", resources: ["x"] })).toThrow(PermissionRequiredError)
-    expect(() => assertPermission({ action: "read", resources: ["x"] }, { rules: [{ action: "read", resource: "*", effect: "deny" }] })).toThrow(PermissionDeniedError)
+    expect(() => assertPermission({ action: "read", resources: ["x"] }, { rules: [{ action: "read", resource: "*", effect: "deny", source: "operator" }] })).toThrow(PermissionDeniedError)
     expect(() => assertPermission({ action: "read", resources: ["../x"] }, { pathScope: makePathScope({ root: "/workspace", read: ["**"] }) })).toThrow(PermissionBlockedError)
   })
 })
@@ -179,6 +198,22 @@ describe("scoped path access", () => {
     expect(result.outcome).toBe("blocked")
     expect(normalizePath("/workspace/project/src/../src/file.ts")).toBe("/workspace/project/src/file.ts")
   })
+
+  test("resolves symlinked ancestors by default without an explicit realpath", () => {
+    const root = mkdtempSync(join(tmpdir(), "omnia-path-root-"))
+    const outside = mkdtempSync(join(tmpdir(), "omnia-path-outside-"))
+    try {
+      writeFileSync(join(outside, "secret.txt"), "classified")
+      symlinkSync(outside, join(root, "link"))
+      const scoped = makePathScope({ root, read: ["**"] })
+      expect(evaluatePathAccess(scoped, { path: "link/secret.txt", access: "read" }).outcome).toBe("blocked")
+      writeFileSync(join(root, "inside.txt"), "ok")
+      expect(evaluatePathAccess(scoped, { path: "inside.txt", access: "read" }).outcome).toBe("allowed")
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
 })
 
 describe("dangerous operation classification", () => {
@@ -222,6 +257,33 @@ describe("secret redaction", () => {
     expect(url).not.toContain("password")
     expect(url).not.toContain("secret")
     expect(url).toContain("safe=value")
+  })
+
+  test("redacts modern provider token formats", () => {
+    const tokens = [
+      "github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz",
+      "ghp_abcdefghijklmnopqrstuvwxyz1234",
+      "gho_abcdefghijklmnopqrstuvwxyz1234",
+      "ghu_abcdefghijklmnopqrstuvwxyz1234",
+      "ghs_abcdefghijklmnopqrstuvwxyz1234",
+      "ghr_abcdefghijklmnopqrstuvwxyz1234",
+      "glpat-abcdefghijklmnopqrst",
+      "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+      "pypi-AgEIcHlwaS5vcmcCJGFiY2RlZg",
+      "sk-ant-api03-abcdefghijklmnop",
+      "sk-proj-abcdefghijklmnopqrstuv",
+      "AIzaSyA1234567890abcdefghijklmnopqrst",
+      "xoxb-123456789012-abcdefghijklmnop",
+      "sk_live_abcdefghijklmn",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature",
+      "AKIAIOSFODNN7EXAMPLE",
+      "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----",
+    ]
+    for (const token of tokens) {
+      const redacted = redactText(`value ${token} end`)
+      expect(redacted).not.toContain(token.split("\n")[0]!.slice(0, 12))
+      expect(redacted).toContain("[REDACTED]")
+    }
   })
 
   test("redacts headers and errors", () => {
@@ -299,6 +361,16 @@ describe("approval and audit helpers", () => {
     const operation = { action: "shell", resources: ["build"], command: "rm build" } as const
     const grant = makeApprovalGrant(operation, "user")
     expect(isApprovalGrantValid(grant, { ...operation, command: "rm -rf /" })).toBe(false)
+  })
+
+  test("expires non-dangerous grants with a default TTL", () => {
+    const operation = { action: "write", resources: ["src/a.ts"] } as const
+    const grant = makeApprovalGrant(operation, "user", { now: 1000 })
+    expect(grant.usesRemaining).toBeUndefined()
+    const expiresAt = grant.expiresAt
+    expect(expiresAt).toBeDefined()
+    expect(isApprovalGrantValid(grant, operation, 1000)).toBe(true)
+    expect(isApprovalGrantValid(grant, operation, (expiresAt ?? 0) + 1)).toBe(false)
   })
 
   test("consumes bounded approvals", () => {

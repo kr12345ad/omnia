@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs"
 import type { AccessMode, PathAccessRequest, PathDecision, PathScope, PermissionOutcome } from "./types"
 
 export class PathScopeError extends Error {
@@ -185,7 +186,9 @@ const patternsFor = (scope: PathScope, access: AccessMode): readonly string[] | 
   if (access === "delete") return scope.delete ?? scope.allow
   if (access === "execute") return scope.execute ?? scope.allow
   if (access === "admin") return scope.admin ?? scope.allow
-  return scope.allow
+  // An access mode outside the enum must not fall back to the broadest rule
+  // list: an unrecognised mode grants nothing.
+  return undefined
 }
 
 const invalidDecision = (path: string, reason: string): PathDecision => ({
@@ -258,6 +261,28 @@ const accessForOperation = (operation: string | undefined): AccessMode => {
   return "read"
 }
 
+// Resolves symlinks even for paths that do not exist yet by resolving the
+// deepest existing ancestor and re-appending the remaining segments. This
+// closes the TOCTOU gap where a symlinked parent directory redirects a later
+// write outside the scope.
+function resolvePathSymlinks(path: string): string {
+  let candidate = path
+  const tail: string[] = []
+  for (let index = 0; index < 64; index += 1) {
+    try {
+      const resolved = realpathSync.native(candidate)
+      const suffix = tail.reverse().join("/")
+      return suffix.length === 0 ? normalizePath(resolved) : normalizePath(`${resolved}/${suffix}`)
+    } catch {
+      const separatorIndex = candidate.lastIndexOf("/")
+      if (separatorIndex <= 0) return path
+      tail.push(candidate.slice(separatorIndex + 1))
+      candidate = candidate.slice(0, separatorIndex)
+    }
+  }
+  return path
+}
+
 export function evaluatePathAccess(scope: PathScope, request: PathAccessRequest): PathDecision {
   const access = request.access ?? accessForOperation(request.operation)
   const caseOptions = scope.caseSensitive === undefined ? {} : { caseSensitive: scope.caseSensitive }
@@ -278,31 +303,40 @@ export function evaluatePathAccess(scope: PathScope, request: PathAccessRequest)
   if (!isAbsolutePath(root) || !isPathWithin(root, normalizedPath, caseOptions)) {
     return { ...base, status: "blocked", outcome: "blocked", allowed: false, reason: "path escapes the configured scope" }
   }
-  const realpath = request.realpath ?? scope.realpath
-  const shouldResolveSymlink = request.followSymlinks === true || scope.followSymlinks === true || realpath !== undefined
-  if (shouldResolveSymlink) {
-    if (realpath === undefined) {
-      return { ...base, status: "blocked", outcome: "blocked", allowed: false, reason: "symlink resolution is required for this access" }
-    }
-    let resolved: string
+  // Symlinks are always resolved so a scoped path cannot escape through a
+  // symlinked ancestor. An explicitly supplied realpath is authoritative and
+  // fails closed when it throws; the default resolver falls back to the
+  // normalized path for not-yet-existing files.
+  const explicitRealpath = request.realpath ?? scope.realpath
+  // The default resolver maps the candidate through the filesystem, so the
+  // root has to be mapped through it as well: a scope whose root is itself a
+  // symlink (/var, /tmp, linked worktrees) would otherwise compare a resolved
+  // child against an unresolved root and block every path in the scope. An
+  // injected resolver stays authoritative and keeps the configured root.
+  const scopeRoot = explicitRealpath === undefined ? resolvePathSymlinks(root) : root
+  const resolved = (() => {
+    if (explicitRealpath === undefined) return resolvePathSymlinks(normalizedPath)
     try {
-      resolved = normalizePath(realpath(normalizedPath), caseOptions)
+      return normalizePath(explicitRealpath(normalizedPath), caseOptions)
     } catch {
-      return { ...base, status: "blocked", outcome: "blocked", allowed: false, reason: "symlink target could not be validated" }
+      return undefined
     }
-    if (!isPathWithin(root, resolved, caseOptions)) {
-      return { ...base, status: "blocked", outcome: "blocked", allowed: false, reason: "symlink target escapes the configured scope" }
-    }
-    normalizedPath = resolved
+  })()
+  if (resolved === undefined) {
+    return { ...base, status: "blocked", outcome: "blocked", allowed: false, reason: "symlink target could not be validated" }
   }
-  const decision = { ...base, normalizedPath }
-  const denied = (scope.deny ?? []).find((pattern) => pathPatternMatches(root, normalizedPath, pattern))
+  if (!isPathWithin(scopeRoot, resolved, caseOptions)) {
+    return { ...base, status: "blocked", outcome: "blocked", allowed: false, reason: "symlink target escapes the configured scope" }
+  }
+  normalizedPath = resolved
+  const decision = { ...base, root: scopeRoot, normalizedPath }
+  const denied = (scope.deny ?? []).find((pattern) => pathPatternMatches(scopeRoot, normalizedPath, pattern))
   if (denied !== undefined) return { ...decision, status: "denied", outcome: "denied", allowed: false, reason: "path matches a deny rule", pattern: denied }
   const patterns = patternsFor(scope, access)
   if (patterns === undefined || patterns.length === 0) {
     return { ...decision, status: "permission_required", outcome: "permission_required", allowed: false, reason: "no path rule grants this access" }
   }
-  const matched = patterns.find((pattern) => pathPatternMatches(root, normalizedPath, pattern))
+  const matched = patterns.find((pattern) => pathPatternMatches(scopeRoot, normalizedPath, pattern))
   if (matched === undefined) {
     return { ...decision, status: "permission_required", outcome: "permission_required", allowed: false, reason: "path is not granted by the access scope" }
   }

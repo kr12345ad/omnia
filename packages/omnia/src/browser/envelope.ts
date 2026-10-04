@@ -1,22 +1,25 @@
 import type { JsonValue } from "../protocol"
-import type { CompactPageRetrieval } from "./compact"
-
-export interface BrowserContentOrigin {
-  readonly browserId: string
-  readonly contextId: string
-}
 
 export interface WebContentSource {
   readonly kind: "browser-page"
   readonly browserId: string
   readonly contextId: string
   readonly tabId: string
-  readonly pageId: string
-  readonly documentId: string
-  readonly url: string
+  readonly pageId?: string
+  readonly documentId?: string
+  readonly url?: string
 }
 
-export interface UntrustedWebContent<Payload = CompactPageRetrieval> {
+export interface BrowserUntrustedSource {
+  readonly browserId: string
+  readonly contextId: string
+  readonly tabId: string
+  readonly pageId?: string
+  readonly documentId?: string
+  readonly url?: string
+}
+
+export interface UntrustedWebContent<Payload = JsonValue> {
   readonly _tag: "UntrustedWebContent"
   readonly version: 1
   readonly trust: "untrusted"
@@ -39,26 +42,26 @@ interface SanitizationState {
   nodes: number
 }
 
-export function captureUntrustedPage(
-  page: CompactPageRetrieval,
-  origin: BrowserContentOrigin,
+export function captureUntrustedPayload<Payload>(
+  payload: Payload,
+  source: BrowserUntrustedSource,
   capturedAt: string,
-): UntrustedWebContent<CompactPageRetrieval> {
+): UntrustedWebContent<Payload> {
   return {
     _tag: "UntrustedWebContent",
     version: 1,
     trust: "untrusted",
     source: {
       kind: "browser-page",
-      browserId: origin.browserId,
-      contextId: origin.contextId,
-      tabId: page.page.tabId,
-      pageId: page.page.id,
-      documentId: page.page.documentId,
-      url: page.page.url,
+      browserId: source.browserId,
+      contextId: source.contextId,
+      tabId: source.tabId,
+      ...(source.pageId === undefined ? {} : { pageId: source.pageId }),
+      ...(source.documentId === undefined ? {} : { documentId: source.documentId }),
+      ...(source.url === undefined ? {} : { url: source.url }),
     },
     capturedAt,
-    payload: page,
+    payload,
   }
 }
 
@@ -124,6 +127,13 @@ function normalizeJsonValue(
 
 function isUnknownArray(value: object): value is readonly unknown[] {
   return Array.isArray(value)
+}
+
+// Escapes page-controlled strings so they cannot break out of a tool-output
+// line. Every untrusted field that reaches a caller must pass through this or
+// through serializeUntrustedForPrompt.
+export function escapeUntrustedText(value: string, maxCharacters = 4_000): string {
+  return sanitizeString(value, maxCharacters)
 }
 
 function sanitizeString(value: string, limit: number): string {

@@ -32,7 +32,11 @@ import type {
 
 const DEFAULT_LIMIT = 50
 const DEFAULT_FUZZY_THRESHOLD = 0.55
-const DEFAULT_MINIMUM_CONFIDENCE = 0.35
+// 0.35 was low enough that a 0.4 query.includes(name) over-match resolved as
+// an executable target; read operations keep a 0.5 floor and mutating actions
+// require 0.6, aligned with the router's semantic threshold.
+const DEFAULT_MINIMUM_CONFIDENCE = 0.5
+const MUTATING_MINIMUM_CONFIDENCE = 0.6
 const DEFAULT_MINIMUM_MARGIN = 0.08
 
 export function retrieveElements(
@@ -150,7 +154,10 @@ export function disambiguateCandidates(
   const rawCandidates: readonly RetrievalCandidate[] = resultInput === undefined ? input as readonly RetrievalCandidate[] : resultInput.matches
   const candidates = rawCandidates.map(normalizeCandidate).sort(compareMatches)
   const inputProvenance = resultInput?.provenance
-  const minimumConfidence = options.minimumConfidence ?? options.minConfidence ?? DEFAULT_MINIMUM_CONFIDENCE
+  const minimumConfidence =
+    options.minimumConfidence ??
+    options.minConfidence ??
+    (options.mutating === true ? MUTATING_MINIMUM_CONFIDENCE : DEFAULT_MINIMUM_CONFIDENCE)
   const viable = candidates.filter((candidate) => candidate.confidence >= minimumConfidence)
   const base: Omit<CandidateDecision, "status" | "selected" | "match" | "confidence" | "reason" | "provenance" | "needsDisambiguation"> = {
     candidates,
@@ -395,16 +402,31 @@ function notFound(candidates: readonly RetrievalMatch[]): CandidateDecision {
 }
 
 function normalizeCandidate(candidate: RetrievalCandidate, index: number): RetrievalMatch {
-  if ("confidence" in candidate) return candidate
+  // A candidate may carry a missing/NaN confidence (or NaN score); coerce both
+  // so comparisons never see NaN.
+  const score = Number.isFinite(candidate.score) ? clamp(candidate.score) : 0
+  const confidence =
+    "confidence" in candidate && Number.isFinite(candidate.confidence) ? clamp(candidate.confidence) : score
+  if (
+    "confidence" in candidate &&
+    Number.isFinite(candidate.confidence) &&
+    Number.isFinite(candidate.score) &&
+    "provenance" in candidate &&
+    "matchedOn" in candidate &&
+    "hierarchyPath" in candidate
+  ) {
+    return candidate
+  }
   return {
     ...candidate,
-    confidence: candidate.score,
-    provenance: fallbackProvenance(undefined),
-    matchedOn: candidate.reason === undefined ? [] : [candidate.reason],
-    hierarchyPath: candidate.element.id === undefined ? [] : [candidate.element.id],
-    depth: 0,
-    contextScore: 0,
-    elementIndex: index,
+    score,
+    confidence,
+    provenance: "provenance" in candidate ? candidate.provenance : fallbackProvenance(undefined),
+    matchedOn: "matchedOn" in candidate ? candidate.matchedOn : candidate.reason === undefined ? [] : [candidate.reason],
+    hierarchyPath: "hierarchyPath" in candidate ? candidate.hierarchyPath : candidate.element.id === undefined ? [] : [candidate.element.id],
+    depth: "depth" in candidate ? candidate.depth : 0,
+    contextScore: "contextScore" in candidate ? candidate.contextScore : 0,
+    elementIndex: "elementIndex" in candidate ? candidate.elementIndex : index,
   }
 }
 
@@ -507,15 +529,16 @@ function roundScore(value: number): number {
   return Math.round(clamp(value) * 1_000_000) / 1_000_000
 }
 
+// Invalid thresholds/limits are clamped instead of throwing RangeError from
+// the public API: a caller-supplied 1.5 must not break retrieval.
 function normalizeThreshold(value: number): number {
-  if (!Number.isFinite(value) || value < 0 || value > 1) throw new RangeError("fuzzy threshold must be between zero and one")
-  return value
+  if (!Number.isFinite(value)) return DEFAULT_FUZZY_THRESHOLD
+  return Math.min(1, Math.max(0, value))
 }
 
 function normalizeLimit(value: number | undefined): number {
-  if (value === undefined) return DEFAULT_LIMIT
-  if (!Number.isSafeInteger(value) || value < 0) throw new RangeError("limit must be a non-negative safe integer")
-  return value
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_LIMIT
+  return Math.max(0, Math.min(Math.floor(value), 1000))
 }
 
 export function asFindResult(result: RetrievalResult): FindResult {

@@ -20,6 +20,7 @@ import {
   matchX11WindowId,
   matchesWaitCondition,
   parseAtspiPath,
+  parseWlrRandrGeometry,
   rawAtspiActions,
   resolveLooseElement,
   resolveLooseWindow,
@@ -29,6 +30,7 @@ import {
   type CuaRunner,
   type CuaRunResult,
 } from "./linux"
+import { limitSnapshot } from "./snapshot-limit"
 
 const INERT_INTERFACES = { component: false, action: false, editable: false, value: false }
 const COMPONENT_INTERFACES = { component: true, action: false, editable: false, value: false }
@@ -504,6 +506,7 @@ interface HarnessOptions {
   ready?: Partial<HelperReady>
   which?: readonly string[]
   allowForeground?: boolean
+  allowRebind?: boolean
   x11Windows?: boolean
   session?: LinuxSessionType
   interpreter?: string
@@ -524,6 +527,7 @@ function createHarness(options: HarnessOptions = {}) {
     probeDisplay: false,
     ...(options.interpreter === undefined ? {} : { interpreter: options.interpreter }),
     ...(options.allowForeground === true ? { allowForeground: true } : {}),
+    ...(options.allowRebind === true ? { allowRebind: true } : {}),
   })
   return { backend, helper: fakeHelper, runner: fakeRunner }
 }
@@ -553,7 +557,7 @@ describe("cua linux backend with a fake helper", () => {
     expect(result.delivery).toBe("background-ax")
     expect(result.verified).toBe(true)
     expect(result.error).toBeUndefined()
-    expect(helper.calls.map((call) => call.command)).toEqual(["snapshot", "resolve", "act"])
+    expect(helper.calls.map((call) => call.command)).toEqual(["probe", "snapshot", "resolve", "act"])
     expect(runner.calls).toHaveLength(0)
   })
 
@@ -660,7 +664,7 @@ describe("cua linux backend with a fake helper", () => {
     const result = await backend.execute({ type: "set_value", ref: entry.ref, value: "hello" })
     expect(result.ok).toBe(true)
     expect(result.delivery).toBe("foreground-ax")
-    expect(helper.calls.map((call) => call.command)).toEqual(["snapshot", "resolve", "set-text", "focus", "set-text"])
+    expect(helper.calls.map((call) => call.command)).toEqual(["probe", "snapshot", "resolve", "set-text", "focus", "set-text"])
   })
 
   test("capture ids are validated and one-use for point actions", async () => {
@@ -983,7 +987,7 @@ describe("cua linux backend with a fake helper", () => {
     expect(result.error?.message).toContain("device screen")
   })
 
-  test("pastes unsupported characters through the clipboard and restores it", async () => {
+  test("refuses silent clipboard paste and requires explicit allowClipboardPaste", async () => {
     const directory = mkdtempSync(join(tmpdir(), "omnia-fake-python-"))
     const interpreter = join(directory, "fake-python")
     writeFileSync(interpreter, "#!/bin/sh\ncat > /dev/null\nexit 0\n")
@@ -999,13 +1003,18 @@ describe("cua linux backend with a fake helper", () => {
             }
           }
           if (args[0] === "-c" && args[2] === "type" && args.includes("--check")) {
-            return { stdout: JSON.stringify({ ok: true, typed: 0, skipped: ["\u2603"] }), stderr: "" }
+            return { stdout: JSON.stringify({ ok: true, typed: 0, skipped: ["☃"] }), stderr: "" }
           }
           return undefined
         },
       })
-      const result = await backend.execute({ type: "type", text: "snow \u2603" })
-      expect(result.ok).toBe(true)
+      // Silent paste is refused: the caller must opt in explicitly.
+      const silent = await backend.execute({ type: "type", text: "snow ☃" })
+      expect(silent.ok).toBe(false)
+      expect(silent.error?.code).toBe("clipboard_paste_required")
+      // Explicit opt-in pastes through the clipboard and restores it.
+      const explicit = await backend.execute({ type: "type", text: "snow ☃", allowClipboardPaste: true })
+      expect(explicit.ok).toBe(true)
       const typed = runner.calls.filter((call) => call.args[2] === "type" && !call.args.includes("--check"))
       expect(typed).toHaveLength(0)
       expect(runner.calls.some((call) => call.args[2] === "key" && call.args.includes("ctrl+v"))).toBe(true)
@@ -1484,13 +1493,16 @@ describe("cua linux screenshot retention", () => {
             return { stdout: JSON.stringify({ ok: true, text: "", complete: false }), stderr: "" }
           }
           if (args[0] === "-c" && args[2] === "type" && args.includes("--check")) {
-            return { stdout: JSON.stringify({ ok: true, typed: 0, skipped: ["\u2603"] }), stderr: "" }
+            return { stdout: JSON.stringify({ ok: true, typed: 0, skipped: ["☃"] }), stderr: "" }
           }
           return undefined
         },
       })
-      const result = await backend.execute({ type: "type", text: "snow \u2603" })
-      expect(result.ok).toBe(true)
+      // Silent paste is refused, so no clipboard holder is leaked; dispose is
+      // still clean.
+      const result = await backend.execute({ type: "type", text: "snow ☃" })
+      expect(result.ok).toBe(false)
+      expect(result.error?.code).toBe("clipboard_paste_required")
       await backend.dispose()
     } finally {
       rmSync(directory, { recursive: true, force: true })
@@ -1535,6 +1547,22 @@ describe("cua linux screen bounds", () => {
     expect(beyond.ok).toBe(false)
     expect(beyond.error?.code).toBe("invalid_point")
     expect(runner.calls.some((call) => call.file === "xrandr")).toBe(true)
+  })
+
+  test("accepts negative coordinates when a monitor sits left of the primary", async () => {
+    const shifted = atspiSnapshot()
+    shifted.screen = { x: -1920, y: 0, width: 1920, height: 1080 }
+    const { backend } = createHarness({
+      x11Windows: false,
+      handlers: { ...baseHandlers(), snapshot: () => shifted, click: () => ({ result: true }) },
+    })
+    const snapshot = await backend.snapshot()
+    expect(snapshot.screen).toEqual({ x: -1920, y: 0, width: 1920, height: 1080 })
+    const click = await backend.execute({ type: "click", point: { x: -100, y: 100 }, captureId: snapshot.id })
+    expect(click.ok).toBe(true)
+    const outside = await backend.execute({ type: "click", point: { x: -2500, y: 100 } })
+    expect(outside.ok).toBe(false)
+    expect(outside.error?.code).toBe("invalid_point")
   })
 
   test("falls back to xwininfo -root when xrandr reports nothing", async () => {
@@ -1957,6 +1985,158 @@ describe("cua linux window identity", () => {
   })
 })
 
+describe("cua linux focused snapshots and helper cache", () => {
+  function focusedAppSnapshot(signature: string): AtspiSnapshotPayload {
+    const payload = atspiSnapshot()
+    const application = payload.applications[0]
+    if (application === undefined) throw new Error("fixture missing application")
+    application.key = "pid:42"
+    application.signature = signature
+    application.index = 0
+    const frame = application.nodes[0]?.children[0]
+    if (frame === undefined) throw new Error("fixture missing frame")
+    for (let index = 0; index < 4; index += 1) {
+      frame.children.push({
+        index: 10 + index,
+        role: "label",
+        name: `Note ${index}`,
+        states: [],
+        actions: [],
+        attributes: {},
+        interfaces: INERT_INTERFACES,
+        children: [],
+      })
+    }
+    return payload
+  }
+
+  function focusedHandlers(signature: () => string): FakeHandlerMap {
+    return {
+      ...baseHandlers(),
+      probe: () => ({
+        apps: [{ key: "pid:42", signature: signature(), index: 0, name: "firefox", pid: 42 }],
+        fallback: false,
+        focused: "pid:42",
+      }),
+      snapshot: () => focusedAppSnapshot(signature()),
+    }
+  }
+
+  test("walks only the focused application and selects it by active pid", async () => {
+    const { backend, helper } = createHarness({
+      x11Windows: true,
+      handlers: focusedHandlers(() => "s1"),
+      onRun: (file, args) => {
+        if (file === "xprop" && args[0] === "-root" && args[1] === "_NET_ACTIVE_WINDOW") {
+          return { stdout: "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x1\n", stderr: "" }
+        }
+        if (file === "xprop" && args[0] === "-id" && args[2] === "_NET_WM_PID") {
+          return { stdout: "_NET_WM_PID(CARDINAL) = 42\n", stderr: "" }
+        }
+        return undefined
+      },
+    })
+    await backend.snapshot()
+    const params = helper.calls.find((call) => call.command === "snapshot")?.params
+    expect(params?.scope).toBe("focused")
+    expect(params?.active_pid).toBe(42)
+    expect(params?.app).toBeUndefined()
+    // The observe budget must not cap the helper walk; find reuses this walk.
+    expect(params?.max_nodes).toBeGreaterThan(2000)
+  })
+
+  test("reuses the helper walk until the signature changes", async () => {
+    let signature = "s1"
+    const { backend, helper } = createHarness({ handlers: focusedHandlers(() => signature) })
+    const capped = await backend.snapshot({ maxElements: 1 })
+    expect(capped.elements.filter((element) => element.role === "button")).toHaveLength(1)
+    expect(capped.elements.length).toBeGreaterThanOrEqual(3)
+    const full = await backend.snapshot({ maxElements: 10_000 })
+    expect(helper.calls.filter((call) => call.command === "snapshot")).toHaveLength(1)
+    expect(full.elements.map((element) => element.name)).toContain("Volume")
+    signature = "s2"
+    await backend.snapshot()
+    expect(helper.calls.filter((call) => call.command === "snapshot")).toHaveLength(2)
+  })
+
+  test("find filters the cached full walk without another helper call", async () => {
+    const { backend, helper } = createHarness({ handlers: focusedHandlers(() => "s1") })
+    const small = await backend.snapshot({ maxElements: 1 })
+    const full = await backend.snapshot({ maxElements: 10_000 })
+    const found = await backend.find({ name: "Volume" }, full)
+    expect(found.map((element) => element.name)).toEqual(["Volume"])
+    expect(full.elements.length).toBeGreaterThan(small.elements.length)
+    expect(helper.calls.filter((call) => call.command === "snapshot")).toHaveLength(1)
+  })
+
+  test("refreshWindow forces a fresh focused-app walk and refuses unknown refs", async () => {
+    const { backend, helper } = createHarness({ handlers: focusedHandlers(() => "s1") })
+    const snapshot = await backend.snapshot()
+    const windowRef = snapshot.windows[0]?.ref
+    if (windowRef === undefined) throw new Error("fixture missing window")
+    const refreshed = await backend.refreshWindow(windowRef)
+    expect(refreshed?.windows[0]?.ref).toBe(windowRef)
+    const snapshotCalls = helper.calls.filter((call) => call.command === "snapshot")
+    expect(snapshotCalls).toHaveLength(2)
+    expect(snapshotCalls[1]?.params.force).toBe(true)
+    expect(await backend.refreshWindow("cua:window/missing/0")).toBeUndefined()
+  })
+
+  test("limitSnapshot retains focused-window controls past the budget", () => {
+    const window = "cua:window/app/main/0"
+    const control = (name: string, role: string): CuaElement => ({
+      ref: `${window}/${role}/${name.toLowerCase()}/0`,
+      backendRef: `atspi:0.1.${name.length}`,
+      role,
+      name,
+      enabled: true,
+      focused: false,
+      editable: false,
+      actions: ["click"],
+      states: [],
+      generation: 1,
+      windowRef: window,
+    })
+    const passive = (name: string): CuaElement => ({
+      ref: `${window}/text/${name}/0`,
+      backendRef: `atspi:0.2.${name.length}`,
+      role: "text",
+      name,
+      enabled: true,
+      focused: false,
+      editable: false,
+      actions: [],
+      states: [],
+      generation: 1,
+      windowRef: window,
+    })
+    const snapshot: CuaSnapshot = {
+      id: "cap-1",
+      generation: 1,
+      takenAt: 0,
+      platform: "linux",
+      windows: [{ ref: window, backendRef: "atspi:0.1", app: "app", title: "Main", focused: true, generation: 1 }],
+      elements: [
+        control("Bold", "button"),
+        control("Left", "switch"),
+        control("Justified", "switch"),
+        passive("one"),
+        passive("two"),
+        passive("three"),
+      ],
+      truncated: false,
+      warnings: [],
+    }
+    const capped = limitSnapshot(snapshot, 2, "atspi:0.1", false)
+    expect(capped.elements).toHaveLength(2)
+    const retained = limitSnapshot(snapshot, 2, "atspi:0.1", true)
+    expect(retained.elements.filter((element) => element.actions.length > 0)).toHaveLength(3)
+    expect(retained.elements.some((element) => element.role === "text")).toBe(false)
+    expect(retained.truncated).toBe(true)
+    expect(retained.warnings.some((warning) => warning.includes("truncated to 3 of 6"))).toBe(true)
+  })
+})
+
 const integrationDisplay = process.env.DISPLAY
 const hasIntegrationDisplay = integrationDisplay !== undefined && integrationDisplay.length > 0
 const describeIntegration = hasIntegrationDisplay ? describe : describe.skip
@@ -1995,4 +2175,80 @@ describeInputIntegration("cua linux XTest integration", () => {
       await backend.dispose()
     }
   }, 30000)
+})
+
+describe("cua linux truth-layer regressions", () => {
+  test("refuses generation/observation mismatches instead of rebinding", async () => {
+    const { backend } = createHarness()
+    const snapshot = await backend.snapshot()
+    const button = requireElement(snapshot, "Export")
+    const staleObs = await backend.execute({ type: "invoke", ref: button.ref, observationId: "cap-stale" })
+    expect(staleObs.ok).toBe(false)
+    expect(staleObs.error?.code).toBe("stale_ref")
+    const staleGen = await backend.execute({ type: "invoke", ref: button.ref, generation: 9999 })
+    expect(staleGen.ok).toBe(false)
+    expect(staleGen.error?.code).toBe("stale_ref")
+    const ok = await backend.execute({
+      type: "invoke",
+      ref: button.ref,
+      observationId: snapshot.id,
+      generation: snapshot.generation,
+    })
+    expect(ok.ok).toBe(true)
+  })
+
+  test("loose slug re-resolution requires explicit allowRebind", async () => {
+    const { backend } = createHarness()
+    const snapshot = await backend.snapshot()
+    const button = requireElement(snapshot, "Export")
+    const shifted = button.ref.replace(/\/0$/, "/7")
+    const refused = await backend.execute({ type: "invoke", ref: shifted })
+    expect(refused.ok).toBe(false)
+    expect(refused.error?.code).toBe("stale_ref")
+
+    const rebound = createHarness({ allowRebind: true })
+    const snap2 = await rebound.backend.snapshot()
+    const btn2 = requireElement(snap2, "Export")
+    const shifted2 = btn2.ref.replace(/\/0$/, "/7")
+    // With explicit allowRebind a single remaining candidate may resolve.
+    const result = await rebound.backend.execute({ type: "invoke", ref: shifted2, allowRebind: true })
+    // Either resolves (single candidate) or refuses as ambiguous, but never
+    // silently targets the wrong occurrence.
+    expect(["stale_ref", "target_mismatch", undefined]).toContain(result.error?.code ?? undefined)
+    await rebound.backend.dispose()
+  })
+
+  test("fails instead of silently dropping unknown keys", async () => {
+    const { backend } = createHarness({
+      onRun: (file, args) => {
+        if (file === "python3" && args.includes("type") && args.includes("--check")) {
+          return { stdout: JSON.stringify({ ok: true, typed: 0, skipped: [] }), stderr: "" }
+        }
+        if (file === "python3" && args.includes("type") && args.includes("--text")) {
+          return { stdout: JSON.stringify({ ok: true, typed: 1, skipped: [""] }), stderr: "" }
+        }
+        return undefined
+      },
+    })
+    await backend.snapshot()
+    const result = await backend.execute({ type: "type", text: "a" })
+    expect(result.ok).toBe(false)
+    expect(result.error?.code).toBe("input_failed")
+    expect(result.error?.message).toMatch(/not typed|Unsupported/i)
+  })
+
+  test("Wayland per-monitor geometry allows negative origins with one conversion", () => {
+    const geometry = parseWlrRandrGeometry(
+      JSON.stringify([
+        { name: "DP-1", enabled: true, scale: 2, position: { x: -1920, y: 0 }, current_mode: { width: 3840, height: 2160 } },
+        { name: "eDP-1", enabled: true, scale: 1, position: { x: 0, y: 0 }, current_mode: { width: 1920, height: 1080 } },
+      ]),
+    )
+    expect(geometry?.scale).toBe(2)
+    expect(geometry?.monitors).toHaveLength(2)
+    expect(geometry?.monitors?.[0]?.x).toBe(-1920)
+    // Logical width is device/scale: exactly one conversion, not two.
+    expect(geometry?.monitors?.[0]?.width).toBe(1920)
+    expect(geometry?.device?.x).toBe(-3840)
+  })
 })

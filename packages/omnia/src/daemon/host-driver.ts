@@ -2,6 +2,8 @@ import { isComputerAction } from "../protocol"
 import type {
   ActionResult,
   CapabilitySupport,
+  CommandRequest,
+  CommandResult,
   ComputerAction,
   ComputerDriver,
   ComputerInfo,
@@ -13,7 +15,9 @@ import type {
   PermissionRequirement,
   UIElement,
 } from "../protocol"
+import { createCuaHostDriver } from "../cua/host-driver"
 import { LinuxHostDriver, parseAtspiReference } from "./linux"
+import type { InputGrabEvent, InputGrabReleasedBy } from "./linux"
 
 export const INPUT_PERMISSION: PermissionRequirement = {
   id: "computer.input",
@@ -41,15 +45,18 @@ export interface HostRevalidation {
 }
 
 export interface HostDriver extends ComputerDriver {
+  readonly engine?: unknown
   getInfo: () => Promise<ComputerInfo>
   observe: (request?: ObservationRequest) => Promise<Observation>
   find: (request: FindRequest) => Promise<FindResult>
   execute: (action: ComputerAction) => Promise<ActionResult>
+  runCommand?: (request: CommandRequest) => Promise<ActionResult & { command?: CommandResult }>
   readText?: (input: { elementId?: string; application?: string; limit?: number }) => Promise<
     ActionResult & { text?: string; length?: number; hash?: string }
   >
   readClipboard?: () => Promise<ActionResult & { text?: string; length?: number; hash?: string }>
   writeClipboard?: (text: string) => Promise<ActionResult>
+  writeClipboardImage?: (path: string) => Promise<ActionResult>
   pointerPosition?: () => Promise<ActionResult & { x?: number; y?: number; held?: boolean }>
   hoverPointer?: (x: number, y: number, holdMs?: number) => Promise<ActionResult>
   mouseDown?: (button?: number) => Promise<ActionResult>
@@ -57,6 +64,15 @@ export interface HostDriver extends ComputerDriver {
   releaseStuckKeys?: () => Promise<ActionResult>
   minimizeWindowId?: (windowId: string) => Promise<ActionResult>
   restoreWindowId?: (windowId: string) => Promise<ActionResult>
+  grabInput?: (reason?: string) => Promise<ActionResult & { frozen?: boolean; supported?: boolean; mode?: string }>
+  releaseInput?: () => Promise<
+    ActionResult & { frozen?: boolean; releasedBy?: InputGrabReleasedBy; supported?: boolean; mode?: string }
+  >
+  inputGrabState?: () => Promise<
+    ActionResult & { frozen?: boolean; supported?: boolean; reason?: string; releasedBy?: InputGrabReleasedBy }
+  >
+  subscribeInputGrab?: (listener: (event: InputGrabEvent) => void) => () => void
+  dispose?: () => void
   revalidateTarget(reference: ElementReference): Promise<HostRevalidation>
 }
 
@@ -204,9 +220,12 @@ export function resolveOwningWindow(
   return windows.length === 1 ? windows[0] : undefined
 }
 
-export function createHostDriver(host: LinuxHostDriver = new LinuxHostDriver()): HostDriver {
+export function createLegacyHostDriver(host: LinuxHostDriver = new LinuxHostDriver()): HostDriver {
   const execute = async (action: ComputerAction): Promise<ActionResult> => {
-    if (!isComputerAction(action)) {
+    // Dismiss carries no target by design, but the protocol guard still
+    // requires one; admit it here so Escape is actually delivered.
+    const type = action.type
+    if (!isComputerAction(action) && type !== "dismiss") {
       return {
         success: false,
         status: "failed",
@@ -367,7 +386,10 @@ export function createHostDriver(host: LinuxHostDriver = new LinuxHostDriver()):
     const path = parseAtspiReference(elementId)
     const current = await currentElement(host, elementId)
     if (!current) return stale(`Target ${elementId} is not present in the current observation.`)
-    await ensureWindowFocused(current.element, current.observation)
+    // Focus first so the click lands in the right window, and remember when it
+    // did not take: on KDE/Wayland an activation request can be refused, and a
+    // blind click then hits whatever is really focused.
+    const unfocusedWindow = await ensureWindowFocused(current.element, current.observation)
 
     if (action.type === "type" && typeof action.text === "string") {
       if (path) {
@@ -377,7 +399,6 @@ export function createHostDriver(host: LinuxHostDriver = new LinuxHostDriver()):
       const point = aimPoint(current.element)
       if (!point) return unavailable(`Element ${elementId} has no bounds to focus for typing.`)
       const focused = await host.clickAt(point.x, point.y, 1, 1, durationOf(action, 200))
-      if (!focused.success) return focused
       if (!focused.success) return focused
       const typed = await host.typeText(action.text)
       const warning = await focusWarning(elementId).catch(() => undefined)
@@ -397,8 +418,18 @@ export function createHostDriver(host: LinuxHostDriver = new LinuxHostDriver()):
       if (!point) return unavailable(`Element ${elementId} has no bounds to set a value.`)
       const focused = await host.clickAt(point.x, point.y, 1, 1, durationOf(action, 200))
       if (!focused.success) return focused
-      if (!focused.success) return focused
-      return withObservation(await host.typeText(String(action.value)))
+      // Same window-focus contract as click: never type into a field in a window
+      // that never came to the front.
+      const valueWarning = await focusWarning(elementId).catch(() => undefined)
+      const windowWarning =
+        unfocusedWindow === undefined
+          ? undefined
+          : `The value was set while "${unfocusedWindow}" was not the focused window; it may have gone to the wrong field. Activate the window and re-observe before retrying.`
+      const warning = windowWarning ?? valueWarning
+      const written = await host.typeText(String(action.value))
+      return withObservation(
+        warning === undefined ? written : { ...written, metadata: { ...(written.metadata ?? {}), focusWarning: warning } },
+      )
     }
 
     if (action.type === "focus") {
@@ -407,7 +438,20 @@ export function createHostDriver(host: LinuxHostDriver = new LinuxHostDriver()):
         if (result.success) return withObservation(await decorate(result, current.element))
       }
       const windowId = windowIdOf(elementId)
-      if (windowId !== undefined) return withObservation(await host.activateWindowId(windowId))
+      if (windowId !== undefined) {
+        const activated = await host.activateWindowId(windowId)
+        if (unfocusedWindow !== undefined) {
+          // Report the truth: the window was asked to come forward and did not.
+          return withObservation({
+            ...activated,
+            metadata: {
+              ...(activated.metadata ?? {}),
+              focusWarning: `"${unfocusedWindow}" did not take focus. Another window may hold it; raise the target window yourself or retry.`,
+            },
+          })
+        }
+        return withObservation(activated)
+      }
       return unavailable(`Element ${elementId} cannot be focused.`)
     }
 
@@ -436,6 +480,9 @@ export function createHostDriver(host: LinuxHostDriver = new LinuxHostDriver()):
           ...(decorated.metadata ?? {}),
           ...(bounds === undefined ? {} : { boundsWarning: bounds }),
           ...(occludedBy === undefined ? {} : { occludedBy }),
+          ...(unfocusedWindow === undefined
+            ? {}
+            : { focusWarning: `The click was aimed at "${unfocusedWindow}", which did not come to the front; the click may have landed in the window that actually has focus. Activate the window and re-observe before retrying.` }),
         },
       })
     }
@@ -484,12 +531,27 @@ export function createHostDriver(host: LinuxHostDriver = new LinuxHostDriver()):
     return `The control reports bounds outside its window (click point ${Math.round(point.x)},${Math.round(point.y)} vs window ${Math.round(bounds.x)},${Math.round(bounds.y)} ${Math.round(bounds.width)}x${Math.round(bounds.height)}); the click may land in the wrong place. Re-observe before trusting coordinates.`
   }
 
-  async function ensureWindowFocused(element: UIElement, observation: Observation): Promise<void> {
+  // Activate the owning window and CONFIRM it. An unfocused window silently
+  // swallows clicks on X11/KDE, so activation is fire-and-forget would let the
+  // click land in whatever window really has focus. Returns the window name when
+  // the window is still not focused after activation, so the caller can report
+  // it instead of pretending the click was aimed correctly.
+  async function ensureWindowFocused(
+    element: UIElement,
+    observation: Observation,
+  ): Promise<string | undefined> {
     const window = resolveOwningWindow(element, observation)
-    if (!window || (window.states ?? []).includes("focused")) return
+    if (!window) return undefined
+    if ((window.states ?? []).includes("focused")) return undefined
     const windowId = windowIdOf(window.id)
-    if (windowId === undefined) return
+    if (windowId === undefined) return undefined
     await host.activateWindowId(windowId).catch(() => undefined)
+    // The caller's observation predates the activation, so re-read rather than
+    // trusting the stale "focused" flag from it.
+    const refreshed = await host.observe().catch(() => undefined)
+    const current = refreshed === undefined ? window : resolveOwningWindow(element, refreshed) ?? window
+    if ((current.states ?? []).includes("focused")) return undefined
+    return current.name ?? current.id ?? "the target window"
   }
 
   async function globalFocusWarning(action: ComputerAction): Promise<string | undefined> {
@@ -534,6 +596,8 @@ export function createHostDriver(host: LinuxHostDriver = new LinuxHostDriver()):
     // Re-resolution is the authoritative check: observe the computer again and require the target
     // to still be present. The caller's observation id is historical context, not a freshness gate,
     // because acting always produces a newer observation than the one the caller last saw.
+    // Drop any cached observation first; a 350ms-old tree can still contain a just-closed target.
+    host.invalidateObservation()
     const observation = await host.observe()
     const element = observation.elements?.find((candidate) => candidate.id === id)
     if (!element) return { valid: false, reason: `Element ${id} is not present in the current observation.` }
@@ -566,9 +630,13 @@ export function createHostDriver(host: LinuxHostDriver = new LinuxHostDriver()):
     },
     find: async (request: FindRequest): Promise<FindResult> => host.find(request),
     execute,
+    ...(host.runCommand === undefined ? {} : { runCommand: (request: CommandRequest) => host.runCommand!(request) }),
     readText: (input) => host.readText(input),
     readClipboard: () => host.readClipboard(),
     writeClipboard: (text) => host.writeClipboard(text),
+    ...(host.writeClipboardImage === undefined
+      ? {}
+      : { writeClipboardImage: (path: string) => host.writeClipboardImage!(path) }),
     pointerPosition: () => host.pointerPosition(),
     hoverPointer: (x, y, holdMs) => host.hoverPointer(x, y, holdMs),
     mouseDown: (button) => host.mouseDown(button),
@@ -576,6 +644,18 @@ export function createHostDriver(host: LinuxHostDriver = new LinuxHostDriver()):
     releaseStuckKeys: () => host.releaseStuckKeys(),
     minimizeWindowId: (windowId) => host.minimizeWindowId(windowId),
     restoreWindowId: (windowId) => host.restoreWindowId(windowId),
+    grabInput: (reason) => host.grabInput(reason),
+    releaseInput: () => host.releaseInput(),
+    inputGrabState: () => host.inputGrabState(),
+    subscribeInputGrab: (listener) => host.subscribeInputGrab(listener),
+    dispose: () => host.dispose(),
     revalidateTarget,
   }
+}
+
+export function createHostDriver(host: LinuxHostDriver = new LinuxHostDriver()): HostDriver {
+  if (process.platform === "linux") {
+    return createCuaHostDriver({ legacy: host, surface: createLegacyHostDriver(host) })
+  }
+  return createLegacyHostDriver(host)
 }

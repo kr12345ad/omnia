@@ -51,17 +51,21 @@ export function parseUiTarsAction(text: string, image?: ImageReference, coordina
     case "right_click":
       return withPoint({ type: "right_click" }, start, evidence, "ui-tars")
     case "drag":
-    case "select":
+    case "select": {
+      // An incomplete drag (no end point) is not executable; fail the parse
+      // instead of reporting a successful no-op drag.
+      if (start === undefined || end === undefined) return undefined
       return {
         action: {
           type: "drag",
-          ...(start === undefined ? {} : { target: { x: start.x, y: start.y } }),
-          ...(start === undefined || end === undefined ? {} : { path: [start, end] }),
+          target: { x: start.x, y: start.y },
+          path: [start, end],
         },
-        confidence: start !== undefined && end !== undefined ? 0.72 : 0.35,
-        evidence: [...evidence, end === undefined ? "no end point was produced" : `end point (${end.x}, ${end.y})`],
+        confidence: 0.72,
+        evidence: [...evidence, `end point (${end.x}, ${end.y})`],
         format: "ui-tars",
       }
+    }
     case "scroll":
       return {
         action: {
@@ -140,17 +144,19 @@ export function parseShowUiAction(text: string, image?: ImageReference, coordina
         format: "showui",
       }
     case "drag":
-    case "move":
+    case "move": {
+      if (point === undefined || end === undefined) return undefined
       return {
         action: {
           type: "drag",
-          ...(point === undefined ? {} : { target: { x: point.x, y: point.y } }),
-          ...(end === undefined || point === undefined ? {} : { path: [point, end] }),
+          target: { x: point.x, y: point.y },
+          path: [point, end],
         },
-        confidence: point === undefined ? 0.35 : 0.68,
+        confidence: 0.68,
         evidence,
         format: "showui",
       }
+    }
     default:
       return undefined
   }
@@ -164,12 +170,23 @@ export function resolvePoint(
   const point = toPoint(raw)
   if (point === undefined) return undefined
   if (space === "absolute" || image === undefined) {
-    if (image?.region !== undefined) return { x: Math.round(point.x + image.region.x), y: Math.round(point.y + image.region.y) }
-    return { x: Math.round(point.x), y: Math.round(point.y) }
+    const x = Number.isFinite(point.x) ? Math.round(point.x) : undefined
+    const y = Number.isFinite(point.y) ? Math.round(point.y) : undefined
+    if (x === undefined || y === undefined) return undefined
+    // Without an image there is nothing to bound the model's raw numbers
+    // against; with one, an absolute point outside the screenshot (or crop)
+    // cannot be a valid target and is rejected rather than clamped.
+    if (image === undefined) return { x, y }
+    if (!Number.isFinite(image.width) || !Number.isFinite(image.height) || image.width <= 0 || image.height <= 0) return undefined
+    if (x < 0 || y < 0 || x >= image.width || y >= image.height) return undefined
+    if (image.region !== undefined) return { x: x + image.region.x, y: y + image.region.y }
+    return { x, y }
   }
+  if (!Number.isFinite(image.width) || !Number.isFinite(image.height) || image.width <= 0 || image.height <= 0) return undefined
   const scale = space === "normalized-1" ? 1 : 1000
-  const x = clamp(Math.round((point.x / scale) * image.width), 0, image.width)
-  const y = clamp(Math.round((point.y / scale) * image.height), 0, image.height)
+  // Clamp to width-1/height-1: a coordinate exactly at the edge is off-screen.
+  const x = clamp(Math.round((point.x / scale) * image.width), 0, image.width - 1)
+  const y = clamp(Math.round((point.y / scale) * image.height), 0, image.height - 1)
   if (image.region !== undefined) return { x: x + image.region.x, y: y + image.region.y }
   return { x, y }
 }
@@ -203,7 +220,10 @@ function withPoint(base: Omit<ComputerUseAction, "target">, point: Point | undef
 }
 
 function extractFirstActionCall(text: string): { name: string; arguments: string } | undefined {
-  const direct = text.match(/Action:\s*([A-Za-z_][\w]*)\((.*)\)/s)
+  // Line-bounded (no /s): a greedy /s match merged multiple
+  // "Action: a(...) Action: b(...)" outputs into one argument blob, while a
+  // non-greedy match would stop at a ")" inside the coordinates.
+  const direct = text.match(/Action:\s*([A-Za-z_][\w]*)\((.*)\)/m)
   if (direct !== null) return { name: direct[1]!.toLowerCase(), arguments: direct[2]! }
   const call = text.match(/\b([A-Za-z_][\w]*)\(([^)]*)\)/s)
   if (call === null) return undefined
@@ -232,8 +252,13 @@ function parseJsonObject(text: string): Record<string, unknown> | undefined {
   const start = candidate.indexOf("{")
   const end = candidate.lastIndexOf("}")
   if (start < 0 || end <= start) return undefined
-  const parsed: unknown = JSON.parse(candidate.slice(start, end + 1)) as unknown
-  return isRecord(parsed) ? parsed : undefined
+  try {
+    const parsed: unknown = JSON.parse(candidate.slice(start, end + 1)) as unknown
+    return isRecord(parsed) ? parsed : undefined
+  } catch {
+    // Malformed JSON from a model is an expected input, not an exception.
+    return undefined
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

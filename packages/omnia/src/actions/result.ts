@@ -81,7 +81,14 @@ export function applyVerification(
   verification: Verification,
   required = true,
 ): ActionResult {
-  if (!required || verification.passed === true || verification.status === "passed" || verification.status === "success" || verification.status === "verified") {
+  if (
+    !required ||
+    verification.passed === true ||
+    verification.ok === true ||
+    verification.status === "passed" ||
+    verification.status === "success" ||
+    verification.status === "verified"
+  ) {
     return { ...result, verification }
   }
   return {

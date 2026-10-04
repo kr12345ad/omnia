@@ -41,6 +41,7 @@ const ACTION_CAPABILITIES: Readonly<Record<ActionType, readonly string[]>> = {
   collapse: ["application-focus", "pointer"],
   increment: ["direct_ui_control", "pointer"],
   decrement: ["direct_ui_control", "pointer"],
+  scroll_into_view: ["direct_ui_control", "accessibility-tree"],
   dismiss: ["application-focus", "pointer"],
   wait: ["wait"],
   find: ["find", "accessibility-tree"],

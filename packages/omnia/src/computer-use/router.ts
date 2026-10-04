@@ -1,4 +1,6 @@
+import type { CuaCapabilities } from "../cua/types"
 import type { LocalModelManager } from "./local"
+import { SemanticProvider, type CuaCapabilityProbe } from "./providers"
 import { effectiveAllowTitleBarClicks, isCropPath, isTitleBarTarget, isWindowManagementIntent } from "./window-safety"
 import type {
   ComputerUseCapabilities,
@@ -27,18 +29,40 @@ export interface RouterOptions {
   readonly local: LocalModelManager
   readonly settings: () => ComputerUseSettings
   readonly weights?: Partial<RoutingWeights>
+  readonly cua?: CuaCapabilityProbe
 }
+
+const CANVAS_ROLES = new Set([
+  "canvas",
+  "image",
+  "img",
+  "picture",
+  "bitmap",
+  "drawing",
+  "drawing area",
+  "figure",
+  "graphic",
+  "graphics",
+  "video",
+  "svg",
+])
+
+const POINTER_HEAVY_OPERATIONS: ReadonlySet<ComputerUseOperation> = new Set(["ground", "drag", "resize"])
 
 export class DefaultComputerUseRouter implements ComputerUseRouter {
   private readonly providers: readonly ComputerUseProvider[]
   private readonly local: LocalModelManager
   private readonly settings: () => ComputerUseSettings
+  // The service injects this probe after construction so the router can see
+  // `cua_` driver capabilities without widening ComputerUseContext.
+  cua: CuaCapabilityProbe | undefined
   readonly weights: RoutingWeights
 
   constructor(options: RouterOptions) {
     this.providers = options.providers
     this.local = options.local
     this.settings = options.settings
+    this.cua = options.cua
     this.weights = { ...DEFAULT_ROUTING_WEIGHTS, ...options.weights }
   }
 
@@ -46,21 +70,35 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
     const settings = this.settings()
     const coverage = context.semanticContext?.coverage ?? 0
     const baseReasons = [`operation ${context.requestedOperation}`, `semantic coverage ${coverage.toFixed(2)}`]
+    const semantic = this.providers.find((provider) => provider.id === "semantic")
+    const cua = await this.cuaFor(context)
+    const semanticCapabilities = semantic === undefined ? undefined : await semantic.getCapabilities()
+
+    const approval = settings.mode === "ask" ? { requiresApproval: true } : {}
 
     if (this.semanticSufficient(context)) {
-      const semantic = this.providers.find((provider) => provider.id === "semantic")
-      const capabilities = semantic === undefined ? undefined : await semantic.getCapabilities()
-      if (semantic !== undefined && capabilities !== undefined && this.supportsOperation(capabilities, context.requestedOperation)) {
+      const cuaSupports = cua !== undefined && this.cuaSupports(cua, context)
+      if (
+        semantic !== undefined &&
+        semanticCapabilities !== undefined &&
+        (cuaSupports || this.supportsOperation(semanticCapabilities, context.requestedOperation))
+      ) {
         return {
           provider: "semantic",
           local: true,
-          reason: [...baseReasons, "semantic data resolves the task without vision"],
+          reason: [
+            ...baseReasons,
+            cuaSupports
+              ? "cua accessibility refs resolve the task without vision"
+              : "semantic data resolves the task without vision",
+          ],
           candidates: [{ provider: "semantic", local: true, score: 1, factors: { capabilityMatch: 1, quality: 0.9, hardwareFit: 1, latencyScore: 1, privacyScore: 1, costScore: 1 } }],
           semanticCoverage: coverage,
           operation: context.requestedOperation,
           weights: this.weights,
           estimatedLatencyMs: 10,
           estimatedCostUsd: 0,
+          ...approval,
         }
       }
     }
@@ -71,6 +109,31 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
     const windowManagementDeflect = await this.windowManagementDeflection(context, settings, baseReasons)
     if (windowManagementDeflect !== undefined) {
       return windowManagementDeflect
+    }
+
+    // Accessibility-first: when the Cua engine exposes refs, accessible targets
+    // stay on the semantic/Cua path even without a local model. Only pointer
+    // work on canvas-like or a11y-empty surfaces may reach vision. The branch
+    // is gated on the semantic provider being able to actually resolve the
+    // target, so a Cua backend with zero accessible elements (or no matching
+    // element) falls through to the vision path instead of route-then-fail.
+    if (cua !== undefined && semantic !== undefined && this.cuaSupports(cua, context) && this.cuaResolvable(context)) {
+      return {
+        provider: "semantic",
+        local: true,
+        reason: [
+          ...baseReasons,
+          "cua accessibility refs resolve the task without vision",
+          "vision is reserved for canvas-like or a11y-empty surfaces",
+        ],
+        candidates: [{ provider: "semantic", local: true, score: 1, factors: { capabilityMatch: 1, quality: 0.9, hardwareFit: 1, latencyScore: 1, privacyScore: 1, costScore: 1 } }],
+        semanticCoverage: coverage,
+        operation: context.requestedOperation,
+        weights: this.weights,
+        estimatedLatencyMs: 10,
+        estimatedCostUsd: 0,
+        ...approval,
+      }
     }
 
     const specialist = await this.specialistFor(context, settings)
@@ -134,12 +197,14 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
     const provider = this.providers.find((entry) => entry.id === "showui-pi")
     if (provider === undefined) return undefined
     const capabilities = await provider.getCapabilities()
-    if (!capabilities.drag) return undefined
+    if (!capabilities.drag && !capabilities.resize) return undefined
     if (!(await provider.isAvailable(context))) return undefined
     const local = capabilities.local
     if (!local && settings.mode === "local_only") return undefined
     if (!local && !this.remoteAllowed(context, settings)) return undefined
     const latency = await provider.estimateLatency(context)
+    const maxLatency = context.preferences?.maxLatencyMs ?? settings.maxLatencyMs ?? 8000
+    if (latency.expectedMs > maxLatency) return undefined
     const cost = await provider.estimateCost(context)
     return {
       provider: provider.id,
@@ -200,7 +265,7 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
         reason: [
           ...baseReasons,
           "window-management intent defaults to keyboard/semantic instead of full-screen vision click",
-          "title-bar ban: 9px Minimize/Close separation vs ±10px UI-TARS jitter; use Super+Down, Alt+Space+N, KWin DBus, or a cropped screenshot",
+          "title-bar ban: 9px Minimize/Close separation vs ±10px UI-TARS jitter; use window_close, window_minimize, window_maximize, or a cropped screenshot",
         ],
         candidates: [
           {
@@ -265,7 +330,7 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
     if (!local && settings.mode === "local_only") return undefined
     if (!local && !this.remoteAllowed(context, settings)) return undefined
     if (local && settings.mode === "hosted_only") return undefined
-    const installed = this.local.list().filter((status) => status.installed && status.model.provider === preferredId)
+    const installed = this.local.list().filter((status) => status.installed && status.model.enabled !== false && status.model.provider === preferredId)
     if (installed.length === 0) return undefined
     const selected = installed.find((status) => status.model.recommended) ?? installed[0]!
     const maxMemory = context.preferences?.maxMemoryBytes ?? settings.maxMemoryBytes
@@ -307,12 +372,64 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
     const environment = context.semanticContext
     if (environment === undefined || environment.elements.length === 0) return false
     const target = context.targetDescription?.trim().toLowerCase() ?? ""
-    if (target.length === 0) return environment.coverage >= 0.6
+    // An empty target cannot be resolved by the semantic provider (bestMatch
+    // rejects an empty query), so coverage alone must not claim sufficiency.
+    if (target.length === 0) return false
+    // An explicit element ref is authoritative: the caller named a stable id
+    // from a prior observation, so no fuzzy threshold applies.
+    if (hasElementRef(environment.elements, target)) return true
     const match = bestScore(environment.elements, target)
+    // Aligned with providers.ts SEMANTIC_MATCH_THRESHOLD (0.6). The old 0.5
+    // let the 0.4 query.includes(name) over-match through as "sufficient"
+    // while the provider also returned 0.4, producing false-Verified clicks.
     if (context.requestedOperation === "drag" || context.requestedOperation === "resize") {
-      return environment.coverage >= 0.7 && match !== undefined && match >= 0.5
+      return environment.coverage >= 0.7 && match !== undefined && match >= 0.6
     }
-    return match !== undefined && match >= 0.5
+    return match !== undefined && match >= 0.6
+  }
+
+  private async cuaFor(context: ComputerUseContext): Promise<CuaCapabilities | undefined> {
+    if (this.cua !== undefined) return await this.cua(context)
+    const semantic = this.providers.find((provider) => provider.id === "semantic")
+    if (semantic instanceof SemanticProvider) return await semantic.cuaCapabilitiesFor(context)
+    return undefined
+  }
+
+  // With `cua_refs` the semantic provider can address every control by stable
+  // ref, including drag/resize on accessible targets. Canvas-like or
+  // a11y-empty surfaces stay on the vision path for pointer-heavy work.
+  private cuaSupports(cua: CuaCapabilities, context: ComputerUseContext): boolean {
+    if (!cua.refs && !cua.semanticActions) return false
+    return !this.pointerHeavyOnCanvas(context)
+  }
+
+  // The semantic provider still has to resolve the target: an empty a11y tree
+  // or a target with no matching accessible element must fall through to
+  // vision instead of being answered with a guaranteed provider failure.
+  private cuaResolvable(context: ComputerUseContext): boolean {
+    const target = context.targetDescription?.trim().toLowerCase() ?? ""
+    if (target.length === 0) return false
+    const accessible = (context.semanticContext?.elements ?? []).filter((element) => element.source !== "vision")
+    if (accessible.length === 0) return false
+    const score = bestScore(accessible, target)
+    return score !== undefined && score >= SEMANTIC_SUFFICIENT_THRESHOLD
+  }
+
+  private pointerHeavyOnCanvas(context: ComputerUseContext): boolean {
+    if (!POINTER_HEAVY_OPERATIONS.has(context.requestedOperation)) return false
+    return this.canvasLike(context)
+  }
+
+  private canvasLike(context: ComputerUseContext): boolean {
+    if (isCropPath(context.image)) return true
+    const accessible = (context.semanticContext?.elements ?? []).filter(
+      (element) => element.source !== "vision" && !CANVAS_ROLES.has((element.role ?? "").toLowerCase()),
+    )
+    if (accessible.length === 0) return true
+    const target = context.targetDescription?.trim().toLowerCase() ?? ""
+    if (target.length === 0) return false
+    const score = bestScore(accessible, target)
+    return score === undefined || score < SEMANTIC_SUFFICIENT_THRESHOLD
   }
 
   private async evaluate(provider: ComputerUseProvider, context: ComputerUseContext, settings: ComputerUseSettings): Promise<RoutingCandidate> {
@@ -342,7 +459,7 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
     const maxLatency = context.preferences?.maxLatencyMs ?? settings.maxLatencyMs ?? 8000
     if (latency.expectedMs > maxLatency) return exclude(`estimated latency ${latency.expectedMs}ms exceeds the ${maxLatency}ms limit`)
 
-    const localModels = this.local.list().filter((status) => status.model.provider === provider.id)
+    const localModels = this.local.list().filter((status) => status.model.provider === provider.id && status.model.enabled !== false)
     const installed = localModels.filter((status) => status.installed)
     const preferred = context.preferences?.preferredLocalModel ?? settings.preferredLocalModel
     const selected =
@@ -350,7 +467,8 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
       installed.find((status) => status.model.recommended) ??
       installed.sort((a, b) => (b.model.quality ?? 0) - (a.model.quality ?? 0))[0]
     if (local && selected === undefined) return exclude("no compatible local model is installed")
-    if (local && context.preferences?.maxMemoryBytes !== undefined && (selected?.model.estimatedMemoryBytes ?? 0) > context.preferences.maxMemoryBytes) {
+    const maxMemory = context.preferences?.maxMemoryBytes ?? settings.maxMemoryBytes
+    if (local && maxMemory !== undefined && (selected?.model.estimatedMemoryBytes ?? 0) > maxMemory) {
       return exclude("model exceeds the configured maximum memory")
     }
     const compatibility =
@@ -396,8 +514,8 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
 
   private remoteAllowed(context: ComputerUseContext, settings: ComputerUseSettings): boolean {
     const privacy = context.privacy
-    if (privacy !== undefined) return privacy.allowRemoteScreen && privacy.mode !== "local_only"
-    return settings.allowRemoteScreen && settings.mode !== "local_only"
+    if (privacy !== undefined) return privacy.mode === "hosted_only" || (privacy.allowRemoteScreen && privacy.mode !== "local_only")
+    return settings.mode === "hosted_only" || (settings.allowRemoteScreen && settings.mode !== "local_only")
   }
 
   private supportsOperation(capabilities: ComputerUseCapabilities, operation: ComputerUseOperation): boolean {
@@ -424,18 +542,29 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
   }
 }
 
-function bestScore(elements: readonly { name?: string; text?: string; role?: string }[], query: string): number | undefined {
+export const SEMANTIC_SUFFICIENT_THRESHOLD = 0.6
+
+export function hasElementRef(elements: readonly { elementId?: string }[], query: string): boolean {
+  return elements.some((element) => element.elementId !== undefined && element.elementId.toLowerCase() === query)
+}
+
+export function bestScore(
+  elements: readonly { name?: string; text?: string; role?: string; elementId?: string }[],
+  query: string,
+): number | undefined {
   let best: number | undefined
   for (const element of elements) {
+    // An exact ref match is definitive and skips fuzzy scoring entirely.
+    if (element.elementId !== undefined && element.elementId.toLowerCase() === query) return 1
     const name = (element.name ?? "").toLowerCase()
     const text = (element.text ?? "").toLowerCase()
     const role = (element.role ?? "").toLowerCase()
-    const score = Math.min(
-      1,
-      (name === query || text === query ? 0.75 : name.includes(query) ? 0.55 : query.includes(name) && name.length > 2 ? 0.4 : 0) +
-        (text.includes(query) ? 0.25 : 0) +
-        (role.includes(query) ? 0.15 : 0),
-    )
+    // Aligned with providers.ts: element name must contain the query (0.6).
+    // Removed the query.includes(name) 0.4 over-match that routed
+    // "focus Kitty OC | Quick hello" to a screen-center click.
+    const exact = name === query || text === query
+    const nameScore = name.length > 0 && name.includes(query) ? 0.6 : 0
+    const score = Math.min(1, nameScore + (text.includes(query) ? 0.25 : 0) + (role.includes(query) ? 0.15 : 0) + (exact ? 0.25 : 0))
     if (score > 0 && (best === undefined || score > best)) best = score
   }
   return best

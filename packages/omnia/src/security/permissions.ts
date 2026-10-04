@@ -90,9 +90,21 @@ const isRuleList = (value: unknown): value is readonly PermissionRule[] =>
 const compatibilityEffect = (outcome: PermissionOutcome): PermissionDecision["effect"] =>
   outcome === "allowed" ? "allow" : outcome === "permission_required" ? "ask" : "deny"
 
+// wildcardMatch runs for every rule/resource pair, so compiled patterns are
+// cached. The cache is bounded; the oldest pattern is evicted past the limit.
+const WILDCARD_CACHE_LIMIT = 1000
+const wildcardCache = new Map<string, RegExp>()
 const wildcardPattern = (pattern: string) => {
-  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replaceAll("\\*", ".*").replaceAll("\\?", ".")
-  return new RegExp(`^${escaped}$`, "s")
+  const cached = wildcardCache.get(pattern)
+  if (cached !== undefined) return cached
+  const escaped = normalize(pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replaceAll("\\*", ".*").replaceAll("\\?", ".")
+  const compiled = new RegExp(`^${escaped}$`, "s")
+  if (wildcardCache.size >= WILDCARD_CACHE_LIMIT) {
+    const oldest = wildcardCache.keys().next().value
+    if (oldest !== undefined) wildcardCache.delete(oldest)
+  }
+  wildcardCache.set(pattern, compiled)
+  return compiled
 }
 
 export function wildcardMatch(input: string, pattern: string): boolean {
@@ -107,7 +119,10 @@ export function normalizePermissionEffect(effect: PermissionEffect | string): Pe
 }
 
 const trustedRuleSource = (source: string | undefined) => {
-  if (source === undefined) return true
+  // A rule without an explicit source is not trusted: rules assembled from
+  // retrieved content, tool output, or memory may omit the source field, and
+  // treating that as trusted would turn data into authorization.
+  if (source === undefined) return false
   const normalized = normalize(source)
   if (["webpage", "web", "file", "application", "app", "tool", "retrieved", "memory", "environment"].includes(normalized)) {
     return false
@@ -278,6 +293,12 @@ export function evaluatePermission(
   if (resources.length === 0 && (request.resources !== undefined || request.paths !== undefined || request.resource !== undefined)) {
     return decision("blocked", request, danger, provenance, "operation resources are invalid")
   }
+  // Resource-less operations must default-deny rather than match the "*"
+  // wildcard: a broad allow rule would otherwise authorize an unconstrained
+  // operation that the caller never named.
+  if (resources.length === 0) {
+    return decision("permission_required", request, danger, provenance, "operation must name at least one resource")
+  }
   const pathScope = options.pathScope ?? policy.pathScope
   const paths = pathDecisions(request, pathScope, request.access ?? request.mode ?? "read")
   if (paths.some((item) => item.outcome === "blocked")) {
@@ -292,7 +313,7 @@ export function evaluatePermission(
     const path = paths.find((item) => item.outcome === "permission_required")
     return decision("permission_required", request, danger, provenance, path?.reason ?? "path access requires permission", { path })
   }
-  const effectiveResources = resources.length === 0 ? ["*"] : resources
+  const effectiveResources = resources
   const effectiveScope = request.scope ?? request.permissionScope ?? policy.scope
   const evaluations = effectiveResources.map((resource) => {
     const matches = rules.filter((rule) => ruleMatches(rule, action, resource, effectiveScope))

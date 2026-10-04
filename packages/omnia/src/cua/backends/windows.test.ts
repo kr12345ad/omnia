@@ -894,6 +894,52 @@ describe("cua windows backend with a fake runner", () => {
     expect(result.delivery).toBe("refused")
     expect(result.error?.code).toBe("backend_unavailable")
   })
+
+  test("refuses stale observation and generation refs instead of rebinding", async () => {
+    const { backend, runner } = createHarness()
+    const snapshot = await backend.snapshot()
+    const save = requireElement(snapshot, "Save")
+    const staleObs = await backend.execute({ type: "invoke", ref: save.ref, observationId: "cap-stale" })
+    expect(staleObs.ok).toBe(false)
+    expect(staleObs.error?.code).toBe("stale_ref")
+    const staleGen = await backend.execute({ type: "invoke", ref: save.ref, generation: snapshot.generation + 5 })
+    expect(staleGen.ok).toBe(false)
+    expect(staleGen.error?.code).toBe("stale_ref")
+    expect(runner.calls.filter((script) => scriptKind(script) === "invoke")).toHaveLength(0)
+    const bound = await backend.execute({
+      type: "invoke",
+      ref: save.ref,
+      observationId: snapshot.id,
+      generation: snapshot.generation,
+    })
+    expect(bound.ok).toBe(true)
+  })
+
+  test("type into a ref refuses instead of using background set_value", async () => {
+    const { backend, runner } = createHarness({
+      handlers: {
+        resolve: () => ({
+          ok: true,
+          role: "ControlType.Edit",
+          name: "Text editor",
+          states: [],
+          patterns: ["Value", "Text", "Scroll"],
+          editable: true,
+          valuePresent: true,
+          hwnd: 66000,
+          bounds: { x: 10, y: 40, width: 700, height: 500 },
+        }),
+      },
+    })
+    const snapshot = await backend.snapshot()
+    const editor = requireElement(snapshot, "Text editor")
+    const result = await backend.execute({ type: "type", text: "hi", ref: editor.ref })
+    expect(result.ok).toBe(false)
+    expect(result.delivery).toBe("refused")
+    expect(result.error?.code).toBe("background_unavailable")
+    expect(runner.calls.filter((script) => scriptKind(script) === "set_value")).toHaveLength(0)
+    expect(runner.calls.filter((script) => scriptKind(script) === "type")).toHaveLength(0)
+  })
 })
 
 describe("windows pointer click scripts", () => {

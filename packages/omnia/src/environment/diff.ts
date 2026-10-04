@@ -9,6 +9,7 @@ import {
   type SemanticObservation,
   type UntrustedContentEnvelope,
 } from "./model"
+import { stableJson } from "../retrieval/match"
 
 export type ElementChangeField =
   | "role"
@@ -180,8 +181,10 @@ function diffContent(before: readonly UntrustedContentEnvelope[], after: readonl
     const fields: ("content" | "mediaType" | "metadata" | "provenance")[] = []
     if (previous.content !== envelope.content) fields.push("content")
     if (previous.mediaType !== envelope.mediaType) fields.push("mediaType")
-    if (JSON.stringify(previous.metadata) !== JSON.stringify(envelope.metadata)) fields.push("metadata")
-    if (JSON.stringify(previous.provenance) !== JSON.stringify(envelope.provenance)) fields.push("provenance")
+    // Key-order-insensitive comparison: JSON.stringify treats reordered keys
+    // as a change, producing false "metadata changed" diffs.
+    if (stableJson(previous.metadata) !== stableJson(envelope.metadata)) fields.push("metadata")
+    if (stableJson(previous.provenance) !== stableJson(envelope.provenance)) fields.push("provenance")
     return fields.length === 0 ? [] : [{ before: previous, after: envelope, fields }]
   })
   return {
@@ -261,7 +264,7 @@ function sameBounds(before: Bounds | undefined, after: Bounds | undefined) {
 
 function sameLocator(before: ElementLocator | undefined, after: ElementLocator | undefined) {
   if (before === undefined || after === undefined) return before === after
-  return JSON.stringify(before) === JSON.stringify(after)
+  return stableJson(before) === stableJson(after)
 }
 
 function sameCapabilities(before: CapabilityStates, after: CapabilityStates) {

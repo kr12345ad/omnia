@@ -114,6 +114,9 @@ export interface CandidateDisambiguationOptions {
   readonly margin?: number
   readonly selectedId?: string
   readonly target?: ElementReference | { readonly kind: "element"; readonly elementId: string }
+  // Mutating actions (click/type/drag/...) require a higher confidence floor
+  // than read-only lookups.
+  readonly mutating?: boolean
 }
 
 export interface CandidateDecision {

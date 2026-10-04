@@ -1,3 +1,6 @@
+import { ApprovalRegistry, operationFingerprint } from "../security/approval"
+import type { OperationInput } from "../security/types"
+
 export const OMNIA_SCOPES = [
   "SCREEN_READ",
   "UI_READ",
@@ -69,8 +72,28 @@ export interface ApprovalInput {
   readonly approved?: boolean
   readonly approvedBy?: string
   readonly scopes?: readonly OmniaScope[]
+  readonly fingerprint?: string
   readonly policy?: ApprovalPolicy
 }
+
+export interface PermissionEvaluationOptions {
+  readonly sessionId?: string
+  readonly approval?: ApprovalInput
+  // The exact operation the caller is asking about. Supplying it lets a
+  // fingerprint-bound approval (see /v1/permissions/approve) be matched
+  // against the operation instead of trusting a self-asserted boolean.
+  readonly operation?: OperationInput
+}
+
+export interface PermissionManagerOptions {
+  readonly now?: () => number
+  readonly approvals?: ApprovalRegistry
+  readonly grantTtlMs?: number
+  readonly maxSessionGrants?: number
+}
+
+const SESSION_GRANT_TTL_MS = 15 * 60 * 1000
+const MAX_SESSION_GRANTS = 500
 
 const SCOPE_DESCRIPTIONS: Record<OmniaScope, string> = {
   SCREEN_READ: "Capture the screen or individual windows.",
@@ -102,17 +125,31 @@ export function describePermissions(states: Readonly<Record<OmniaScope, Permissi
   }))
 }
 
+interface SessionGrant {
+  readonly scopes: Set<OmniaScope>
+  readonly expiresAt: number
+}
+
 export class PermissionManager {
   private states: Record<OmniaScope, PermissionState>
-  private readonly grants = new Map<string, Set<OmniaScope>>()
+  private readonly grants = new Map<string, SessionGrant>()
   private policy: ApprovalPolicy
+  private readonly now: () => number
+  private readonly approvals: ApprovalRegistry | undefined
+  private readonly grantTtlMs: number
+  private readonly maxSessionGrants: number
 
   constructor(
     initial: Partial<Record<OmniaScope, PermissionState>> = {},
     policy: ApprovalPolicy = "ask_destructive",
+    options: PermissionManagerOptions = {},
   ) {
     this.states = { ...DEFAULT_STATES, ...initial }
     this.policy = policy
+    this.now = options.now ?? Date.now
+    this.approvals = options.approvals
+    this.grantTtlMs = options.grantTtlMs ?? SESSION_GRANT_TTL_MS
+    this.maxSessionGrants = options.maxSessionGrants ?? MAX_SESSION_GRANTS
   }
 
   state(scope: OmniaScope): PermissionState {
@@ -136,40 +173,70 @@ export class PermissionManager {
   }
 
   grant(sessionId: string, scopes: readonly OmniaScope[]): void {
-    const existing = this.grants.get(sessionId) ?? new Set<OmniaScope>()
-    for (const scope of scopes) existing.add(scope)
-    this.grants.set(sessionId, existing)
+    const existing = this.grants.get(sessionId) ?? { scopes: new Set<OmniaScope>(), expiresAt: 0 }
+    for (const scope of scopes) existing.scopes.add(scope)
+    if (this.grants.size >= this.maxSessionGrants && !this.grants.has(sessionId)) {
+      const oldest = this.grants.keys().next().value
+      if (oldest !== undefined) this.grants.delete(oldest)
+    }
+    this.grants.set(sessionId, { scopes: existing.scopes, expiresAt: this.now() + this.grantTtlMs })
   }
 
   grantedScopes(sessionId: string | undefined): readonly OmniaScope[] {
     if (sessionId === undefined) return []
-    return [...(this.grants.get(sessionId) ?? [])]
+    const grant = this.grants.get(sessionId)
+    if (grant === undefined) return []
+    if (grant.expiresAt <= this.now()) {
+      this.grants.delete(sessionId)
+      return []
+    }
+    return [...grant.scopes]
   }
 
-  evaluate(required: readonly OmniaScope[], options: { sessionId?: string; approval?: ApprovalInput } = {}): PermissionDecision {
+  evaluate(required: readonly OmniaScope[], options: PermissionEvaluationOptions = {}): PermissionDecision {
     const sessionGrants = new Set(this.grantedScopes(options.sessionId))
-    const approvalScopes = new Set(options.approval?.scopes ?? [])
-    const missing = required.filter((scope) => {
-      if (sessionGrants.has(scope)) return false
-      if (options.approval?.approved === true && (approvalScopes.size === 0 || approvalScopes.has(scope))) return false
-      return this.states[scope] !== "granted"
-    })
-    if (missing.length === 0) return { allowed: true, status: "granted", required, missing: [] }
+    const approval = options.approval
+    const approved = approval?.approved === true
+    const approvalScopes = new Set((approval?.scopes ?? []).filter(isOmniaScope))
+    const operation = options.operation
 
-    const denied = missing.filter((scope) => this.states[scope] === "denied" && !approvalScopes.has(scope))
-    if (denied.length > 0 && options.approval?.approved !== true) {
+    // A fingerprint-bound approval is only trusted when it matches both the
+    // presented fingerprint and a live grant issued for this exact operation.
+    // It stands on its own: the fingerprint is the proof, so approve:true is
+    // not required for it. Empty approval scopes never mean "all scopes".
+    const bound = (() => {
+      if (approval?.fingerprint === undefined || operation === undefined) return false
+      if (approval.fingerprint !== operationFingerprint(operation)) return false
+      const registry = this.approvals
+      if (registry === undefined) return false
+      const evaluation = registry.evaluate(operation)
+      if (!evaluation.approved || evaluation.grant === undefined) return false
+      return registry.consume(evaluation.grant.id, operation).approved
+    })()
+    // A denied scope is an operator policy decision, so only a grant this
+    // server issued can satisfy it: an explicit per-scope session grant or a
+    // fingerprint-bound approval. A caller's own approve:true claim is only ever
+    // forwarded by the API layer for a server-token caller, and it still stops
+    // at "denied" here.
+    const approvedScope = (scope: OmniaScope) =>
+      sessionGrants.has(scope) || bound || (approved && approvalScopes.has(scope) && this.states[scope] !== "denied")
+
+    const deniedRequired = required.filter((scope) => this.states[scope] === "denied" && !approvedScope(scope))
+    const missing = required.filter((scope) => !approvedScope(scope) && this.states[scope] !== "granted")
+    if (deniedRequired.length > 0) {
       return {
         allowed: false,
         status: "denied",
         required,
-        missing,
-        reason: `Denied by policy: ${denied.join(", ")}`,
+        missing: deniedRequired,
+        reason: `Denied by policy: ${deniedRequired.join(", ")}`,
       }
     }
+    if (missing.length === 0) return { allowed: true, status: "granted", required, missing: [] }
 
     const destructive = missing.filter((scope) => DESTRUCTIVE_SCOPES.includes(scope))
     const scopeMissing = destructive.length > 0 ? destructive : missing
-    if (this.policy === "fully_autonomous" && denied.length === 0) {
+    if (this.policy === "fully_autonomous") {
       return { allowed: true, status: "granted", required, missing: [] }
     }
     return {
@@ -187,6 +254,7 @@ export class PermissionManager {
 }
 
 export function requiredScopesForAction(action: string): readonly OmniaScope[] {
+  if (action === "browser_upload") return ["BROWSER", "FILES_READ"]
   if (action.startsWith("browser_")) return ["BROWSER"]
   if (action.startsWith("office_")) {
     const command = action.slice("office_".length)
@@ -195,18 +263,31 @@ export function requiredScopesForAction(action: string): readonly OmniaScope[] {
       : ["FILES_WRITE"]
   }
   if (action === "menu") return ["UI_CONTROL"]
+  if (action === "run_command") return ["PROCESS_EXECUTE"]
+  if (action === "credentials") return ["SECRETS"]
   switch (action) {
     case "observe":
     case "find":
     case "inspect":
     case "read":
     case "read_text":
+    case "read_value":
     case "get_focus":
     case "get_cursor":
-    case "get_context":
       return ["UI_READ"]
+    // get_context reads the pointer position and the controlled browser's
+    // status in addition to the accessibility tree.
+    case "get_context":
+      return ["UI_READ", "POINTER", "BROWSER"]
     case "screenshot":
       return ["SCREEN_READ"]
+    case "calibration_status":
+    case "calibration_start":
+      return ["UI_READ"]
+    case "calibration_measure":
+      return ["POINTER"]
+    case "calibration_save":
+      return ["UI_CONTROL"]
     case "click":
     case "double_click":
     case "doubleclick":
@@ -232,6 +313,7 @@ export function requiredScopesForAction(action: string): readonly OmniaScope[] {
     case "release_keys":
       return ["KEYBOARD"]
     case "scroll":
+    case "scroll_into_view":
     case "drag":
     case "move":
     case "hover":
@@ -239,8 +321,6 @@ export function requiredScopesForAction(action: string): readonly OmniaScope[] {
     case "mouse_up":
     case "middle_click":
       return ["POINTER"]
-    case "screenshot":
-      return ["SCREEN_READ"]
     case "launch":
     case "launch_app":
     case "activate_app":
@@ -257,8 +337,25 @@ export function requiredScopesForAction(action: string): readonly OmniaScope[] {
     case "read_clipboard":
       return ["CLIPBOARD_READ"]
     case "write_clipboard":
-    case "paste_table":
       return ["CLIPBOARD_WRITE", "KEYBOARD"]
+    // paste_table clicks the start cell before pasting, so it needs pointer
+    // control on top of the clipboard and keyboard scopes.
+    case "paste_table":
+      return ["CLIPBOARD_WRITE", "KEYBOARD", "POINTER"]
+    case "window_tile":
+    case "window_move":
+    case "window_maximize":
+    case "window_minimize":
+    case "window_restore":
+      return ["UI_CONTROL"]
+    case "window_close":
+      return ["PROCESS_EXECUTE"]
+    case "cua_snapshot":
+    case "cua_find":
+    case "cua_wait":
+      return ["UI_READ"]
+    case "cua_act":
+      return ["UI_CONTROL"]
     case "dismiss":
       return ["UI_CONTROL"]
     case "close":

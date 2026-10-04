@@ -210,6 +210,8 @@ export function appendAuditEvent(
   return Object.freeze([...events, safe])
 }
 
+export const AUDIT_TRAIL_LIMIT = 1000
+
 export class AuditTrail {
   #events: AuditEvent[] = []
 
@@ -226,6 +228,9 @@ export class AuditTrail {
       metadata: event.metadata,
     })
     this.#events.push(safe)
+    if (this.#events.length > AUDIT_TRAIL_LIMIT) {
+      this.#events.splice(0, this.#events.length - AUDIT_TRAIL_LIMIT)
+    }
     return safe
   }
 

@@ -273,7 +273,37 @@ function normalizeIntent(input: ActionIntent | ComputerAction): ActionIntent {
     ...(intent.applicationId === undefined && typeof nested.applicationId === "string" ? { applicationId: nested.applicationId } : {}),
     ...(intent.url === undefined && typeof nested.url === "string" ? { url: nested.url } : {}),
     ...(intent.path === undefined && typeof nested.path === "string" ? { path: nested.path } : {}),
+    // Nested input/parameters payloads used to lose these fields, so a
+    // click(type: "click", input: { count: 2 }) silently degraded to a
+    // single click and drags lost their from/to endpoints.
+    ...(intent.modifiers === undefined && isModifierArray(nested.modifiers) ? { modifiers: nested.modifiers } : {}),
+    ...(intent.button === undefined && (nested.button === "left" || nested.button === "right" || nested.button === "middle") ? { button: nested.button } : {}),
+    ...(intent.count === undefined && Number.isFinite(nested.count) ? { count: nested.count as number } : {}),
+    ...(intent.from === undefined && isComputerTarget(nested.from) ? { from: nested.from } : {}),
+    ...(intent.to === undefined && isComputerTarget(nested.to) ? { to: nested.to } : {}),
+    ...(intent.direction === undefined &&
+    (nested.direction === "up" || nested.direction === "down" || nested.direction === "left" || nested.direction === "right")
+      ? { direction: nested.direction }
+      : {}),
+    ...(intent.amount === undefined && Number.isFinite(nested.amount) ? { amount: nested.amount as number } : {}),
+    ...(intent.deltaX === undefined && Number.isFinite(nested.deltaX) ? { deltaX: nested.deltaX as number } : {}),
+    ...(intent.deltaY === undefined && Number.isFinite(nested.deltaY) ? { deltaY: nested.deltaY as number } : {}),
+    ...(intent.durationMs === undefined && Number.isFinite(nested.durationMs) ? { durationMs: nested.durationMs as number } : {}),
+    ...(intent.ms === undefined && Number.isFinite(nested.ms) ? { ms: nested.ms as number } : {}),
+    ...(intent.condition === undefined && typeof nested.condition === "string" ? { condition: nested.condition } : {}),
+    ...(intent.include === undefined && isStringArray(nested.include) ? { include: nested.include } : {}),
   }
+}
+
+function isModifierArray(value: unknown): value is readonly ("alt" | "control" | "meta" | "shift")[] {
+  return (
+    Array.isArray(value) &&
+    value.every((entry) => entry === "alt" || entry === "control" || entry === "meta" || entry === "shift")
+  )
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string")
 }
 
 function resolveActionTarget(
@@ -309,6 +339,7 @@ function resolveActionTarget(
   const retrieval = retrieveElements(sourceInput, request)
   const decision = disambiguateCandidates(retrieval, {
     context: retrievalContext(options),
+    mutating: requiresElementTarget(type) || type === "scroll",
     ...(options.minimumConfidence === undefined ? {} : { minimumConfidence: options.minimumConfidence }),
     ...(options.minConfidence === undefined ? {} : { minConfidence: options.minConfidence }),
     ...(options.minimumMargin === undefined ? {} : { minimumMargin: options.minimumMargin }),
@@ -461,10 +492,16 @@ function verificationValue(kind: string, result: ActionResult): unknown {
 }
 
 function withResult(resolution: ActionResolution, result: ActionResult, verification?: Verification): ActionResolution {
+  const code = typeof result.error === "object" && result.error !== null ? result.error.code : undefined
+  // A failed execution must not keep resolutionStatus "resolved"; callers use
+  // it to distinguish a resolved-but-failed action from a successful one.
+  const failedStatus: ActionResolutionStatus =
+    result.status === "unavailable" || code === "unavailable" ? "unavailable" : "failed"
   return {
     ...resolution,
     success: result.success,
     status: result.status ?? (result.success ? "success" : "failed"),
+    resolutionStatus: result.success ? resolution.resolutionStatus : failedStatus,
     result,
     ...(verification === undefined ? {} : { verification }),
   }

@@ -1,4 +1,8 @@
-import type { CuaElement, CuaSnapshot } from "../types"
+import type { CuaElement, CuaSnapshot, CuaSnapshotOptions } from "../types"
+
+// Every in-tree backend caps a default snapshot at 1000 elements; the engine
+// uses this when a backend does not declare its own defaultMaxElements.
+export const DEFAULT_SNAPSHOT_MAX_ELEMENTS = 1000
 
 // Roles an agent is most likely to act on. Keeping these ahead of menu chrome
 // and passive text is what makes the default observe budget useful: a focused
@@ -40,10 +44,54 @@ function priorityOf(element: CuaElement, focusedWindow: string | undefined): num
 // and menu noise last. Within a tier elements are filled round-robin across
 // windows (focused window first) so one huge window cannot starve every other
 // window out of the budget.
+// Whether a snapshot produced with `produced` options can satisfy a request
+// made with `requested` options. Checked before a walk is awaited or skipped;
+// the actual truncated flag is re-checked by snapshotForOptions.
+export function snapshotOptionsSupersetOf(
+  produced: CuaSnapshotOptions,
+  requested: CuaSnapshotOptions,
+  defaultMaxElements: number = DEFAULT_SNAPSHOT_MAX_ELEMENTS,
+): boolean {
+  if ((produced.app ?? undefined) !== (requested.app ?? undefined)) return false
+  if (requested.includeScreenshot === true && produced.includeScreenshot !== true) return false
+  if (requested.maxElements === undefined) return true
+  return (produced.maxElements ?? defaultMaxElements) >= requested.maxElements
+}
+
+export function snapshotForOptions(
+  snapshot: CuaSnapshot,
+  produced: CuaSnapshotOptions,
+  requested: CuaSnapshotOptions,
+  defaultMaxElements: number = DEFAULT_SNAPSHOT_MAX_ELEMENTS,
+  focusedWindowBackendRef?: string,
+): CuaSnapshot | undefined {
+  if (!snapshotOptionsSupersetOf(produced, requested, defaultMaxElements)) return undefined
+  const producedBudget = produced.maxElements ?? defaultMaxElements
+  const requestedBudget = requested.maxElements ?? defaultMaxElements
+  // A truncated walk can only be reused while it covers the requested budget:
+  // re-walking for a bigger budget is the only honest way to fill it. A repeat
+  // of the exact budget that produced the snapshot is covered even when the
+  // walk truncated below that budget (helper ceiling).
+  if (snapshot.truncated && requestedBudget > producedBudget) return undefined
+  if (snapshot.truncated && requestedBudget < producedBudget && snapshot.elements.length < requestedBudget) {
+    return undefined
+  }
+  if (requestedBudget >= snapshot.elements.length) return snapshot
+  // A re-cap keeps the focused window's controls even when the smaller budget
+  // would have dropped them.
+  return limitSnapshot(snapshot, requestedBudget, focusedWindowBackendRef, true)
+}
+
+// `retainFocusedInteractive` selects every INTERACTIVE_ROLES element of the
+// focused window before the budget is applied, so a toolbar control can no
+// longer be crowded out by menu or passive noise. The cap is exceeded rather
+// than losing an actionable control; `truncated` remains truthful because it
+// still reports whether any element was dropped.
 export function limitSnapshot(
   snapshot: CuaSnapshot,
   maxElements: number,
   focusedWindowBackendRef?: string,
+  retainFocusedInteractive = false,
 ): CuaSnapshot {
   const limit = Math.max(0, maxElements)
   const focusedWindow =
@@ -67,6 +115,17 @@ export function limitSnapshot(
   }
 
   const selected: CuaElement[] = []
+  const selectedRefs = new Set<string>()
+  const select = (element: CuaElement): void => {
+    if (selectedRefs.has(element.ref)) return
+    selectedRefs.add(element.ref)
+    selected.push(element)
+  }
+  if (retainFocusedInteractive && focusedWindow !== undefined) {
+    for (const element of snapshot.elements) {
+      if (element.windowRef === focusedWindow && INTERACTIVE_ROLES.has(element.role)) select(element)
+    }
+  }
   for (const priority of [...byPriority.keys()].sort((a, b) => a - b)) {
     const byWindow = byPriority.get(priority)!
     const keys = [...windowOrder, ...[...byWindow.keys()].filter((key) => !windowOrder.includes(key))]
@@ -75,7 +134,7 @@ export function limitSnapshot(
       for (const key of keys) {
         const element = byWindow.get(key)?.[depth]
         if (element === undefined) continue
-        selected.push(element)
+        select(element)
         added = true
         if (selected.length >= limit) break
       }
@@ -111,5 +170,6 @@ export function limitSnapshot(
     ...(snapshot.screen === undefined ? {} : { screen: snapshot.screen }),
     truncated,
     warnings,
+    ...(snapshot.accessibility === undefined ? {} : { accessibility: snapshot.accessibility }),
   }
 }

@@ -1,14 +1,18 @@
 import { execFile } from "node:child_process"
 import { createHash } from "node:crypto"
-import { readFileSync } from "node:fs"
+import { readFile } from "node:fs/promises"
 import { promisify } from "node:util"
+import type { CuaCapabilities } from "../cua/types"
 import type { LocalModelManager } from "./local"
 import { parseShowUiAction, parseUiTarsAction } from "./parse"
 import {
   checkCloseGuard,
   checkTitleBarBan,
   effectiveAllowTitleBarClicks,
+  extractWindowTitleFragment,
   findKnownClosePoints,
+  isWindowFocusIntent,
+  resolveWindowTitleFragment,
 } from "./window-safety"
 import type {
   ComputerUseAction,
@@ -27,6 +31,8 @@ import type {
 } from "./types"
 
 const run = promisify(execFile)
+
+const ENDPOINT_TIMEOUT_MS = 30000
 
 export interface ProviderSettings {
   readonly allowAutoLoad: boolean
@@ -79,6 +85,8 @@ export function validateGroundedPoint(options: {
   readonly screenshot?: import("./types").ImageReference
   readonly semanticElements?: readonly import("./types").SemanticElement[]
   readonly allowTitleBarClicks?: boolean
+  readonly platform?: import("./types").ComputerUsePlatform
+  readonly crop?: boolean
 }): string | undefined {
   const { x, y } = options
   if (x === undefined || y === undefined) return undefined
@@ -88,6 +96,8 @@ export function validateGroundedPoint(options: {
     taskContext: options.taskContext,
     image: options.screenshot,
     allowTitleBarClicks: options.allowTitleBarClicks,
+    crop: options.crop,
+    ...(options.platform === undefined ? {} : { platform: options.platform }),
   })
   if (ban.banned) return ban.reason
   // Explicit Close intents are expected to land on Close-X: the ban above
@@ -95,7 +105,7 @@ export function validateGroundedPoint(options: {
   // guard for them. Every other title-bar point keeps the 25px guard.
   const haystack = `${options.targetDescription ?? ""} ${options.taskContext ?? ""}`
   if (/clos(e|ing)\b/i.test(haystack)) return undefined
-  const closePoints = findKnownClosePoints(options.semanticElements, options.screenshot)
+  const closePoints = findKnownClosePoints(options.semanticElements, options.screenshot, options.platform)
   const guard = checkCloseGuard({ x, y }, closePoints)
   if (!guard.safe) {
     if (options.allowTitleBarClicks === true) return undefined
@@ -111,24 +121,63 @@ function allowTitleBarClicksFor(
   return effectiveAllowTitleBarClicks({ preferences: context?.preferences, settings: options.settings() })
 }
 
+// The Cua engine reports itself through `cua_` driver capabilities. The probe
+// lets the router and this provider ask whether refs, background delivery, and
+// rich actions are available for the current computer.
+export type CuaCapabilityProbe = (context?: ComputerUseContext) => CuaCapabilities | undefined | Promise<CuaCapabilities | undefined>
+
+export interface SemanticProviderOptions {
+  readonly cua?: CuaCapabilityProbe
+}
+
 export class SemanticProvider implements ComputerUseProvider {
   readonly id = "semantic"
   readonly name = "Omnia semantic environment"
+  private cuaProbe: CuaCapabilityProbe | undefined
+  private cua: CuaCapabilities | undefined
 
-  getCapabilities(): Promise<ComputerUseCapabilities> {
-    return Promise.resolve({
+  constructor(options: SemanticProviderOptions = {}) {
+    this.cuaProbe = options.cua
+  }
+
+  setCuaProbe(probe: CuaCapabilityProbe | undefined): void {
+    this.cuaProbe = probe
+  }
+
+  async getCapabilities(): Promise<ComputerUseCapabilities> {
+    const cua = await this.resolveCua()
+    this.cua = cua
+    return {
       visualGrounding: false,
       click: true,
       doubleClick: true,
       rightClick: true,
       type: true,
       scroll: true,
-      drag: true,
-      resize: true,
+      // The semantic path resolves controls through accessibility refs, not
+      // synthesized pointer drags. When the Cua engine is active, drag/resize
+      // on accessible targets are handled through those refs instead.
+      drag: false,
+      resize: false,
       keyboardShortcuts: true,
       local: true,
-      supportedBackends: ["native"],
-    })
+      supportedBackends: cua === undefined ? ["native"] : ["native", "cua"],
+    }
+  }
+
+  async cuaCapabilitiesFor(context?: ComputerUseContext): Promise<CuaCapabilities | undefined> {
+    const cua = await this.resolveCua(context)
+    if (cua !== undefined) this.cua = cua
+    return cua
+  }
+
+  cuaCapabilities(): CuaCapabilities | undefined {
+    return this.cua
+  }
+
+  private async resolveCua(context?: ComputerUseContext): Promise<CuaCapabilities | undefined> {
+    if (this.cuaProbe === undefined) return undefined
+    return await this.cuaProbe(context)
   }
 
   isAvailable(context: ComputerUseContext): Promise<boolean> {
@@ -145,6 +194,32 @@ export class SemanticProvider implements ComputerUseProvider {
 
   async analyze(request: ComputerUseRequest): Promise<ComputerUseResult> {
     const started = Date.now()
+    // Titled window-focus intents bypass semantic center-click entirely and
+    // route to focus_window by live title. Prevents the (960,539) over-match
+    // where bestMatch 0.4 + actionForOperation blind center-click focused
+    // nothing while claiming Verified.
+    if (isWindowFocusIntent(request.targetDescription, request.taskContext)) {
+      const fragment = extractWindowTitleFragment(request.targetDescription, request.taskContext)
+      if (fragment !== undefined) {
+        const candidates = (request.semanticContext?.elements ?? [])
+          .map((element) => element.name ?? element.text ?? "")
+          .filter((name) => name.length > 0)
+        if (request.semanticContext?.windowTitle !== undefined && request.semanticContext.windowTitle.length > 0) {
+          candidates.push(request.semanticContext.windowTitle)
+        }
+        const resolved = resolveWindowTitleFragment(fragment, candidates) ?? fragment
+        return {
+          success: true,
+          provider: this.id,
+          action: { type: "focus_window", window: resolved },
+          confidence: 0.9,
+          reasoning: `Titled window-focus intent routes to focus_window by title "${resolved}" instead of a semantic center-click.`,
+          evidence: [`focus_window title: ${resolved}`, `extracted fragment: ${fragment}`],
+          latencyMs: Date.now() - started,
+          metadata: { focusWindow: resolved, fragment },
+        }
+      }
+    }
     const elements = request.semanticContext?.elements ?? []
     const match = bestMatch(elements, request.targetDescription ?? "")
     if (match === undefined) {
@@ -156,14 +231,40 @@ export class SemanticProvider implements ComputerUseProvider {
         latencyMs: Date.now() - started,
       }
     }
-    const action = actionForOperation(request.requestedOperation, match.element, request.taskContext)
+    // Inspecting an accessible control needs no vision model: the semantic
+    // match already carries the role, name, text, states, and bounds.
+    if (request.requestedOperation === "inspect" || request.requestedOperation === "general") {
+      return {
+        success: true,
+        provider: this.id,
+        confidence: match.score,
+        reasoning: `Semantic inspection of ${match.element.role ?? "element"} "${match.element.name ?? match.element.text ?? ""}".`,
+        evidence: [
+          `source: ${match.element.source ?? "accessibility"}`,
+          `score: ${match.score.toFixed(2)}`,
+          ...(match.element.elementId === undefined ? [] : [`ref: ${match.element.elementId}`]),
+        ],
+        latencyMs: Date.now() - started,
+        metadata: {
+          elementId: match.element.elementId,
+          bounds: match.element.bounds,
+          states: match.element.states,
+          exact: match.exact,
+        },
+      }
+    }
+    const action = actionForOperation(request.requestedOperation, match.element, request.text)
     return {
       success: action !== undefined,
       provider: this.id,
       action,
       confidence: match.score,
       reasoning: `Semantic match on ${match.element.role ?? "element"} "${match.element.name ?? match.element.text ?? ""}".`,
-      evidence: [`source: ${match.element.source ?? "accessibility"}`, `score: ${match.score.toFixed(2)}`],
+      evidence: [
+        `source: ${match.element.source ?? "accessibility"}`,
+        `score: ${match.score.toFixed(2)}`,
+        ...(match.element.elementId === undefined ? [] : [`ref: ${match.element.elementId}`]),
+      ],
       latencyMs: Date.now() - started,
       metadata: {
         elementId: match.element.elementId,
@@ -264,8 +365,10 @@ class MoondreamProvider implements ComputerUseProvider {
       const answer = parseMoondreamAnswer(response.text)
       const width = request.screenshot.width ?? 1920
       const height = request.screenshot.height ?? 1080
+      // Asking/inspecting must never synthesize a click from a stray point in
+      // the answer; only pointing operations build an action.
       const action =
-        answer.point === undefined
+        asking || answer.point === undefined
           ? undefined
           : pointingAction(Math.round(answer.point.x * width), Math.round(answer.point.y * height))
       if (action === undefined && !asking) {
@@ -289,6 +392,7 @@ class MoondreamProvider implements ComputerUseProvider {
           screenshot: request.screenshot,
           semanticElements: request.semanticContext?.elements,
           allowTitleBarClicks: allowTitleBarClicksFor(this.options, context),
+          ...(context?.platform === undefined ? {} : { platform: context.platform }),
         })
         if (unsafe !== undefined) {
           return {
@@ -313,13 +417,14 @@ class MoondreamProvider implements ComputerUseProvider {
         latencyMs: Date.now() - started,
         metadata: { format: asking ? "answer" : "normalized-1", usage: response.usage },
       }
-    } catch (error) {
+    } catch {
       return {
         success: false,
         provider: this.id,
         model: model.id,
         confidence: 0,
-        reasoning: error instanceof Error ? error.message : "Local inference failed.",
+        errorCode: "execution_failed",
+        reasoning: "Local inference failed.",
         latencyMs: Date.now() - started,
       }
     }
@@ -328,7 +433,7 @@ class MoondreamProvider implements ComputerUseProvider {
   private model(): ComputerUseModel | undefined {
     const installed = this.options.local
       .list()
-      .filter((status) => status.model.provider === this.id && status.installed)
+      .filter((status) => status.model.provider === this.id && status.installed && status.model.enabled !== false)
       .map((status) => status.model)
     return installed.find((entry) => entry.recommended) ?? installed[0] ?? this.options.catalog.find((entry) => entry.provider === this.id)
   }
@@ -353,9 +458,10 @@ export function parseMoondreamPoint(text: string): { x: number; y: number } | un
   const rawX = Number(match[1])
   const rawY = Number(match[2])
   if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) return undefined
-  const scale = rawX > 1.5 || rawY > 1.5 ? 1000 : 1
-  const x = Math.min(1, Math.max(0, rawX / scale))
-  const y = Math.min(1, Math.max(0, rawY / scale))
+  // The two axes can disagree on scale in a single response (mixed 0-1 and
+  // 0-1000 outputs), so normalize each axis independently.
+  const x = Math.min(1, Math.max(0, rawX / (rawX > 1.5 ? 1000 : 1)))
+  const y = Math.min(1, Math.max(0, rawY / (rawY > 1.5 ? 1000 : 1)))
   return { x, y }
 }
 
@@ -441,7 +547,7 @@ class UiTarsProvider implements ComputerUseProvider {  readonly id = "ui-tars"
     try {
       await this.options.local.ensureLoaded(model.id, { auto: this.options.settings().allowAutoLoad })
       if (shouldUseCropPath(request) && request.screenshot.path !== undefined) {
-        const cropped = await this.groundInCropRegion(request, model.id, model.coordinateSpace)
+        const cropped = await this.groundInCropRegion(request, model.id, model.coordinateSpace, effectiveContext.platform)
         if (cropped !== undefined) return cropped
       }
       const dataUrl = await imageForModel(request.screenshot)
@@ -480,6 +586,7 @@ class UiTarsProvider implements ComputerUseProvider {  readonly id = "ui-tars"
           screenshot: request.screenshot,
           semanticElements: request.semanticContext?.elements,
           allowTitleBarClicks: allowTitleBarClicksFor(this.options, context),
+          ...(context?.platform === undefined ? {} : { platform: context.platform }),
         })
         if (unsafe !== undefined) {
           return {
@@ -505,20 +612,22 @@ class UiTarsProvider implements ComputerUseProvider {  readonly id = "ui-tars"
         latencyMs: Date.now() - started,
         metadata: { format: parsed.format, usage: response.usage },
       }
-    } catch (error) {
+    } catch {
       return {
         success: false,
         provider: this.id,
         model: model.id,
         confidence: 0,
-        reasoning: error instanceof Error ? error.message : "Local inference failed.",
+        errorCode: "execution_failed",
+        reasoning: "Local inference failed.",
         latencyMs: Date.now() - started,
       }
     }
   }
 
   // High-resolution crop path for tiny clustered targets (e.g. title-bar
-  // window buttons). Crops top-right 400x120 at full resolution as JPEG q90
+  // window buttons). Crops the platform title-bar strip (top-right on
+  // Linux/Windows, top-left on macOS) at full resolution as JPEG q90
   // with no 1024 downscale, sends the crop to UI-TARS, and maps raw 0-1000
   // back to absolute pixels via ImageReference.region in parseUiTarsAction.
   // Returns undefined when the crop itself cannot be produced (missing path,
@@ -527,14 +636,24 @@ class UiTarsProvider implements ComputerUseProvider {  readonly id = "ui-tars"
     request: ComputerUseRequest,
     modelId: string,
     coordinateSpace: ComputerUseModel["coordinateSpace"],
+    platform?: import("./types").ComputerUsePlatform,
   ): Promise<ComputerUseResult | undefined> {
     const started = Date.now()
     const screenshot = request.screenshot
     if (screenshot === undefined || screenshot.path === undefined) return undefined
-    const crop = titleBarCropFor(screenshot)
+    const crop = titleBarCropFor(screenshot, platform)
     const cropped = await compressScreenshotHighResCrop(screenshot.path, crop)
     if (cropped === undefined) return undefined
-    const cropImage: ImageReference = { width: crop.width, height: crop.height, region: crop, dataUrl: cropped.dataUrl }
+    // serverCrop marks this as a trusted server-generated crop so the
+    // title-bar ban is bypassed for the cropped region (caller-supplied
+    // regions are not trusted and never set this flag).
+    const cropImage: ImageReference = {
+      width: crop.width,
+      height: crop.height,
+      region: crop,
+      dataUrl: cropped.dataUrl,
+      serverCrop: true,
+    }
     const prompt = buildUiTarsCropPrompt(request, crop)
     const port = this.options.local.chatPort()
     const inferStarted = Date.now()
@@ -583,18 +702,19 @@ class UiTarsProvider implements ComputerUseProvider {  readonly id = "ui-tars"
       }
     }
     if (target !== undefined) {
-      // Crop path bypasses the full-screen title-bar ban via image.region,
-      // but the 25px Minimize-vs-Close guard still applies (explicit Close
-      // intents exempted inside validateGroundedPoint).
-      const fullScreenImage = request.screenshot
+      // Validate the mapped full-screen point against the crop image: the
+      // crop is a trusted server crop, so the title-bar ban is bypassed while
+      // the 25px Minimize-vs-Close guard still applies against semantic Close
+      // points (explicit Close intents exempted inside validateGroundedPoint).
       const unsafe = validateGroundedPoint({
         x: target.x,
         y: target.y,
         targetDescription: request.targetDescription,
         taskContext: request.taskContext,
-        screenshot: fullScreenImage,
+        screenshot: cropImage,
         semanticElements: request.semanticContext?.elements,
         allowTitleBarClicks: allowTitleBarClicksFor(this.options, undefined),
+        ...(platform === undefined ? {} : { platform }),
       })
       if (unsafe !== undefined) {
         return {
@@ -625,14 +745,14 @@ class UiTarsProvider implements ComputerUseProvider {  readonly id = "ui-tars"
   private model(): ComputerUseModel | undefined {
     const installed = this.options.local
       .list()
-      .filter((status) => status.model.provider === "ui-tars" && status.installed)
+      .filter((status) => status.model.provider === "ui-tars" && status.installed && status.model.enabled !== false)
       .map((status) => status.model)
     return installed.find((entry) => entry.recommended) ?? installed[0] ?? this.options.catalog.find((entry) => entry.provider === "ui-tars")
   }
 
   private selectModel(context: ComputerUseContext): ComputerUseModel | undefined {
     const settings = this.options.settings()
-    const statuses = this.options.local.list().filter((status) => status.installed)
+    const statuses = this.options.local.list().filter((status) => status.installed && status.model.enabled !== false)
     const compatible = statuses.filter((status) => status.model.provider === "ui-tars")
     if (compatible.length === 0) return undefined
     const preferred =
@@ -677,7 +797,9 @@ class EndpointVisionProvider implements HostedComputerUseProvider {
     if (!this.hosted) return Promise.resolve(true)
     const settings = this.options.settings()
     const privacy = context.privacy ?? { allowRemoteScreen: settings.allowRemoteScreen, mode: settings.mode as ComputerUseMode }
-    return Promise.resolve(privacy.allowRemoteScreen && privacy.mode !== "local_only")
+    // hosted_only is explicit consent to remote screen data; otherwise the
+    // caller must opt in via allowRemoteScreen.
+    return Promise.resolve(privacy.mode === "hosted_only" || (privacy.allowRemoteScreen && privacy.mode !== "local_only"))
   }
 
   estimateCost(): Promise<CostEstimate> {
@@ -716,13 +838,15 @@ class EndpointVisionProvider implements HostedComputerUseProvider {
               role: "user",
               content: [
                 { type: "text", text: buildVisionPrompt(request) },
-                { type: "image_url", image_url: { url: imageToDataUrl(request.screenshot) } },
+                { type: "image_url", image_url: { url: await imageForModel(request.screenshot) } },
               ],
             },
           ],
           max_tokens: 256,
           temperature: 0,
         }),
+        // A hung endpoint must not stall the router forever.
+        signal: AbortSignal.timeout(request.timeoutMs ?? ENDPOINT_TIMEOUT_MS),
       })
       if (!response.ok) {
         return { success: false, provider: this.id, confidence: 0, reasoning: `Endpoint returned HTTP ${response.status}.`, latencyMs: Date.now() - started }
@@ -750,6 +874,7 @@ class EndpointVisionProvider implements HostedComputerUseProvider {
           screenshot: request.screenshot,
           semanticElements: request.semanticContext?.elements,
           allowTitleBarClicks: allowTitleBarClicksFor(this.options, context),
+          ...(context?.platform === undefined ? {} : { platform: context.platform }),
         })
         if (unsafe !== undefined) {
           return {
@@ -775,12 +900,13 @@ class EndpointVisionProvider implements HostedComputerUseProvider {
         latencyMs: Date.now() - started,
         metadata: { format: parsed.format },
       }
-    } catch (error) {
+    } catch {
       return {
         success: false,
         provider: this.id,
         confidence: 0,
-        reasoning: error instanceof Error ? error.message : "Endpoint request failed.",
+        errorCode: "execution_failed",
+        reasoning: "The endpoint request failed.",
         latencyMs: Date.now() - started,
       }
     }
@@ -824,11 +950,12 @@ const EMPTY_CAPABILITIES: ComputerUseCapabilities = {
   supportedBackends: [],
 }
 
-export function imageToDataUrl(image: ImageReference): string {
+export async function imageToDataUrl(image: ImageReference): Promise<string> {
   if (image.dataUrl !== undefined) return image.dataUrl
   if (image.path === undefined) return ""
-  const bytes = readFileSync(image.path)
-  return `data:image/png;base64,${bytes.toString("base64")}`
+  // Async read: a full-screen PNG is megabytes, and the ffmpeg-less fallback
+  // must not block the event loop while it is read.
+  return `data:image/png;base64,${Buffer.from(await readFile(image.path)).toString("base64")}`
 }
 
 // Local vision inference is dominated by prompt processing, and a full-screen
@@ -867,9 +994,10 @@ async function compressScreenshot(path: string): Promise<string | undefined> {
 // normalized coords give 1 unit ~= 1.92px on a 1920px screen, so adjacent
 // buttons ~9px apart quantize to the same cell (observed identical (1834,45)
 // twice vs Close (1843,45)). The crop path below bypasses the 1024/q4
-// downscale for the top-right strip: crop 400x120 at full resolution, encode
+// downscale for the title-bar strip: crop 400x120 at full resolution, encode
 // JPEG q90 (ffmpeg mjpeg -q:v 2), and map raw 0-1000 back via the existing
-// ImageReference.region offset in parse.ts resolvePoint.
+// ImageReference.region offset in parse.ts resolvePoint. The strip side is
+// per-platform (top-right on Linux/Windows, top-left on macOS).
 export const TITLE_BAR_CROP_WIDTH = 400
 export const TITLE_BAR_CROP_HEIGHT = 120
 export const SMALL_TARGET_PX = 30
@@ -881,13 +1009,14 @@ export interface CropRegion {
   readonly height: number
 }
 
-export function titleBarCropFor(image: ImageReference): CropRegion {
+export function titleBarCropFor(image: ImageReference, platform?: import("./types").ComputerUsePlatform): CropRegion {
   const width = Math.min(TITLE_BAR_CROP_WIDTH, image.width)
   const height = Math.min(TITLE_BAR_CROP_HEIGHT, image.height)
+  if (platform === "macos") return { x: 0, y: 0, width, height }
   return { x: Math.max(0, image.width - width), y: 0, width, height }
 }
 
-const TITLE_BAR_INTENT = /clos(e|ing)|minimi[sz]e|maximi[sz]e|title.?bar|window (control|button|chrome|decoration)|top.?right/i
+const TITLE_BAR_INTENT = /clos(e|ing)|minimi[sz]e|maximi[sz]e|title.?bar|window (control|button|chrome|decoration)|top.?(right|left)/i
 
 export function shouldUseCropPath(request: ComputerUseRequest): boolean {
   const text = `${request.targetDescription ?? ""} ${request.taskContext ?? ""}`
@@ -899,8 +1028,14 @@ export function shouldUseCropPath(request: ComputerUseRequest): boolean {
     if (bounds === undefined) continue
     if (bounds.width >= SMALL_TARGET_PX && bounds.height >= SMALL_TARGET_PX) continue
     if (query.length === 0) return true
+    // Short names must not force the crop path through substring includes
+    // ("a" matching "Save"); require a whole-word match for <3-char queries.
     const name = (element.name ?? "").toLowerCase()
     const label = (element.text ?? "").toLowerCase()
+    if (query.length < 3) {
+      if (name === query || label === query) return true
+      continue
+    }
     if (name.length > 0 && (name.includes(query) || query.includes(name))) return true
     if (label.length > 0 && (label.includes(query) || query.includes(label))) return true
   }
@@ -954,7 +1089,7 @@ async function imageForModel(image: ImageReference): Promise<string> {
   if (image.path === undefined) return ""
   const compressed = await compressScreenshot(image.path)
   if (compressed !== undefined) return compressed
-  return `data:image/png;base64,${readFileSync(image.path).toString("base64")}`
+  return imageToDataUrl(image)
 }
 
 function buildUiTarsPrompt(request: ComputerUseRequest): string {
@@ -1079,51 +1214,68 @@ interface ElementMatch {
   readonly exact: boolean
 }
 
-function bestMatch(elements: readonly SemanticElement[], description: string): ElementMatch | undefined {
+export const SEMANTIC_MATCH_THRESHOLD = 0.6
+
+export function bestMatch(elements: readonly SemanticElement[], description: string): ElementMatch | undefined {
   const query = description.trim().toLowerCase()
   if (query.length === 0) return undefined
   let best: ElementMatch | undefined
   for (const element of elements) {
+    // An explicit element ref is authoritative even without bounds: the
+    // driver can execute it by stable id.
+    if (element.elementId !== undefined && element.elementId.toLowerCase() === query) {
+      return { element, score: 1, exact: true }
+    }
     if (element.bounds === undefined) continue
     const name = (element.name ?? "").toLowerCase()
     const text = (element.text ?? "").toLowerCase()
     const role = (element.role ?? "").toLowerCase()
     const exact = name === query || text === query
-    const nameScore = name.includes(query) ? 0.6 : query.includes(name) && name.length > 2 ? 0.4 : 0
-    const textScore = text.includes(query) ? 0.3 : 0
-    const roleScore = role.includes(query) ? 0.2 : 0
+    // Tightened: element name must contain the full query (0.6). The old
+    // query.includes(name) 0.4 clause over-matched any short element name
+    // ("window", "terminal") inside a long focus query and produced the
+    // (960,539) screen-center click. Removed.
+    const nameScore = name.length > 0 && name.includes(query) ? 0.6 : 0
+    const textScore = text.length > 0 && text.includes(query) ? 0.3 : 0
+    const roleScore = role.length > 0 && role.includes(query) ? 0.2 : 0
     const score = Math.min(1, nameScore + textScore + roleScore + (exact ? 0.25 : 0))
     if (score <= 0) continue
     if (best === undefined || score > best.score) best = { element, score, exact }
   }
+  if (best !== undefined && best.score < SEMANTIC_MATCH_THRESHOLD) return undefined
   return best
 }
 
 function actionForOperation(operation: string, element: SemanticElement, text?: string): ComputerUseAction | undefined {
   const bounds = element.bounds
-  if (bounds === undefined) return undefined
-  const point = { x: Math.round(bounds.x + bounds.width / 2), y: Math.round(bounds.y + bounds.height / 2) }
+  const hasRef = element.elementId !== undefined && element.elementId.length > 0
+  if (bounds === undefined && !hasRef) return undefined
+  const point = bounds === undefined ? undefined : { x: Math.round(bounds.x + bounds.width / 2), y: Math.round(bounds.y + bounds.height / 2) }
+  const label = element.name ?? element.text
+  const target =
+    point === undefined || bounds === undefined
+      ? undefined
+      : { x: point.x, y: point.y, width: bounds.width, height: bounds.height, ...(label === undefined ? {} : { label }) }
   switch (operation) {
     case "click":
-      return { type: "click", target: { x: point.x, y: point.y, width: bounds.width, height: bounds.height, label: element.name ?? element.text } }
     case "ground":
-      return { type: "click", target: { x: point.x, y: point.y, width: bounds.width, height: bounds.height, label: element.name ?? element.text } }
+      return { type: "click", ...(target === undefined ? {} : { target }) }
     case "type":
-      return { type: "type", text: text ?? "", target: { x: point.x, y: point.y, width: bounds.width, height: bounds.height } }
+      if (text === undefined || text.length === 0) return undefined
+      return { type: "type", text, ...(target === undefined ? {} : { target }) }
     case "scroll":
-      return { type: "scroll", direction: "down", target: { x: point.x, y: point.y, width: bounds.width, height: bounds.height } }
+      return { type: "scroll", direction: "down", ...(target === undefined ? {} : { target }) }
     case "drag":
+      if (target === undefined || bounds === undefined || point === undefined) return undefined
       return {
         type: "drag",
-        target: { x: point.x, y: point.y, width: bounds.width, height: bounds.height },
+        target,
         path: [
           { x: point.x, y: point.y },
           { x: Math.round(bounds.x + bounds.width), y: Math.round(bounds.y + bounds.height) },
         ],
       }
-    case "inspect":
-      return undefined
     default:
-      return { type: "click", target: { x: point.x, y: point.y } }
+      return undefined
   }
 }

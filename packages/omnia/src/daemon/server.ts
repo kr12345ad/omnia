@@ -32,17 +32,25 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function readBody(request: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let size = 0
+    let settled = false
     const chunks: Buffer[] = []
+    const fail = (error: Error) => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
     request.on("data", (chunk: Buffer) => {
       size += chunk.length
       if (size > DAEMON_BODY_LIMIT_BYTES) {
-        reject(new Error("Request body too large."))
+        fail(new Error("Request body too large."))
         request.destroy()
         return
       }
       chunks.push(chunk)
     })
     request.on("end", () => {
+      if (settled) return
+      settled = true
       if (chunks.length === 0) return resolve(undefined)
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")))
@@ -50,7 +58,11 @@ function readBody(request: IncomingMessage): Promise<unknown> {
         reject(new Error("Request body is not valid JSON."))
       }
     })
-    request.on("error", reject)
+    // A client that vanishes mid-body closes the request without ever emitting
+    // end or error; without this the promise, the buffered body, and the whole
+    // handler are retained forever.
+    request.on("close", () => fail(new Error("Request body was truncated.")))
+    request.on("error", (error: Error) => fail(error))
   })
 }
 
@@ -58,6 +70,16 @@ function send(response: ServerResponse, status: number, value: unknown): void {
   const body = JSON.stringify(value)
   response.writeHead(status, { "content-type": "application/json", "content-length": Buffer.byteLength(body) })
   response.end(body)
+}
+
+function failRequest(response: ServerResponse, error: unknown): void {
+  // Writing a second response throws ERR_HTTP_HEADERS_SENT, which would escape
+  // the request handler as an unhandled rejection and take the daemon down.
+  if (response.headersSent) {
+    response.destroy()
+    return
+  }
+  send(response, 500, { ok: false, error: error instanceof Error ? error.message : "Daemon request failed." })
 }
 
 function failure(message: string, code: string, retryable: boolean): ActionResult {
@@ -199,7 +221,7 @@ export async function startDaemon(driver: HostDriver, token = randomBytes(32).to
       }
       send(response, 404, { ok: false, error: "Unknown route." })
     } catch (error) {
-      send(response, 500, { ok: false, error: error instanceof Error ? error.message : "Daemon request failed." })
+      failRequest(response, error)
     }
   })
   server.timeout = DAEMON_REQUEST_TIMEOUT_MS

@@ -430,6 +430,24 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+// A wait must never outlive its deadline, so a poll that cannot finish inside
+// the remaining budget is abandoned instead of blocking on the observe timeout.
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms)
+    void promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      () => {
+        clearTimeout(timer)
+        resolve(undefined)
+      },
+    )
+  })
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
@@ -471,14 +489,29 @@ function refuse(
   }
 }
 
-function pointInBounds(point: { x: number; y: number }, bounds: { width: number; height: number }): boolean {
-  return point.x >= 0 && point.y >= 0 && point.x < bounds.width && point.y < bounds.height
+function pointInBounds(
+  point: { x: number; y: number },
+  bounds: { x?: number; y?: number; width: number; height: number },
+): boolean {
+  const originX = bounds.x ?? 0
+  const originY = bounds.y ?? 0
+  return point.x >= originX && point.y >= originY && point.x < originX + bounds.width && point.y < originY + bounds.height
 }
 
 export interface WindowsCuaBackendOptions {
   runner?: WindowsRunner
   maxElements?: number
   allowForeground?: boolean
+}
+
+function windowsBindingOf(action: CuaAction): { observationId?: string; generation?: number } {
+  if (action.type === "click" || action.type === "drag" || action.type === "key" || action.type === "dismiss") {
+    return {}
+  }
+  return {
+    ...(action.observationId === undefined ? {} : { observationId: action.observationId }),
+    ...(action.generation === undefined ? {} : { generation: action.generation }),
+  }
 }
 
 interface RefResolution {
@@ -646,12 +679,18 @@ class WindowsCuaBackend implements CuaBackend {
 
   async waitFor(condition: CuaWaitCondition): Promise<CuaWaitResult> {
     const started = Date.now()
-    const timeoutMs = condition.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS
-    const pollMs = Math.max(MIN_WAIT_POLL_MS, condition.pollMs ?? DEFAULT_WAIT_POLL_MS)
+    const timeoutMs = Math.max(0, condition.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS)
+    // An unbounded poll interval would sleep far past the timeout, and a
+    // snapshot that starts with no budget left to finish in can overshoot the
+    // deadline by the whole observe timeout; cap both.
+    const pollMs = Math.min(1000, Math.max(MIN_WAIT_POLL_MS, condition.pollMs ?? DEFAULT_WAIT_POLL_MS))
     let confirm = false
     let matched: CuaElement | undefined
     while (true) {
-      const snapshot = await this.snapshot()
+      const remaining = timeoutMs - (Date.now() - started)
+      if (remaining <= 0) break
+      const snapshot = await withTimeout(this.snapshot(), remaining)
+      if (snapshot === undefined) break
       const match = this.matchWait(snapshot, condition)
       if (match !== undefined) {
         matched = match.element
@@ -667,8 +706,9 @@ class WindowsCuaBackend implements CuaBackend {
         confirm = false
         matched = undefined
       }
-      if (Date.now() - started + pollMs > timeoutMs) break
-      await delay(pollMs)
+      const sleep = Math.min(pollMs, timeoutMs - (Date.now() - started))
+      if (sleep <= 0) break
+      await delay(sleep)
     }
     return {
       ok: false,
@@ -806,6 +846,23 @@ class WindowsCuaBackend implements CuaBackend {
     if (source === undefined) {
       return refuse(action, "no_snapshot", "Take a snapshot before acting on an element ref.", generation)
     }
+    const binding = windowsBindingOf(action)
+    if (binding.observationId !== undefined && binding.observationId !== source.id) {
+      return refuse(
+        action,
+        "stale_ref",
+        `Target ${ref} is from observation ${binding.observationId}, not the current ${source.id}; re-observe before acting.`,
+        generation,
+      )
+    }
+    if (binding.generation !== undefined && binding.generation !== source.generation) {
+      return refuse(
+        action,
+        "stale_ref",
+        `Target ${ref} is from generation ${binding.generation}, not the current ${source.generation}; re-observe before acting.`,
+        generation,
+      )
+    }
     const element = source.elements.find((candidate) => candidate.ref === ref)
     if (element === undefined) return refuse(action, "stale_ref", `Unknown element ref: ${ref}`, generation)
     if (!(await this.probe()).ok) {
@@ -841,6 +898,23 @@ class WindowsCuaBackend implements CuaBackend {
     const source = snapshot ?? this.latest
     if (source === undefined) {
       return refuse(action, "no_snapshot", "Take a snapshot before acting on a window ref.", generation)
+    }
+    const binding = windowsBindingOf(action)
+    if (binding.observationId !== undefined && binding.observationId !== source.id) {
+      return refuse(
+        action,
+        "stale_ref",
+        `Target ${ref} is from observation ${binding.observationId}, not the current ${source.id}; re-observe before acting.`,
+        generation,
+      )
+    }
+    if (binding.generation !== undefined && binding.generation !== source.generation) {
+      return refuse(
+        action,
+        "stale_ref",
+        `Target ${ref} is from generation ${binding.generation}, not the current ${source.generation}; re-observe before acting.`,
+        generation,
+      )
     }
     const window = source.windows.find((candidate) => candidate.ref === ref)
     if (window === undefined) return refuse(action, "stale_ref", `Unknown window ref: ${ref}`, generation)
@@ -1187,6 +1261,13 @@ class WindowsCuaBackend implements CuaBackend {
           amount,
         })
         if ("result" in attempt) return attempt.result
+        // The Scroll pattern is the background path for a ref-scoped scroll.
+        // Dropping through to a wheel event moves the real cursor, which the
+        // foreground opt-in exists to prevent, so report the pattern failure
+        // instead of silently stealing input.
+        if (!this.allowForeground) {
+          return this.classifyFailure(action, attempt.failure, generation, attempt.error)
+        }
       }
       const bounds = normalizeBounds(resolved.live.bounds ?? resolved.element.bounds)
       if (bounds === undefined) {
@@ -1221,18 +1302,12 @@ class WindowsCuaBackend implements CuaBackend {
       const target: CuaAction & { ref: string } = { ...action, ref }
       const resolved = await this.expectElement(ref, target, snapshot, generation)
       if (!isRefResolution(resolved)) return resolved
-      const editable = resolved.element.editable || resolved.element.actions.includes("set_value")
-      if (editable) {
-        const attempt = await this.attemptPattern("set_value", target, snapshot, generation, action.text)
-        if ("result" in attempt) return attempt.result
-        if (!this.allowForeground) {
-          return refuse(action, "background_unavailable", attempt.error, generation)
-        }
-      } else if (!this.allowForeground) {
+      // NO silent type→set_value: typing is always keyboard input after focus.
+      if (!this.allowForeground) {
         return refuse(
           action,
           "background_unavailable",
-          "Typing into this element needs focus; enable the foreground fallback or type without a ref.",
+          "Typing into this element needs focus and the foreground fallback is disabled; enable it or type without a ref.",
           generation,
         )
       }

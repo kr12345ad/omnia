@@ -121,6 +121,7 @@ export const ACTION_TYPES = [
   "collapse",
   "increment",
   "decrement",
+  "scroll_into_view",
   "dismiss",
   "wait",
   "observe",
@@ -501,6 +502,10 @@ export interface DecrementAction extends ActionBase {
   readonly amount?: number
 }
 
+export interface ScrollIntoViewAction extends ActionBase {
+  readonly type: "scroll_into_view"
+}
+
 export interface DismissAction extends ActionBase {
   readonly type: "dismiss"
 }
@@ -569,6 +574,7 @@ export type ComputerAction =
   | CollapseAction
   | IncrementAction
   | DecrementAction
+  | ScrollIntoViewAction
   | DismissAction
   | WaitAction
   | FindAction
@@ -586,6 +592,7 @@ export interface FindRequest {
   readonly query: string
   readonly role?: Role
   readonly name?: string
+  readonly window?: string
   readonly source?: Source
   readonly backend?: Backend
   readonly limit?: number
@@ -840,6 +847,25 @@ export interface ActionResult {
 }
 
 export type ComputerResult = ActionResult
+
+export interface CommandRequest {
+  readonly command: string
+  readonly cwd?: string
+  readonly timeoutMs?: number
+  readonly env?: Readonly<Record<string, string>>
+  readonly stdin?: string
+  readonly maxOutputBytes?: number
+}
+
+export interface CommandResult {
+  readonly exitCode: number | null
+  readonly stdout: string
+  readonly stderr: string
+  readonly truncated: boolean
+  readonly timedOut: boolean
+  readonly durationMs: number
+  readonly stdinError?: string
+}
 
 export interface ObservationRequest {
   readonly include?: readonly string[]

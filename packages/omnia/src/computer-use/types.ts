@@ -27,6 +27,10 @@ export interface ImageReference {
   readonly width: number
   readonly height: number
   readonly region?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }
+  // Set only by the trusted server-side crop path (providers.ts
+  // groundInCropRegion). Callers cannot forge this through the HTTP API, so
+  // only server crops bypass the title-bar ban.
+  readonly serverCrop?: boolean
 }
 
 export interface SemanticElement {
@@ -90,6 +94,7 @@ export interface ComputerUseRequest {
   readonly semanticContext?: SemanticEnvironment
   readonly taskContext?: string
   readonly question?: string
+  readonly text?: string
   readonly requestedOperation: ComputerUseOperation
   readonly targetDescription?: string
   readonly preferredProvider?: string
@@ -109,6 +114,7 @@ export interface ComputerUseAction {
   readonly key?: string
   readonly direction?: string
   readonly path?: readonly { readonly x: number; readonly y: number }[]
+  readonly window?: string
 }
 
 export interface ComputerUseResult {
@@ -120,7 +126,51 @@ export interface ComputerUseResult {
   readonly reasoning?: string
   readonly evidence?: readonly string[]
   readonly latencyMs: number
+  readonly errorCode?: ComputerUseErrorCode
   readonly metadata?: Readonly<Record<string, unknown>>
+}
+
+export type ComputerUseErrorCode =
+  | "title_bar_ban"
+  | "no_visual_provider"
+  | "visual_provider_blocked_by_policy"
+  | "no_provider_result"
+  | "unexecutable_action"
+  | "unsupported_window_intent"
+  | "execution_failed"
+  | "permission_denied"
+  | "permission_required"
+  | "timeout"
+  | "cancelled"
+  | "element_not_found"
+  | "window_not_found"
+  | "invalid_action"
+  | "driver_unavailable"
+  | "calibration_stale"
+  | "verification_failed"
+
+export const COMPUTER_USE_ERROR_CODES: readonly ComputerUseErrorCode[] = [
+  "title_bar_ban",
+  "no_visual_provider",
+  "visual_provider_blocked_by_policy",
+  "no_provider_result",
+  "unexecutable_action",
+  "unsupported_window_intent",
+  "execution_failed",
+  "permission_denied",
+  "permission_required",
+  "timeout",
+  "cancelled",
+  "element_not_found",
+  "window_not_found",
+  "invalid_action",
+  "driver_unavailable",
+  "calibration_stale",
+  "verification_failed",
+]
+
+export function isComputerUseErrorCode(value: unknown): value is ComputerUseErrorCode {
+  return typeof value === "string" && (COMPUTER_USE_ERROR_CODES as readonly string[]).includes(value)
 }
 
 export interface CostEstimate {
@@ -178,13 +228,17 @@ export interface ComputerUseModel {
   readonly priority?: number
 }
 
-export interface ComputerUseModelSource {
+export type ComputerUseModelSource = {
   readonly type: "huggingface"
   readonly repo: string
   readonly file: string
-  readonly mmprojFile?: string
-  readonly mmprojBytes?: number
-}
+  // Mandatory pinned content hash (HuggingFace LFS oid). Downloads fail
+  // closed without it, so an unpinned artifact can never execute.
+  readonly sha256: string
+} & (
+  | { readonly mmprojFile?: undefined; readonly mmprojBytes?: undefined; readonly mmprojSha256?: undefined }
+  | { readonly mmprojFile: string; readonly mmprojBytes?: number; readonly mmprojSha256: string }
+)
 
 export interface ComputerUseModelStatus {
   readonly model: ComputerUseModel
@@ -203,6 +257,8 @@ export type ComputerUseRuntimeVariant = "cpu" | "cuda" | "rocm" | "vulkan" | "me
 export interface ComputerUseRuntimeArchive {
   readonly url: string
   readonly bytes?: number
+  // Mandatory pinned checksum; the downloaded archive must match.
+  readonly sha256: string
 }
 
 export interface ComputerUseRuntime {
@@ -304,6 +360,9 @@ export interface ComputerUseSettings {
   readonly maxRetries: number
   readonly idleUnloadMs: number
   readonly allowTitleBarClicks?: boolean
+  // Bounded post-action verification + one re-observe/retry for
+  // vision-driven clicks when unverified. Default on (undefined === true).
+  readonly verifyVisionClicks?: boolean
 }
 
 export interface ComputerUseStatus {

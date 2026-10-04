@@ -130,7 +130,9 @@ export function normalizeElement(input: RawElement, fallbackOrder = 0): Normaliz
     ...optionalText("name", input.name ?? input.accessibleName ?? input.label ?? input.title ?? input.text),
     ...optionalText("description", input.description),
     ...optionalText("value", formatValue(input.value)),
-    enabled: input.enabled ?? input.disabled ?? !hasState(input, "disabled"),
+    // `disabled` is the inverse of `enabled`: `disabled: false` means the
+    // element is enabled (the old `??` chain inverted it).
+    enabled: input.enabled ?? (input.disabled === undefined ? !hasState(input, "disabled") : !input.disabled),
     focused: input.focused ?? hasState(input, "focused"),
     selected: input.selected ?? hasState(input, "selected"),
     ...(checked === undefined ? {} : { checked }),

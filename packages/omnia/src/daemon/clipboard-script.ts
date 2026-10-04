@@ -6,7 +6,8 @@ import sys
 import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, GLib, Gtk
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
 
 
 def emit(payload):
@@ -26,6 +27,20 @@ def opt(name):
     if name in sys.argv:
         return sys.argv[sys.argv.index(name) + 1]
     return None
+
+
+def stdin_text():
+    try:
+        return sys.stdin.read()
+    except Exception:
+        return ""
+
+
+def text_arg():
+    # Long clipboard content is passed over stdin to stay under the argv limit.
+    if "--stdin" in sys.argv:
+        return stdin_text()
+    return opt("--text") or ""
 
 
 def clipboard():
@@ -57,7 +72,7 @@ def cmd_get():
 
 
 def cmd_set():
-    text = opt("--text") or ""
+    text = text_arg()
     selection = clipboard()
     selection.set_text(text, -1)
     while Gtk.events_pending():
@@ -75,7 +90,32 @@ def cmd_set():
     emit({"ok": True, "length": len(text), "hash": digest(text)})
 
 
-COMMANDS = {"get": cmd_get, "set": cmd_set}
+def cmd_set_image():
+    path = opt("--path")
+    if not path:
+        fail("missing --path")
+    try:
+        pixbuf = GdkPixbuf.Pixbuf.new_from_file(path)
+    except Exception as error:
+        fail("could not load image: %s" % error)
+    selection = clipboard()
+    selection.set_image(pixbuf)
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+    try:
+        selection.store()
+    except Exception:
+        pass
+    hold = float(opt("--hold") or "0")
+    if hold > 0:
+        # Serve selection requests so a paste works even when no clipboard
+        # manager persists the image.
+        GLib.timeout_add_seconds(int(hold), Gtk.main_quit)
+        Gtk.main()
+    emit({"ok": True, "path": path, "width": pixbuf.get_width(), "height": pixbuf.get_height()})
+
+
+COMMANDS = {"get": cmd_get, "set": cmd_set, "set_image": cmd_set_image}
 
 if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
     fail("unknown command")

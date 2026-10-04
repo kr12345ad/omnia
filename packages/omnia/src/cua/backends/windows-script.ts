@@ -548,15 +548,26 @@ export function windowsKeySpec(keys: string): { modifiers: number[]; key: number
     .filter((part) => part.length > 0)
   const modifiers: number[] = []
   let key: number | undefined
+  let nonModifierCount = 0
   for (const part of parts) {
     const vk = WINDOWS_VK[part]
     if (vk === undefined) {
-      if (part.length === 1) key = part.toUpperCase().charCodeAt(0)
+      if (part.length === 1) {
+        key = part.toUpperCase().charCodeAt(0)
+        nonModifierCount += 1
+      }
       continue
     }
-    if ([0x11, 0x10, 0x12, 0x5b].includes(vk)) modifiers.push(vk)
-    else key = vk
+    if ([0x11, 0x10, 0x12, 0x5b].includes(vk)) {
+      modifiers.push(vk)
+      continue
+    }
+    key = vk
+    nonModifierCount += 1
   }
+  // One keybd_event pair can only express a single non-modifier key; keeping
+  // the last one would silently drop the rest of the combination.
+  if (nonModifierCount > 1) return undefined
   if (key === undefined) return undefined
   return { modifiers, key }
 }

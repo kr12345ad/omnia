@@ -108,3 +108,44 @@ describe("candidate disambiguation and revalidation", () => {
     expect(result.reference?.generation).toBe(4)
   })
 })
+describe("retrieval input hardening", () => {
+  test("invalid thresholds and limits are clamped instead of throwing", () => {
+    expect(() => retrieveElements(observation, { query: "save", fuzzyThreshold: 2 })).not.toThrow()
+    expect(() => retrieveElements(observation, { query: "save", fuzzyThreshold: Number.NaN })).not.toThrow()
+    expect(() => retrieveElements(observation, { query: "save", limit: -3 })).not.toThrow()
+    expect(retrieveElements(observation, { query: "save", limit: -3 }).matches.length).toBe(0)
+  })
+
+  test("NaN candidate confidence is coerced from the score", () => {
+    const candidate = {
+      element: { id: "save" },
+      score: 0.7,
+      confidence: Number.NaN,
+      provenance: { source: "accessibility", trust: "untrusted" },
+      matchedOn: [],
+      hierarchyPath: ["save"],
+      depth: 0,
+      contextScore: 0,
+      elementIndex: 0,
+    }
+    const decision = disambiguateCandidates([candidate])
+    expect(decision.status).toBe("resolved")
+    expect(decision.selected?.confidence).toBe(0.7)
+  })
+
+  test("mutating actions require a higher confidence floor", () => {
+    const candidate = {
+      element: { id: "save" },
+      score: 0.55,
+      confidence: 0.55,
+      provenance: { source: "accessibility", trust: "untrusted" },
+      matchedOn: [],
+      hierarchyPath: ["save"],
+      depth: 0,
+      contextScore: 0,
+      elementIndex: 0,
+    }
+    expect(disambiguateCandidates([candidate]).status).toBe("resolved")
+    expect(disambiguateCandidates([candidate], { mutating: true }).status).toBe("not-found")
+  })
+})

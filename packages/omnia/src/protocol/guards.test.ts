@@ -3,6 +3,7 @@ import {
   isActionResult,
   isComputerAction,
   isComputerEvent,
+  isComputerInfo,
   isElementReference,
   isFindResult,
   isJsonValue,
@@ -45,6 +46,30 @@ describe("protocol guards", () => {
     expect(isJsonValue({ value: new Date() })).toBe(false)
   })
 
+  test("rejects array payloads that structuredClone cannot copy", () => {
+    const withExtraProperty = [1, 2] as number[] & { handler?: unknown }
+    withExtraProperty.handler = () => true
+    const withCyclicExtraProperty = [1] as number[] & { self?: unknown }
+    withCyclicExtraProperty.self = withCyclicExtraProperty
+
+    expect(isJsonValue(withExtraProperty)).toBe(false)
+    expect(isJsonValue(withCyclicExtraProperty)).toBe(false)
+    expect(isJsonValue([1, 2, 3])).toBe(true)
+    expect(isJsonValue([{ nested: [true, null, "text"] }])).toBe(true)
+  })
+
+  test("bounds element reference counters and expiry to the documented ranges", () => {
+    expect(isElementReference({ elementId: "save", expiresAt: -1 })).toBe(false)
+    expect(isElementReference({ elementId: "save", generation: -1 })).toBe(false)
+    expect(isElementReference({ elementId: "save", generation: 1.5 })).toBe(false)
+    expect(isElementReference({ elementId: "save", generation: 2, expiresAt: 1_700_000_000_000 })).toBe(true)
+  })
+
+  test("rejects events stamped before the epoch", () => {
+    expect(isComputerEvent({ id: "event-1", timestamp: -1, type: "computer.disconnected" })).toBe(false)
+    expect(isComputerEvent({ id: "event-1", timestamp: 0, type: "computer.disconnected" })).toBe(true)
+  })
+
   test("narrows discriminated actions and results", () => {
     const action = {
       type: "click",
@@ -62,6 +87,19 @@ describe("protocol guards", () => {
     expect(isActionResult(result)).toBe(true)
     expect(isComputerAction({ type: "type", target: { kind: "element", elementId: "name" } })).toBe(false)
     expect(isComputerAction({ type: "type", text: "hello" })).toBe(true)
+  })
+
+  test("requires the key a key action declares and admits an unreported platform", () => {
+    expect(isComputerAction({ type: "key", key: "ctrl+shift+s", modifiers: ["control", "shift"] })).toBe(true)
+    expect(isComputerAction({ type: "key", keys: "ctrl+shift+s" })).toBe(false)
+    expect(isComputerInfo({ id: "computer-1", name: "Desktop", platform: "" })).toBe(true)
+    expect(isComputerInfo({ id: "computer-1", name: "Desktop" })).toBe(false)
+  })
+
+  test("does not treat undeclared browser payloads as observations or elements", () => {
+    expect(isObservation({ id: "observation-1", timestamp: 1, browser: { engine: "chromium" } })).toBe(true)
+    expect(isObservation({ browser: { engine: "chromium" } })).toBe(false)
+    expect(isUIElement({ browser: { engine: "chromium" } })).toBe(false)
   })
 
   test("validates references, scopes, provenance, and find results", () => {

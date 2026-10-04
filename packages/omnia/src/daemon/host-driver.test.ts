@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { createHostDriver, INPUT_PERMISSION, withInputPermission } from "./host-driver"
+import { createHostDriver, createLegacyHostDriver, INPUT_PERMISSION, withInputPermission } from "./host-driver"
 import { LinuxHostDriver } from "./linux"
 import type { Runner } from "./linux"
+import type { PersistentHelper } from "./persistent-helper"
 import type { CapabilitySupport } from "../protocol"
 
 const observation = {
@@ -30,6 +31,26 @@ function stubRunner(responses: Record<string, string>): Runner {
     if (key in responses) return { stdout: responses[key]!, stderr: "" }
     throw new Error(`unexpected call: ${file} ${args.join(" ")}`)
   }
+}
+
+// The persistent AT-SPI helper replaces the per-observation python spawn;
+// tests inject a deterministic fake instead of launching python.
+function fakeAtspiHelper(applications: unknown, truncated = false): PersistentHelper {
+  return {
+    ready: Promise.resolve({ ok: true, payload: {} }),
+    exited: false,
+    async request(command) {
+      if (command === "snapshot") {
+        return { ok: true, payload: { applications, truncated } }
+      }
+      return { ok: false, error: `unsupported command: ${command}`, payload: {} }
+    },
+    async dispose() {},
+  }
+}
+
+function snapshotApplications(payload: string): unknown {
+  return (JSON.parse(payload) as { applications: unknown }).applications
 }
 
 const SNAPSHOT = JSON.stringify({
@@ -122,10 +143,12 @@ function windowedRunner(): Runner {
 describe("host driver", () => {
   test("revalidates targets against fresh observations", async () => {
     const host = new LinuxHostDriver({
-      runner: stubRunner({ "xprop -root": "", "python3 -c": SNAPSHOT }),
+      runner: stubRunner({ "xprop -root": "" }),
       display: ":0",
+      probeDisplay: false,
+      atspiHelper: fakeAtspiHelper(snapshotApplications(SNAPSHOT)),
     })
-    const driver = createHostDriver(host)
+    const driver = createLegacyHostDriver(host)
     const valid = await driver.revalidateTarget({ kind: "element", elementId: "atspi:0.1" })
     expect(valid.valid).toBe(true)
     const missing = await driver.revalidateTarget({ kind: "element", elementId: "atspi:9.9" })
@@ -139,12 +162,13 @@ describe("host driver", () => {
       runner: (async (file, args) => {
         calls.push(`${file} ${args[0] ?? ""} ${args[2] ?? ""}`.trim())
         if (file === "xprop") return { stdout: "", stderr: "" }
-        if (args[2] === "snapshot") return { stdout: SNAPSHOT, stderr: "" }
         return { stdout: JSON.stringify({ ok: true, result: true }), stderr: "" }
       }) as Runner,
       display: ":0",
+      probeDisplay: false,
+      atspiHelper: fakeAtspiHelper(snapshotApplications(SNAPSHOT)),
     })
-    const driver = createHostDriver(host)
+    const driver = createLegacyHostDriver(host)
     const result = await driver.execute({
       type: "click",
       target: { kind: "element", elementId: "atspi:0.1" },
@@ -158,6 +182,24 @@ describe("host driver", () => {
     })
     expect(stale.success).toBe(false)
     expect(stale.error).toMatchObject({ code: "target_stale" })
+  })
+
+  test("admits a targetless dismiss and sends Escape", async () => {
+    const calls: string[] = []
+    const host = new LinuxHostDriver({
+      runner: (async (file, args) => {
+        calls.push([file, ...args].join(" "))
+        if (file === "xprop") return { stdout: "", stderr: "" }
+        return { stdout: JSON.stringify({ ok: true }), stderr: "" }
+      }) as Runner,
+      display: ":0",
+      probeDisplay: false,
+      atspiHelper: fakeAtspiHelper(snapshotApplications(SNAPSHOT)),
+    })
+    const driver = createLegacyHostDriver(host)
+    const result = await driver.execute({ type: "dismiss" })
+    expect(result.success).toBe(true)
+    expect(calls.some((call) => call.includes("key --keys Escape"))).toBe(true)
   })
 
   test("falls back to global pointer input when an element exposes no action", async () => {
@@ -186,12 +228,13 @@ describe("host driver", () => {
       runner: (async (file, args) => {
         calls.push([file, ...args].join(" "))
         if (file === "xprop") return { stdout: "", stderr: "" }
-        if (args[2] === "snapshot") return { stdout: snapshot, stderr: "" }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" }
       }) as Runner,
       display: ":0",
+      probeDisplay: false,
+      atspiHelper: fakeAtspiHelper(snapshotApplications(snapshot)),
     })
-    const driver = createHostDriver(host)
+    const driver = createLegacyHostDriver(host)
     const result = await driver.execute({
       type: "click",
       target: { kind: "element", elementId: "atspi:0" },
@@ -212,14 +255,15 @@ describe("host driver", () => {
       ],
     })
     const host = new LinuxHostDriver({
-      runner: (async (file, args) => {
+      runner: (async (file) => {
         if (file === "xprop") return { stdout: "", stderr: "" }
-        if (args[2] === "snapshot") return { stdout: snapshot, stderr: "" }
         return { stdout: JSON.stringify({ ok: true }), stderr: "" }
       }) as Runner,
       display: ":0",
+      probeDisplay: false,
+      atspiHelper: fakeAtspiHelper(snapshotApplications(snapshot)),
     })
-    const driver = createHostDriver(host)
+    const driver = createLegacyHostDriver(host)
     const result = await driver.execute({
       type: "click",
       target: { kind: "element", elementId: "atspi:0" },
@@ -229,8 +273,13 @@ describe("host driver", () => {
   })
 
   test("reports stale targets that vanished instead of executing", async () => {
-    const host = new LinuxHostDriver({ runner: stubRunner({}), display: ":0" })
-    const driver = createHostDriver(host)
+    const host = new LinuxHostDriver({
+      runner: stubRunner({ "xprop -root": "" }),
+      display: ":0",
+      probeDisplay: false,
+      atspiHelper: fakeAtspiHelper([]),
+    })
+    const driver = createLegacyHostDriver(host)
     const result = await driver.execute({
       type: "click",
       target: { kind: "element", elementId: "x11:0x1" },
@@ -251,7 +300,12 @@ describe("host driver", () => {
   })
 
   test("matches application ids against accessibility names and window properties", async () => {
-    const host = new LinuxHostDriver({ runner: windowedRunner(), display: ":0" })
+    const host = new LinuxHostDriver({
+      runner: windowedRunner(),
+      display: ":0",
+      probeDisplay: false,
+      atspiHelper: fakeAtspiHelper(snapshotApplications(WINDOWED_SNAPSHOT)),
+    })
     const byClass = await host.observe("LIBREOFFICE")
     expect(byClass.elements?.some((element) => element.id === "x11:0x1")).toBe(true)
     expect(byClass.elements?.some((element) => element.id === "atspi:0")).toBe(false)
@@ -274,16 +328,17 @@ describe("host driver", () => {
         throw error
       }) as Runner,
       display: ":0",
+      probeDisplay: false,
     })
     const failure = await host.executeKey("ctrl+s").catch((error: unknown) => error)
     expect(failure).toBeInstanceOf(Error)
     const message = failure instanceof Error ? failure.message : ""
-    expect(message).toBe("AT-SPI key synthesis failed: helper process failed")
+    expect(message).toBe("AT-SPI key synthesis failed: helper process failed (ERR_CHILD_PROCESS_STDIO_MAXBUFFER)")
     expect(message).not.toContain("python3")
   })
 
   test("reports screen geometry in info metadata", async () => {
-    const host = new LinuxHostDriver({ runner: windowedRunner(), display: ":0" })
+    const host = new LinuxHostDriver({ runner: windowedRunner(), display: ":0", probeDisplay: false })
     const info = await host.info()
     expect(info.metadata?.screen).toEqual({ width: 1920, height: 1080, widthMm: 508, heightMm: 285, scale: 1 })
     expect(host.capabilities().some((capability) => capability.capability === "screen_info")).toBe(true)
@@ -298,8 +353,10 @@ describe("host driver", () => {
         return runner(file, args, timeoutMs, env)
       }) as Runner,
       display: ":0",
+      probeDisplay: false,
+      atspiHelper: fakeAtspiHelper(snapshotApplications(WINDOWED_SNAPSHOT)),
     })
-    const driver = createHostDriver(host)
+    const driver = createLegacyHostDriver(host)
 
     const clicked = await driver.execute({ type: "click", target: { kind: "element", elementId: "atspi:0.1" } })
     expect(clicked.success).toBe(true)
@@ -322,5 +379,100 @@ describe("host driver", () => {
 
   test("observation fixture stays stable", () => {
     expect(observation.elements[0]?.id).toBe("atspi:0.1")
+  })
+})
+
+function fakeLegacyHost(): LinuxHostDriver {
+  return {
+    capabilities: () => [{ capability: "accessibility", status: "available" }],
+    dispose: () => undefined,
+  } as unknown as LinuxHostDriver
+}
+
+describe("window focus before pointer input", () => {
+  // An unfocused window swallows clicks on X11/KDE, so activation must be
+  // confirmed. Otherwise the click silently lands in the focused window and
+  // the caller is told nothing.
+  function unfocusedHost(activates: boolean): LinuxHostDriver {
+    let focusReads = 0
+    return {
+      capabilities: () => [{ capability: "accessibility", status: "available" }],
+      invalidateObservation: () => undefined,
+      observe: async () => {
+        focusReads += 1
+        return {
+          id: "obs-1",
+          elements: [
+            {
+              // An x11 window id, so the driver can activate it.
+              id: "x11:0x1",
+              role: "window",
+              name: "Downloads",
+              // A refused activation never changes the window state, so the
+              // post-activation read must still show it unfocused.
+              states: activates && focusReads > 1 ? ["focused"] : [],
+              bounds: { x: 0, y: 0, width: 800, height: 600 },
+            },
+            {
+              id: "b1",
+              role: "button",
+              name: "Save",
+              parentId: "w1",
+              states: [],
+              actions: [],
+              bounds: { x: 10, y: 10, width: 40, height: 20 },
+            },
+          ],
+        }
+      },
+      find: async () => ({}),
+      activateWindowId: async (id: string) => ({ success: activates, status: activates ? "success" : "failed", message: id }),
+      clickAt: async () => ({ success: true, status: "success", message: "Clicked." }),
+      pointerWindow: async () => ({ window: "0x1" }),
+      executeAtspi: async () => ({ success: false, status: "failed", message: "no atspi" }),
+      dispose: () => undefined,
+    } as unknown as LinuxHostDriver
+  }
+
+  test("clicks without a warning once activation is confirmed", async () => {
+    const driver = createLegacyHostDriver(unfocusedHost(true))
+    const result = await driver.execute({ type: "click", target: { kind: "element", elementId: "b1" } })
+    expect(result.success).toBe(true)
+    expect(result.metadata?.focusWarning).toBeUndefined()
+    driver.dispose?.()
+  })
+
+  test("warns instead of pretending when the window never comes forward", async () => {
+    const driver = createLegacyHostDriver(unfocusedHost(false))
+    const result = await driver.execute({ type: "click", target: { kind: "element", elementId: "b1" } })
+    expect(result.success).toBe(true)
+    expect(String(result.metadata?.focusWarning ?? "")).toContain("did not come to the front")
+    driver.dispose?.()
+  })
+})
+
+describe("createHostDriver wiring", () => {
+  test("keeps createLegacyHostDriver exported without a Cua engine", () => {
+    const driver = createLegacyHostDriver(fakeLegacyHost())
+    expect(driver.engine).toBeUndefined()
+    expect((driver.capabilities ?? []).some((capability) => capability.capability.startsWith("cua_"))).toBe(false)
+    driver.dispose?.()
+  })
+
+  test.skipIf(process.platform !== "linux")("returns the Cua host driver with cua_ capabilities and an engine on linux", () => {
+    const driver = createHostDriver(fakeLegacyHost())
+    try {
+      expect(driver.engine).toBeDefined()
+      expect(driver.id).toBe("linux-host")
+      const names = (driver.capabilities ?? []).map((capability) => capability.capability)
+      expect(names).toContain("cua_snapshot")
+      expect(names).toContain("cua_refs")
+      expect(names).toContain("cua_background")
+      expect(names).toContain("cua_rich_actions")
+      expect(names).toContain("cua_wait")
+      expect(names).toContain("accessibility")
+    } finally {
+      driver.dispose?.()
+    }
   })
 })

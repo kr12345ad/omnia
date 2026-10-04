@@ -149,3 +149,67 @@ describe("verification strategies", () => {
     expect(verifyFile({ path: "/tmp/report" }, undefined).status).toBe("inconclusive")
   })
 })
+import { applyVerification, createActionSuccess } from "./result"
+import type { Verification } from "../protocol"
+
+describe("intent normalization and execution status", () => {
+  test("nested input keys are copied into the resolved action", () => {
+    const resolution = resolveAction(
+      {
+        type: "click",
+        target: { query: "Save" },
+        input: { button: "right", count: 2, modifiers: ["shift"], direction: "up", amount: 3, ms: 5, condition: "ready", include: ["text"] },
+      },
+      { observation },
+    )
+    expect(resolution.success).toBe(true)
+    const action = resolution.action as unknown as Record<string, unknown>
+    expect(action.button).toBe("right")
+    expect(action.count).toBe(2)
+    expect(action.modifiers).toEqual(["shift"])
+  })
+
+  test("nested drag endpoints are copied into the resolved action", () => {
+    const resolution = resolveAction(
+      {
+        type: "drag",
+        target: { query: "Save" },
+        input: {
+          from: { kind: "element", elementId: "save" },
+          to: { kind: "element", elementId: "window-1" },
+          durationMs: 250,
+        },
+      },
+      { observation },
+    )
+    expect(resolution.action?.type).toBe("drag")
+    const action = resolution.action as unknown as Record<string, unknown>
+    expect(action.from).toEqual({ kind: "element", elementId: "save" })
+    expect(action.to).toEqual({ kind: "element", elementId: "window-1" })
+    expect(action.durationMs).toBe(250)
+  })
+
+  test("resolutionStatus is failed after a failed execution", async () => {
+    const resolution = await executeAction(
+      { type: "click", target: { query: "Save" } },
+      {
+        observation,
+        execute: () => ({ success: false, status: "failed", message: "backend failed" }),
+      },
+    )
+    expect(resolution.success).toBe(false)
+    expect(resolution.resolutionStatus).toBe("failed")
+  })
+
+  test("resolutionStatus is unavailable when no executor exists", async () => {
+    const resolution = await executeAction({ type: "click", target: { query: "Save" } }, { observation })
+    expect(resolution.success).toBe(false)
+    expect(resolution.resolutionStatus).toBe("unavailable")
+  })
+
+  test("applyVerification treats ok:true as a pass signal", () => {
+    const verification: Verification = { ok: true, verified: false, passed: false, status: "unverified" }
+    const result = applyVerification(createActionSuccess("a1"), verification)
+    expect(result.success).toBe(true)
+  })
+})

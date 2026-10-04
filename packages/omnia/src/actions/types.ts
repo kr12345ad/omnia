@@ -135,7 +135,7 @@ export interface ActionResolutionOptions {
   readonly deferRevalidation?: boolean
 }
 
-export type ActionResolutionStatus = "resolved" | "ambiguous" | "not-found" | "invalid" | "stale" | "unavailable"
+export type ActionResolutionStatus = "resolved" | "ambiguous" | "not-found" | "invalid" | "stale" | "unavailable" | "failed"
 
 export interface ActionResolution {
   readonly success: boolean

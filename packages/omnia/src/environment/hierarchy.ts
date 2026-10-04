@@ -46,17 +46,21 @@ export function buildHierarchy(input: ObservationInput["elements"] | readonly No
   const normalized = input.map((element, index) =>
     isNormalizedElement(element) ? element : normalizeElement(element, index),
   )
-  const seen = new Set<string>()
-  const duplicate = normalized.find((element) => {
-    if (seen.has(element.id)) return true
-    seen.add(element.id)
-    return false
-  })
-  if (duplicate) throw new TypeError(`Duplicate element id: ${duplicate.id}`)
-  const frames = new Map<string, MutableFrame>(
-    normalized.map((element) => [element.id, { element, parentId: element.parentId, children: [] }]),
-  )
   const warnings: string[] = []
+  const seen = new Set<string>()
+  // Duplicate ids are deduplicated with a warning instead of failing the whole
+  // observation: one repeated node must not make the environment unreadable.
+  const unique = normalized.filter((element) => {
+    if (seen.has(element.id)) {
+      warnings.push(`Duplicate element id: ${element.id}; later duplicate ignored`)
+      return false
+    }
+    seen.add(element.id)
+    return true
+  })
+  const frames = new Map<string, MutableFrame>(
+    unique.map((element) => [element.id, { element, parentId: element.parentId, children: [] }]),
+  )
   const ordered = [...frames.values()].sort(compareFrames)
   ordered.forEach((frame) => {
     if (frame.parentId === null || !frames.has(frame.parentId)) {
@@ -83,10 +87,18 @@ export function buildHierarchy(input: ObservationInput["elements"] | readonly No
   }
 }
 
+// Two protocol observations captured in the same millisecond would otherwise
+// share `observation-<capturedAt>` and collide; the sequence keeps generated
+// ids unique within the process.
+let observationSequence = 0
+
 export function fromProtocolObservation(input: ProtocolObservationInput): SemanticObservation {
   const timestamp = input.observation.timestamp ?? input.observation.capturedAt
   const capturedAt = input.capturedAt ?? protocolTimestamp(timestamp)
-  const id = input.id ?? input.observation.id ?? (capturedAt === undefined ? undefined : `observation-${capturedAt}`)
+  const id =
+    input.id ??
+    input.observation.id ??
+    (capturedAt === undefined ? undefined : `observation-${capturedAt}-${++observationSequence}`)
   if (id === undefined) throw new TypeError("Protocol observation requires an id or timestamp")
   if (capturedAt === undefined) throw new TypeError("Protocol observation requires a capture time")
   return observe({

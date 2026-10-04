@@ -28,12 +28,39 @@ export {
   sliceTypeText,
   verifyOutcome,
 } from "./computers"
+export {
+  activeWindowIdFromObservation,
+  focusedWindowFromObservation,
+  focusedWindowName,
+  isScreenCenterClick,
+  isWrongTargetCenterClick,
+  matchesWindowTitle,
+  screenCenterFor,
+  targetCenterOf,
+  verifyFocusTrial,
+  verifyWindowFocused,
+  FOCUS_CENTER_TOLERANCE_PX,
+  FOCUS_OFF_CENTER_DISTANCE_PX,
+  REFERENCE_SCREEN_CENTER,
+  KWIN_VERIFY_SETTLE_MS,
+  parseKWinActiveWindow,
+  parseKWinMinimized,
+  parseX11ActiveWindow,
+  parseX11Minimized,
+  verifyFocusLoss,
+  verifyWindowClosed,
+  verifyWindowMinimized,
+  verifyWindowState,
+} from "./kwin-verify"
 export type {
   BrowserController,
   BrowserElementSummary,
   BrowserPageSummary,
   BrowserStatusSummary,
   BrowserTabSummary,
+  CommandRequest,
+  CommandResult,
+  Computer,
   ComputerManagerOptions,
   ComputerSummary,
   ExecuteContext,
@@ -50,6 +77,11 @@ export type {
   ServerComputerDriver,
   StateDelta,
   TypeSlice,
+  InputGrabEvent,
+  InputGrabReleasedBy,
+  InputFreezeOutcome,
+  InputReleaseOutcome,
+  InputStateOutcome,
 } from "./computers"
 export {
   OMNIA_API_PREFIX,
@@ -69,6 +101,16 @@ export type {
   SubsystemHealth,
 } from "./api"
 export { OMNIA_ACTION_CATALOG } from "./catalog"
+export { PairingManager, formatPairingCode, normalizePairingCode, parsePairingCode } from "../pairing"
+export type { PairingOffer } from "../pairing"
+export { RemoteComputerDriver, RemoteRegistry, parseRemotePublicKey } from "./remote"
+export type {
+  RemoteClaimInput,
+  RemoteClaimResult,
+  RemoteCommand,
+  RemoteRegistryOptions,
+  RemoteResultMessage,
+} from "./remote"
 export {
   parseActionScript,
   renderAnthropicTools,

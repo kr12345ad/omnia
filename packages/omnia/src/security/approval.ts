@@ -122,7 +122,18 @@ const approvalSnapshot = (grant: ApprovalGrant) =>
       : null,
   })
 
+const MAX_APPROVAL_SNAPSHOTS = 1000
+const MAX_APPROVAL_GRANTS = 1000
+
+// A grant with neither an explicit expiry nor a use limit must not live
+// forever; non-dangerous approvals fall back to this TTL.
+export const DEFAULT_APPROVAL_TTL_MS = 15 * 60 * 1000
+
 const rememberApproval = (grant: ApprovalGrant) => {
+  if (issuedApprovalSnapshots.size >= MAX_APPROVAL_SNAPSHOTS) {
+    const oldest = issuedApprovalSnapshots.keys().next().value
+    if (oldest !== undefined) issuedApprovalSnapshots.delete(oldest)
+  }
   issuedApprovalSnapshots.set(grant.id, approvalSnapshot(grant))
   return grant
 }
@@ -195,10 +206,17 @@ export function makeApprovalGrant(
     throw new ApprovalError("approval expiration must be positive")
   }
   const now = options.now ?? Date.now()
-  const expiresAt = options.expiresInMs === undefined ? undefined : now + options.expiresInMs
   const scopedInput = options.scope === undefined ? input : { ...input, scope: options.scope }
   const danger = classifyDanger(scopedInput)
   const maxUses = options.maxUses ?? (danger.requiresApproval ? 1 : undefined)
+  // Every grant is bounded: an explicit expiry wins, a use limit bounds
+  // single-action grants, and everything else gets the default TTL.
+  const expiresAt =
+    options.expiresInMs !== undefined
+      ? now + options.expiresInMs
+      : maxUses === undefined
+        ? now + DEFAULT_APPROVAL_TTL_MS
+        : undefined
   if (danger.requiresApproval && expiresAt === undefined && maxUses === undefined) {
     throw new ApprovalError("dangerous approvals require an expiration or use limit")
   }
@@ -286,7 +304,7 @@ export class ApprovalRegistry {
   constructor(initial: readonly ApprovalGrant[] = []) {
     initial.forEach((grant) => {
       if (isIssuedApprovalActive(grant, Date.now())) {
-        this.#grants.set(grant.id, grant)
+        this.add(grant)
       }
     })
   }
@@ -294,6 +312,12 @@ export class ApprovalRegistry {
   add(grant: ApprovalGrant): ApprovalGrant {
     if (!isIssuedApprovalActive(grant, Date.now())) {
       throw new ApprovalError("approval grant is invalid or expired")
+    }
+    // A registry lives for the whole server process, so it is bounded like the
+    // issued-grant snapshot cache instead of retaining every grant ever issued.
+    if (this.#grants.size >= MAX_APPROVAL_GRANTS) {
+      const oldest = this.#grants.keys().next().value
+      if (oldest !== undefined) this.#grants.delete(oldest)
     }
     this.#grants.set(grant.id, grant)
     return grant

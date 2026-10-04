@@ -173,12 +173,12 @@ export function isElementReference(value: unknown): value is ElementReference {
   return (
     (value.kind === undefined || value.kind === "element") &&
     optionalString(value, "observationId") &&
-    optionalNumber(value, "generation") &&
+    optionalLimit(value, "generation") &&
     optionalSource(value, "source") &&
     optionalBackend(value, "backend") &&
     optionalRole(value, "role") &&
     optionalJson(value, "locator") &&
-    optionalNumber(value, "expiresAt") &&
+    optionalTimestamp(value, "expiresAt") &&
     optionalMetadata(value, "metadata")
   )
 }
@@ -272,16 +272,16 @@ export function isComputerAction(value: unknown): value is ComputerAction {
         optionalNonNegativeNumber(value, "durationMs")
       )
     case "type":
-      return typeof value.text === "string" && optionalTarget(value, "target") && optionalString(value, "value")
+      return isNonEmptyString(value.text) && optionalTarget(value, "target") && optionalString(value, "value")
     case "setvalue":
       return hasTarget(value) && Object.hasOwn(value, "value") && isJsonValue(value.value)
     case "key":
-      return (typeof value.key === "string" || typeof value.keys === "string") && optionalModifiers(value, "modifiers")
+      return isNonEmptyString(value.key) && optionalString(value, "keys") && optionalModifiers(value, "modifiers")
     case "keypress":
-      return typeof value.key === "string" && optionalModifiers(value, "modifiers")
+      return isNonEmptyString(value.key) && optionalModifiers(value, "modifiers")
     case "press":
     case "press_keys":
-      return typeof value.keys === "string"
+      return isNonEmptyString(value.keys)
     case "scroll":
       return (
         optionalTarget(value, "target") &&
@@ -301,6 +301,8 @@ export function isComputerAction(value: unknown): value is ComputerAction {
     case "increment":
     case "decrement":
       return hasTarget(value) && optionalFiniteNumber(value, "amount")
+    case "scroll_into_view":
+      return hasTarget(value)
     case "wait":
       return (
         (value.ms === undefined || (isFiniteNumber(value.ms) && value.ms >= 0)) &&
@@ -318,7 +320,7 @@ export function isComputerAction(value: unknown): value is ComputerAction {
     case "copy":
       return optionalTarget(value, "target")
     case "paste":
-      return typeof value.text === "string"
+      return isNonEmptyString(value.text)
   }
   return false
 }
@@ -329,6 +331,7 @@ export function isFindRequest(value: unknown): value is FindRequest {
     typeof value.query === "string" &&
     optionalRole(value, "role") &&
     optionalString(value, "name") &&
+    optionalString(value, "window") &&
     optionalSource(value, "source") &&
     optionalBackend(value, "backend") &&
     optionalLimit(value, "limit") &&
@@ -424,7 +427,7 @@ export function isComputerInfo(value: unknown): value is ComputerInfo {
   return (
     isNonEmptyString(value.id) &&
     isNonEmptyString(value.name) &&
-    isNonEmptyString(value.platform) &&
+    typeof value.platform === "string" &&
     optionalString(value, "os") &&
     optionalString(value, "architecture") &&
     optionalString(value, "arch") &&
@@ -475,7 +478,6 @@ export function isObservation(value: unknown): value is Observation {
     "warnings",
     "provenance",
     "metadata",
-    "browser",
   ].some((key) => Object.hasOwn(value, key))
   if (!known) return false
   return (
@@ -494,8 +496,7 @@ export function isObservation(value: unknown): value is Observation {
     optionalCapabilityMap(value, "capabilities") &&
     optionalStringArray(value, "warnings") &&
     optionalProvenance(value, "provenance") &&
-    optionalMetadata(value, "metadata") &&
-    (value.browser === undefined || isJsonValue(value.browser))
+    optionalMetadata(value, "metadata")
   )
 }
 
@@ -741,8 +742,11 @@ function isJsonValueInternal(value: unknown, seen: Set<object>): value is JsonVa
   if (typeof value !== "object" || value === null) return false
   if (seen.has(value)) return false
   seen.add(value)
+  // Arrays are validated through their own entries rather than `Array.prototype.every` so that
+  // non-index own properties are covered too; `isStructuredCloneable` promises the value survives
+  // `structuredClone`, which rejects any non-JSON property hanging off an array.
   const valid = Array.isArray(value)
-    ? value.every((item: unknown) => isJsonValueInternal(item, seen))
+    ? Object.entries(value).every((entry) => isJsonValueInternal(entry[1], seen))
     : isRecord(value) && Object.values(value).every((item) => isJsonValueInternal(item, seen))
   seen.delete(value)
   return valid
@@ -773,7 +777,6 @@ function isUIElementInternal(value: unknown, seen: Set<object>): value is UIElem
     "reference",
     "provenance",
     "metadata",
-    "browser",
   ].some((key) => Object.hasOwn(value, key))
   if (!hasKnownField) return false
   seen.add(value)
@@ -798,8 +801,7 @@ function isUIElementInternal(value: unknown, seen: Set<object>): value is UIElem
     optionalBackend(value, "backend") &&
     optionalElementReference(value, "reference") &&
     optionalProvenance(value, "provenance") &&
-    optionalMetadata(value, "metadata") &&
-    (value.browser === undefined || isJsonValue(value.browser))
+    optionalMetadata(value, "metadata")
   seen.delete(value)
   return valid
 }
@@ -823,7 +825,8 @@ function isActionBase(value: Record<string, unknown>): boolean {
 }
 
 function isEventBase(value: unknown, types: readonly string[]): value is Record<string, unknown> & { type: string } {
-  if (!isRecord(value) || !isNonEmptyString(value.id) || !isFiniteNumber(value.timestamp)) return false
+  if (!isRecord(value) || !isNonEmptyString(value.id) || !isFiniteNumber(value.timestamp) || value.timestamp < 0)
+    return false
   if (typeof value.type !== "string" || !types.some((type) => type === value.type)) return false
   return (
     optionalString(value, "runId") &&

@@ -1,4 +1,5 @@
-import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { createHash } from "node:crypto"
 import { homedir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { createServer } from "node:net"
@@ -41,6 +42,7 @@ export interface LocalRuntimeInfo {
 export interface LocalModelManagerOptions {
   readonly catalog: readonly ComputerUseModel[]
   readonly modelsDir?: string
+  readonly modelDirs?: readonly string[]
   readonly runtimeRoot?: string
   readonly runtimeDirs?: readonly string[]
   readonly runtimeCatalog?: readonly ComputerUseRuntime[]
@@ -72,6 +74,7 @@ interface ResidentServer {
 export class LocalModelManager {
   private readonly catalog: readonly ComputerUseModel[]
   private readonly modelsDir: string
+  private readonly modelDirs: readonly string[]
   private readonly runtimeRoot: string
   private readonly runtimeDirs: readonly string[]
   private readonly runtimeCatalog: readonly ComputerUseRuntime[]
@@ -88,10 +91,14 @@ export class LocalModelManager {
   private resident?: ResidentServer
   private idleTimer?: ReturnType<typeof setTimeout>
   private idleUnloadMs: number
+  // Single-flight model loading: concurrent ensureLoaded/load calls must not
+  // spawn two llama-server processes for the same model.
+  private loadTask: { modelId: string; promise: Promise<ComputerUseModelStatus> } | undefined
 
   constructor(options: LocalModelManagerOptions) {
     this.catalog = options.catalog.filter((model) => model.local)
     this.modelsDir = options.modelsDir ?? process.env.OMNIA_MODELS_DIR ?? join(homedir(), ".omnia", "models")
+    this.modelDirs = options.modelDirs ?? [this.modelsDir]
     this.runtimeRoot = options.runtimeRoot ?? join(dirname(this.modelsDir), "runtimes")
     this.runtimeDirs = options.runtimeDirs ?? defaultRuntimeDirs()
     this.runtimeCatalog = options.runtimeCatalog ?? createRuntimeCatalog()
@@ -249,22 +256,36 @@ export class LocalModelManager {
     if (this.filesInstalled(model)) return (await this.verify(modelId))!
     const dir = this.modelDirectory(model)
     mkdirSync(dir, { recursive: true })
-    const files = [model.source.file, ...(model.source.mmprojFile === undefined ? [] : [model.source.mmprojFile])]
+    const files = [
+      { file: model.source.file, bytes: model.modelSizeBytes, sha256: model.source.sha256 },
+      ...(model.source.mmprojFile === undefined
+        ? []
+        : [{ file: model.source.mmprojFile, bytes: model.source.mmprojBytes, sha256: model.source.mmprojSha256 }]),
+    ]
     const totalBytes = (model.modelSizeBytes ?? 0) + (model.source.mmprojBytes ?? 0)
     let downloaded = 0
     this.setState(model.id, { state: "DOWNLOADING", progress: 0 })
     try {
-      for (const file of files) {
-        const target = join(dir, file)
-        if (existsSync(target) && statSync(target).size > 0) {
-          downloaded += statSync(target).size
-          continue
+      for (const entry of files) {
+        if (!isSha256Pin(entry.sha256)) {
+          throw new Error(`Refusing to download ${entry.file}: no SHA-256 checksum is pinned for this artifact.`)
         }
-        const url = `https://huggingface.co/${model.source.repo}/resolve/main/${encodeURIComponent(file)}`
+        const target = join(dir, entry.file)
+        // A file that is already present is trusted only after its pinned
+        // content hash matches; anything else is replaced by a verified
+        // download so an unverified copy can never be treated as installed.
+        if (existsSync(target) && statSync(target).size > 0) {
+          if ((await sha256File(target)) === entry.sha256.toLowerCase()) {
+            downloaded += statSync(target).size
+            continue
+          }
+          rmSync(target, { force: true })
+        }
+        const url = `https://huggingface.co/${model.source.repo}/resolve/main/${encodeURIComponent(entry.file)}`
         await this.downloadFile(url, target, (bytes) => {
           const progress = totalBytes === 0 ? 0 : Math.min(1, (downloaded + bytes) / totalBytes)
           this.setState(model.id, { state: "DOWNLOADING", progress })
-        })
+        }, entry.bytes, entry.sha256)
         downloaded += statSync(target).size
       }
     } catch (error) {
@@ -277,28 +298,59 @@ export class LocalModelManager {
     return (await this.verify(modelId))!
   }
 
-  private async downloadFile(url: string, target: string, onProgress: (bytes: number) => void): Promise<void> {
-    const part = `${target}.part`
-    const response = await this.fetchImpl(url, { redirect: "follow" })
-    if (!response.ok || response.body === null) {
-      throw new Error(`Download failed with HTTP ${response.status}.`)
+  private async downloadFile(
+    url: string,
+    target: string,
+    onProgress: (bytes: number) => void,
+    expectedBytes: number | undefined,
+    expectedSha256: string,
+  ): Promise<void> {
+    // Fail closed: an artifact without a pinned, well-formed sha256 must never
+    // be fetched, let alone installed.
+    if (!isSha256Pin(expectedSha256)) {
+      throw new Error(`Refusing to download ${url}: no SHA-256 checksum is pinned for this artifact.`)
     }
-    let written = 0
-    const source = Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream)
-    source.on("data", (chunk: Buffer) => {
-      written += chunk.length
-      onProgress(written)
-    })
-    await pipeline(source, createWriteStream(part))
-    renameSync(part, target)
+    const part = `${target}.part`
+    try {
+      const response = await this.fetchImpl(url, { redirect: "follow" })
+      if (!response.ok || response.body === null) {
+        throw new Error(`Download failed with HTTP ${response.status}.`)
+      }
+      let written = 0
+      const source = Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream)
+      source.on("data", (chunk: Buffer) => {
+        written += chunk.length
+        onProgress(written)
+      })
+      await pipeline(source, createWriteStream(part))
+      const size = statSync(part).size
+      if (expectedBytes !== undefined && size < expectedBytes * 0.9) {
+        throw new Error(`The downloaded file is incomplete (${formatBytes(size)} of about ${formatBytes(expectedBytes)}).`)
+      }
+      const digest = await sha256File(part)
+      if (digest !== expectedSha256.toLowerCase()) {
+        throw new Error(`The downloaded file failed its checksum verification against the pinned SHA-256 (${url}).`)
+      }
+      renameSync(part, target)
+    } catch (error) {
+      // Never leave a partial file behind: the next download would treat it
+      // as already-installed.
+      rmSync(part, { force: true })
+      throw error
+    }
   }
 
   async remove(modelId: string): Promise<boolean> {
     const model = this.requireModel(modelId)
     if (this.resident?.modelId === model.id) await this.unload()
-    const dir = this.modelDirectory(model)
-    if (!existsSync(dir)) return false
-    rmSync(dir, { recursive: true, force: true })
+    let removed = false
+    for (const root of this.modelDirs) {
+      const dir = join(root, "computer-use", model.provider)
+      if (!existsSync(dir)) continue
+      rmSync(dir, { recursive: true, force: true })
+      removed = true
+    }
+    if (!removed) return false
     this.setState(model.id, { state: "NOT_INSTALLED" })
     return true
   }
@@ -313,16 +365,20 @@ export class LocalModelManager {
   private runtimeStatus(runtime: ComputerUseRuntime): ComputerUseRuntimeStatus {
     const dir = join(this.runtimeRoot, runtime.id)
     const state = this.runtimeStates.get(runtime.id) ?? { state: "NOT_INSTALLED" as const }
-    const installed = existsSync(runtimeExecutable(dir))
+    const bundledDir = this.runtimeDirs.find((entry) => backendFromDir(entry) === runtime.backend)
+    const downloaded = existsSync(runtimeExecutable(dir))
+    const bundled = bundledDir !== undefined && existsSync(runtimeExecutable(bundledDir))
+    const installed = downloaded || bundled
+    const bytesOnDisk = installed ? runtimeBytesOnDisk(downloaded ? dir : bundledDir!) : undefined
     return {
       runtime,
       state: state.state === "NOT_INSTALLED" && installed ? "INSTALLED" : state.state,
       installed,
-      bundled: this.runtimeDirs.some((entry) => backendFromDir(entry) === runtime.backend),
+      bundled,
       bytes: runtimeBytes(runtime),
       ...(state.progress === undefined ? {} : { progress: state.progress }),
       ...(state.reason === undefined ? {} : { reason: state.reason }),
-      ...(installed ? { bytesOnDisk: runtimeBytesOnDisk(dir) } : {}),
+      ...(bytesOnDisk === undefined ? {} : { bytesOnDisk }),
     }
   }
 
@@ -349,7 +405,7 @@ export class LocalModelManager {
         await this.downloadFile(entry.url, target, (bytes) => {
           const progress = totalBytes === 0 ? 0 : Math.min(1, (downloaded + bytes) / totalBytes)
           this.setRuntimeState(runtime.id, { state: "DOWNLOADING", progress })
-        })
+        }, entry.bytes, entry.sha256)
         downloaded += statSync(target).size
         await extractArchive(target, dir)
         rmSync(target, { force: true })
@@ -398,7 +454,25 @@ export class LocalModelManager {
     })
   }
 
-  async load(modelId: string, options: { auto?: boolean } = {}): Promise<ComputerUseModelStatus> {
+  load(modelId: string, options: { auto?: boolean } = {}): Promise<ComputerUseModelStatus> {
+    const model = this.requireModel(modelId)
+    if (this.resident?.modelId === model.id && this.resident.process.exitCode === null) {
+      this.touch()
+      return Promise.resolve(this.statusOf(model))
+    }
+    if (this.loadTask !== undefined) {
+      if (this.loadTask.modelId === modelId) return this.loadTask.promise
+      // A different model is loading: wait for it to settle, then queue ours.
+      return this.loadTask.promise.catch(() => undefined).then(() => this.load(modelId, options))
+    }
+    const promise = this.performLoad(modelId, options).finally(() => {
+      if (this.loadTask?.promise === promise) this.loadTask = undefined
+    })
+    this.loadTask = { modelId, promise }
+    return promise
+  }
+
+  private async performLoad(modelId: string, options: { auto?: boolean }): Promise<ComputerUseModelStatus> {
     const model = this.requireModel(modelId)
     if (this.resident?.modelId === model.id && this.resident.process.exitCode === null) {
       this.touch()
@@ -440,7 +514,7 @@ export class LocalModelManager {
       "--log-disable",
     ]
     const child = spawn(runtime.command, args, {
-      cwd: this.modelDirectory(model),
+      cwd: dirname(files.model.path),
       env: this.libraryPathsEnv(runtime.libraryPaths),
       stdio: ["ignore", "ignore", "pipe"],
     })
@@ -460,9 +534,11 @@ export class LocalModelManager {
     this.setState(model.id, { state: "LOADING" })
     const ready = await this.waitForHealth(port)
     if (!ready.ok) {
-      const tail = resident.stderr.join("").split("\n").slice(-4).join(" ").trim()
       await this.unload()
-      this.setState(model.id, { state: "FAILED", reason: `${ready.reason} ${tail}`.trim() })
+      // Keep the raw stderr tail out of client-visible strings: it can contain
+      // filesystem paths and environment details. The reason is already
+      // generic; the tail stays in the (now discarded) resident buffer.
+      this.setState(model.id, { state: "FAILED", reason: ready.reason })
       throw new Error(`${model.displayName} failed to start: ${ready.reason}`)
     }
     this.setState(model.id, { state: "READY", lastUsedAt: this.now() })
@@ -560,6 +636,7 @@ export class LocalModelManager {
     if (model.chatTemplate === undefined || model.chatTemplate.length === 0) return undefined
     const file = join(this.modelDirectory(model), "chat-template.jinja")
     try {
+      mkdirSync(dirname(file), { recursive: true })
       writeFileSync(file, model.chatTemplate)
       return file
     } catch {
@@ -600,24 +677,42 @@ export class LocalModelManager {
     mmproj?: { ok: boolean; path: string; reason: string }
     bytesOnDisk?: number
   } {
-    const dir = this.modelDirectory(model)
     if (model.source === undefined) {
-      return { model: { ok: false, path: dir, reason: `${model.displayName} has no downloadable files.` } }
+      return {
+        model: { ok: false, path: this.modelDirectory(model), reason: `${model.displayName} has no downloadable files.` },
+      }
     }
-    const modelPath = join(dir, model.source.file)
-    const modelCheck = checkFile(modelPath, model.modelSizeBytes)
-    const mmprojPath = model.source.mmprojFile === undefined ? undefined : join(dir, model.source.mmprojFile)
-    const mmprojCheck =
-      mmprojPath === undefined
-        ? undefined
-        : checkFile(mmprojPath, model.source.mmprojBytes)
-    const bytesOnDisk =
-      (modelCheck.ok ? statSync(modelPath).size : 0) + (mmprojCheck?.ok === true ? statSync(mmprojPath!).size : 0)
-    return {
-      model: { ...modelCheck, path: modelPath },
-      ...(mmprojPath === undefined || mmprojCheck === undefined ? {} : { mmproj: { ...mmprojCheck, path: mmprojPath } }),
-      ...(bytesOnDisk === 0 ? {} : { bytesOnDisk }),
+    let fallback:
+      | {
+          model: { ok: boolean; path: string; reason: string }
+          mmproj?: { ok: boolean; path: string; reason: string }
+        }
+      | undefined
+    for (const root of this.modelDirs) {
+      const dir = join(root, "computer-use", model.provider)
+      const modelPath = join(dir, model.source.file)
+      const modelCheck = checkFile(modelPath, model.modelSizeBytes)
+      const mmprojPath = model.source.mmprojFile === undefined ? undefined : join(dir, model.source.mmprojFile)
+      const mmprojCheck =
+        mmprojPath === undefined
+          ? undefined
+          : checkFile(mmprojPath, model.source.mmprojBytes)
+      const candidate = {
+        model: { ...modelCheck, path: modelPath },
+        ...(mmprojPath === undefined || mmprojCheck === undefined ? {} : { mmproj: { ...mmprojCheck, path: mmprojPath } }),
+      }
+      if (modelCheck.ok && (mmprojCheck === undefined || mmprojCheck.ok)) {
+        const bytesOnDisk =
+          statSync(modelPath).size + (mmprojCheck?.ok === true ? statSync(mmprojPath!).size : 0)
+        return { ...candidate, ...(bytesOnDisk === 0 ? {} : { bytesOnDisk }) }
+      }
+      fallback = fallback ?? candidate
     }
+    return (
+      fallback ?? {
+        model: { ok: false, path: this.modelDirectory(model), reason: `${model.displayName} has no downloadable files.` },
+      }
+    )
   }
 
   private filesInstalled(model: ComputerUseModel): boolean {
@@ -674,7 +769,23 @@ function backendFromDir(dir: string): string {
 function defaultRuntimeDirs(): string[] {
   const root = process.env.OMNIA_LLAMA_DIR
   if (root === undefined || root.length === 0) return []
-  return readdirSync(root)
-    .filter((entry) => entry.startsWith("linux") || entry.startsWith("darwin") || entry.startsWith("win"))
-    .map((entry) => join(root, entry))
+  try {
+    return readdirSync(root)
+      .filter((entry) => entry.startsWith("linux") || entry.startsWith("darwin") || entry.startsWith("win"))
+      .map((entry) => join(root, entry))
+  } catch {
+    // A stale/unreadable env dir must not crash the constructor.
+    return []
+  }
+}
+
+async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256")
+  const stream = createReadStream(path)
+  for await (const chunk of stream) hash.update(chunk as Buffer)
+  return hash.digest("hex")
+}
+
+function isSha256Pin(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/i.test(value)
 }
