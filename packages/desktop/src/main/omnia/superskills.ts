@@ -1,9 +1,15 @@
 import { ipcMain } from "electron"
+import { CONTROL_PLANE_SIGNED_OUT_MESSAGE, controlPlaneAuth, controlPlaneCall } from "./control-plane"
 
 async function serverCall(path: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<Record<string, unknown>> {
+  // Superskills are served by the control plane the app is paired with, which is
+  // the same one every other settings call uses. Reading OMNIA_SERVER_URL alone
+  // only worked under the hosted stack, so the desktop app answered every
+  // superskills-* request with "The Omnia Server is not running."
+  if (controlPlaneAuth() !== undefined) return controlPlaneCall(path, method, body)
   const url = process.env.OMNIA_SERVER_URL
   const token = process.env.OMNIA_SERVER_TOKEN
-  if (url === undefined || token === undefined) throw new Error("The Omnia Server is not running.")
+  if (url === undefined || token === undefined) throw new Error(CONTROL_PLANE_SIGNED_OUT_MESSAGE)
   const response = await fetch(`${url}${path}`, {
     method,
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
