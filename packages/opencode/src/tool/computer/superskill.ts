@@ -3,6 +3,7 @@ import { HttpClient } from "effect/unstable/http"
 import * as Tool from "../tool"
 import DESCRIPTION from "./superskill.txt"
 import { configFromEnv, request } from "./client"
+import { CAPS, clip, renderFailure, type FailureError } from "./output"
 
 export const Parameters = Schema.Struct({
   action: Schema.Literals(["list", "describe", "call", "save", "delete"]).annotate({
@@ -26,6 +27,34 @@ type Summary = {
   methods: string[]
 }
 
+type SuperskillEnvelope = {
+  ok?: boolean
+  error?: FailureError | string
+  result?: { success?: boolean; message?: string; error?: FailureError }
+}
+
+// The server reports a permission denial or a rejected save as ok:false with a
+// structured result. Without this check the tool dereferences fields that a
+// denial never returns. `bridgePayload` marks the call route, whose `result` is
+// the bridge's own return value rather than a status envelope, so only ok:false
+// is a failure there.
+function superskillFailure(response: unknown, path: string, bridgePayload = false): string | undefined {
+  if (typeof response !== "object" || response === null) return undefined
+  const envelope = response as SuperskillEnvelope
+  const failed =
+    envelope.ok === false ||
+    (envelope.result?.success === false && envelope.result.error !== undefined && !bridgePayload)
+  if (!failed) return undefined
+  const fallback =
+    typeof envelope.error === "string" && envelope.error.length > 0
+      ? envelope.error
+      : (envelope.result?.message ?? `The superskill request ${path} failed.`)
+  const error =
+    envelope.result?.error ??
+    (typeof envelope.error === "object" && envelope.error !== null ? envelope.error : undefined)
+  return renderFailure(error, fallback)
+}
+
 export const SuperskillTool = Tool.define<typeof Parameters, Record<string, unknown>, HttpClient.HttpClient>(
   "superskill",
   Effect.gen(function* () {
@@ -36,8 +65,20 @@ export const SuperskillTool = Tool.define<typeof Parameters, Record<string, unkn
       execute: (params, ctx) =>
         Effect.gen(function* () {
           const config = yield* configFromEnv()
-          const call = <Response>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown) =>
-            request<Response>(http, config, method, path, body)
+          const call = <Response>(
+            method: "GET" | "POST" | "DELETE",
+            path: string,
+            body?: unknown,
+            bridgePayload = false,
+          ) =>
+            request<Response>(http, config, method, path, body).pipe(
+              Effect.tap((response) =>
+                Effect.sync(() => {
+                  const failure = superskillFailure(response, path, bridgePayload)
+                  if (failure !== undefined) throw new Error(failure)
+                }),
+              ),
+            )
 
           if (params.action === "save") {
             if (params.definition === undefined || typeof params.definition !== "object") {
@@ -46,7 +87,7 @@ export const SuperskillTool = Tool.define<typeof Parameters, Record<string, unkn
             yield* ctx.ask({
               permission: "computer",
               patterns: [`superskill:save`],
-              always: ["*"],
+              always: ["superskill:save"],
               metadata: { operation: "superskill", action: "save" },
             })
             const saved = yield* call<{ superskill: { id: string; name: string } }>(
@@ -64,18 +105,21 @@ export const SuperskillTool = Tool.define<typeof Parameters, Record<string, unkn
           }
 
           if (params.action === "delete") {
-            if (params.skill === undefined || params.skill.length === 0) throw new Error("The delete action requires skill.")
+            if (params.skill === undefined || params.skill.length === 0)
+              throw new Error("The delete action requires skill.")
             yield* ctx.ask({
               permission: "computer",
               patterns: [`superskill:delete:${params.skill}`],
-              always: ["*"],
+              always: ["superskill:delete:*"],
               metadata: { operation: "superskill", action: "delete", skill: params.skill },
             })
             const removed = yield* call<{ removed: boolean }>(
               "DELETE",
               `/v1/superskills/${encodeURIComponent(params.skill)}`,
             )
-            const title = removed.removed ? `Deleted superskill ${params.skill}` : `Superskill ${params.skill} not found`
+            const title = removed.removed
+              ? `Deleted superskill ${params.skill}`
+              : `Superskill ${params.skill} not found`
             yield* ctx.metadata({ title, metadata: {} })
             return { title, output: title, metadata: { success: removed.removed } }
           }
@@ -108,14 +152,19 @@ export const SuperskillTool = Tool.define<typeof Parameters, Record<string, unkn
                 description: string
                 instructions: string
                 enabled: boolean
-                methods: Array<{ name: string; description: string; parameters?: Record<string, unknown>; scopes?: string[] }>
+                methods: Array<{
+                  name: string
+                  description: string
+                  parameters?: Record<string, unknown>
+                  scopes?: string[]
+                }>
               }
             }>("GET", `/v1/superskills/${encodeURIComponent(params.skill)}`)
             const skill = result.superskill
             yield* ctx.ask({
               permission: "computer",
               patterns: [`superskill:describe:${skill.id}`],
-              always: ["*"],
+              always: ["superskill:describe:*"],
               metadata: { operation: "superskill", action: "describe", skill: skill.id },
             })
             const title = `Superskill ${skill.name}`
@@ -125,12 +174,12 @@ export const SuperskillTool = Tool.define<typeof Parameters, Record<string, unkn
               skill.description,
               "",
               "Instructions:",
-              skill.instructions,
+              clip(skill.instructions, CAPS.superskillInstructions),
               "",
               "Methods:",
               ...skill.methods.map(
                 (method) =>
-                  `- ${method.name}: ${method.description}${method.scopes === undefined || method.scopes.length === 0 ? "" : ` (scopes: ${method.scopes.join(", ")})`}${method.parameters === undefined ? "" : `\n  parameters: ${JSON.stringify(method.parameters)}`}`,
+                  `- ${method.name}: ${method.description}${method.scopes === undefined || method.scopes.length === 0 ? "" : ` (scopes: ${method.scopes.join(", ")})`}${method.parameters === undefined ? "" : `\n  parameters: ${clip(JSON.stringify(method.parameters), 2000)}`}`,
               ),
             ]
             return { title, output: lines.join("\n"), metadata: { success: true, skill: skill.id } }
@@ -142,9 +191,29 @@ export const SuperskillTool = Tool.define<typeof Parameters, Record<string, unkn
           yield* ctx.ask({
             permission: "computer",
             patterns: [`superskill:call:${params.skill}:${params.method}`],
-            always: ["*"],
+            always: ["superskill:call:*"],
             metadata: { operation: "superskill", action: "call", skill: params.skill, method: params.method },
           })
+          const definition = yield* call<{
+            superskill: {
+              scopes?: string[]
+              bridge?: { type?: string }
+              methods?: Array<{ name: string; scopes?: string[] }>
+            }
+          }>("GET", `/v1/superskills/${encodeURIComponent(params.skill)}`)
+          const method = (definition.superskill.methods ?? []).find((entry) => entry.name === params.method)
+          const methodScopes = method?.scopes ?? []
+          const skillScopes = definition.superskill.scopes ?? []
+          const requiredScopes =
+            methodScopes.length > 0
+              ? methodScopes
+              : skillScopes.length > 0
+                ? skillScopes
+                : definition.superskill.bridge?.type === "stdio"
+                  ? ["PROCESS_EXECUTE"]
+                  : ["NETWORK"]
+          // The call route answers with the bridge's own payload in `result`, so
+          // only the envelope decides whether the call was allowed to run.
           const result = yield* call<{ result: unknown }>(
             "POST",
             `/v1/superskills/${encodeURIComponent(params.skill)}/call`,
@@ -153,15 +222,17 @@ export const SuperskillTool = Tool.define<typeof Parameters, Record<string, unkn
               params: params.params ?? {},
               approve: true,
               approvedBy: `session:${ctx.sessionID}`,
+              approvedScopes: requiredScopes,
               sessionId: ctx.sessionID,
             },
+            true,
           )
           const title = `Superskill ${params.skill}.${params.method}`
           yield* ctx.metadata({ title, metadata: {} })
-          const rendered = JSON.stringify(result.result, null, 1)
+          const rendered = JSON.stringify(result.result)
           return {
             title,
-            output: rendered.length > 12000 ? `${rendered.slice(0, 12000)}\n… [truncated]` : rendered,
+            output: clip(rendered, CAPS.superskillResult),
             metadata: { success: true, skill: params.skill, method: params.method },
           }
         }),

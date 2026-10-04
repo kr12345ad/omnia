@@ -7,6 +7,41 @@ checked), the actions it supports, and a confidence score. When several
 controls share a name, the ranked list and the ancestor context tell you which
 one is real; use computer_inspect if you need more detail.
 
-Pick the best candidate by id and act on it, or click its exact pixel when no
-semantic action exists. If nothing matches, observe again: the interface may
-have changed.
+One line looks like this:
+
+  1. button "Export" id=atspi:7.2 at 1310,44 value="" [enabled] actions=click confidence=0.93 observation=obs-12
+
+Read it as: the what (role + name), the handle (id), the where (pixel,
+fallback only), the state (enabled/disabled/checked/focused), what you may
+do with it (actions), and how sure the runtime is (confidence).
+
+Parameters:
+
+- query (required): what to look for in plain words, for example "Export
+  button", "Find field", or "Sheet1 tab". Name the control the way its label
+  reads, not where you think it sits.
+- role: control kind filter: button, textbox, menuitem, link, checkbox,
+  window, dialog. Use it when the name alone matches several kinds of
+  control (a "Print" menu item versus a "Print" button).
+- window: window title or application fragment that restricts the search to
+  one window. Always use this when the same control name appears in several
+  windows.
+- limit: maximum candidates (1-50, default 5). Raise it when disambiguating
+  among many similar controls; the output also carries the observation id
+  to bind the ids to.
+
+Rules:
+
+- Pick the best candidate by id and act on it, or click its exact pixel when
+  no semantic action exists. If nothing matches, observe again: the interface
+  may have changed. Never invent an id and never reuse an id from an older
+  observation without its observationId: stale ids are refused with
+  target_stale, which means re-find, not retry.
+- Act on a candidate with the observation id the find returned
+  (observationId), so the runtime can prove the target is still the same
+  control. A confidence far below the rest, or candidates spread across
+  unrelated windows, means the query is ambiguous: narrow it with role or
+  window instead of clicking the top hit and hoping.
+- If no semantic candidate matches with confidence, do not guess a pixel:
+  switch to computer_visual with a plain-language description, or
+  computer_inspect a near-miss to learn the real structure.

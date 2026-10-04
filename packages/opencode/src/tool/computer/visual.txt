@@ -9,16 +9,39 @@ relevant screen, resolves the target through Omnia's computer-use model layer,
 executes the resulting action through the normal permission-checked action
 resolver, and verifies the outcome by observation.
 
+Parameters:
+
+- operation: what to do. "inspect" (with target) and question (ask anything
+  about the screen, for example "what error is shown?" or "which row is
+  selected?") only look. A type/execute-style operation acts.
+- target: the plain-language description of the control or region.
+- text: text a type operation needs.
+- question: the question for inspect/question mode. The answer comes back as
+  text, and when the answer is a location the model also returns coordinates
+  that can be executed with computer_act.
+- task: the user-level task this action serves, for example "export the
+  document to PDF". It scopes the grounding so the model resolves the right
+  control for the job, not just a lookalike.
+- execute: set false to receive a proposal without acting. Defaults to true:
+  the action is performed and verified.
+
 Set execute to false to receive a proposal without acting. Prefer semantic
 tools first: exact text, accessibility, and DOM information always take
 priority over visual inference, and this tool will say so when semantics
-already resolve the target.
-
+already resolve the target. A visual proposal is a hypothesis, not a fact:
+verify it the same way as any act — re-observe, confirm the state delta,
+and never chain a second visual action off an unverified first one.
 
 Inspect mode:
+
 - Use operation "inspect" with a target, or pass question to ask the visual
   model anything about the screen ("what error is shown?", "which row is
   selected?"). The answer comes back as text, and when the answer is a
   location the model also returns coordinates that can be executed with
   computer_act. Use this when the semantic tree is missing or ambiguous and
   you need the model to look at the screen for you.
+- Questions about state ("is the file saved?", "which checkbox is ticked?")
+  are cheaper and safer than grounding a click: ask first, act once.
+- Coordinates that come back from a question are single-use and bound to
+  the screenshot they were read from. If the screen changed since, ask
+  again instead of reusing them.

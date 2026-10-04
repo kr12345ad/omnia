@@ -2,9 +2,11 @@ Execute a short plan of computer actions in one call.
 
 Use this as the normal way to operate the computer. Write the whole task as
 one plan of high-level intents; the runtime resolves each target, executes
-it, observes the result, and verifies the effect before moving on. On the
-first failure it stops and tells you exactly which step failed and what the
-interface looked like, so you can recover with a new plan.
+it, and reports verification: verified, unverified, or failed. Verification
+is fail-closed: only verified counts as passed, and unverified steps fail
+the plan unless the step sets allowUnverified:true. On the first failure it
+stops and tells you exactly which step failed and what the interface looked
+like, so you can recover with a new plan.
 
 Send complete plans, not fragments. A plan of 10 to 60 steps is normal: for
 example open an app, type a document, save it, open the browser, look
@@ -13,32 +15,88 @@ three steps and wait for another turn; put every step you already know into
 one call. Only split a plan when you genuinely need to inspect something
 first, or when the previous plan failed and you are correcting course.
 
+Building a good plan:
+
+- Start from a fresh snapshot or observe, not from memory. Every target in
+  the plan must exist in the observation you just took, or be produced by
+  an earlier step in the same plan (a dialog a previous step opens).
+- Order matters: launch before click, focus before type, open before read,
+  select before copy, navigate before find. Each step may assume only what
+  previous steps verified, never what they merely attempted.
+- Prefer semantic targets (query, target ref) over pixels in every step.
+  Pixels inside a plan go stale faster because the plan runs without you.
+- Put a verification step after every state change that matters: read the
+  field you typed, read the cell you filled, observe the dialog you
+  expected. A plan without verification steps is a plan that can silently
+  do the wrong thing six times in a row.
+- Keep branch-free plans: no "if the dialog appears". If a dialog might
+  appear, plan the main path, then handle the dialog in the recovery plan
+  after you see it.
+
 Desktop steps and browser steps can be mixed in the same plan. Browser steps
-use the controlled browser: browser_open, browser_navigate, browser_read,
-browser_find, browser_click, browser_type, browser_key, browser_tabs,
-browser_activate_tab, browser_close_tab, browser_back, browser_forward,
-browser_reload. Page element ids come from browser_find and must be used in
-the same page; re-find after any navigation.
+use the controlled embedded browser: browser_status, browser_open,
+browser_navigate, browser_read, browser_find, browser_images,
+browser_save_image, browser_copy_image, browser_click, browser_type,
+browser_key, browser_tabs, browser_activate_tab, browser_close_tab,
+browser_back, browser_forward, browser_reload, browser_dialog. browser_dialog
+answers a pending JavaScript dialog (dialog=accept or dismiss); other browser
+steps are refused while one is open. browser_save_image and
+browser_copy_image address an image by target, query, or url; save_image
+accepts path/name and writes outside ~/Downloads/omnia only with FILES_WRITE
+approval. browser_navigate reads back the final URL but does not guarantee
+the page finished loading; use browser_read to confirm content. Page element
+ids are scoped to the current page state and must be used on the same page
+and tab; re-find after any navigation, reload, or element_not_found. Browser
+x/y are viewport pixels, not screen pixels.
 
 Each step supports:
 
-- action: click, double_click, right_click, type, key, hotkey, focus,
-  scroll, move, launch_app, activate_app, close_app, open_file, open_url,
-  observe, wait, read_value, run_command, credentials.
+- action: click, double_click, right_click, middle_click, hover,
+  mouse_down, mouse_up, type, key, hotkey, focus, focus_window, scroll,
+  move, drag, copy, paste, paste_table, launch_app, activate_app,
+  close_app, open_file, open_url, observe, wait, release_keys, read_text,
+  read_value, get_focus, get_cursor, read_clipboard, write_clipboard,
+  dismiss, menu, set_value, select, toggle, expand, collapse, increment,
+  decrement, scroll_into_view, run_command, credentials, calibration_start,
+  calibration_measure, calibration_save, calibration_status, window_tile,
+  window_move, window_maximize, window_minimize, window_restore,
+  window_close.
 - command + optional cwd, timeoutMs, credential: a shell command for
   run_command. Use run_command for tasks better done with a command, such as
   file listing, git, or package managers. credential: "auto" uses a stored
   credential whose rules match the command; see computer_act for details.
+- field: for a type step that carries credential, "username" or "secret"
+  (default). Without it a credential types its secret, so a sign-in that asks
+  for the identifier first needs field: "username" or the secret lands in the
+  username field.
 - query + optional role: the control to act on by meaning, for example
   "Export button". The runtime resolves it and rejects ambiguous matches
   instead of guessing.
 - target + optional observationId: an exact element ID from computer_find
-  or computer_observe when you already know it.
+  or computer_observe when you already know it. Refs are scoped to the
+  observation they came from: pass observationId, re-observe after changes,
+  and re-find on target_stale instead of reusing old refs.
 - text, key, keys, app, url, path, direction, amount: action arguments.
+  x/y are screen pixels for desktop pointer actions and viewport pixels for
+  browser_* steps.
+- position: window position for window_tile, for example left or top-right.
+- point: calibration point id from calibration_start for calibration_measure.
+- rows: 2D cell values for paste_table.
+- from and to: drag endpoints, each an element ID or x/y coordinates.
+- allowUnverified: set true only when verification is not required; default
+  false. Unverified steps fail closed. Reach for it for cosmetic steps
+  (hover to reveal a tooltip you then read) — never for typing, saving,
+  deleting, sending, or anything the user cannot undo.
 - For type steps, start and stop markers bound the typed text (typing refuses
   to run if a marker is absent), and endKey presses a key afterwards.
 - expect: text, window, or file. After the step, the runtime verifies the
-  expectation and fails the step if it is not met.
+  expectation and fails the step if it is not met. text is met when it
+  appears either in the interface state or in the step's own output, such as
+  the pointer position reported by get_cursor or the count reported by
+  read_clipboard. window and file are checked against the live interface and
+  filesystem only. Use expect on the steps whose outcome the rest of the
+  plan depends on: the window you will act in, the file you just saved, the
+  text you just typed.
 
 Example plan:
 
@@ -46,10 +104,24 @@ Example plan:
     - action: launch_app, app: dolphin, expect: { window: dolphin }
     - action: activate_app, app: dolphin
     - action: click, query: "Home"
-    - action: type, text: "report.pdf"
+    - action: type, query: "File name", text: "report.pdf"
     - action: key, key: Return
     - action: close_app, app: dolphin
 
 Do not include low-level recovery inside the plan. If a step fails, read the
 failure, call computer_observe or computer_find if you need more detail, then
 send a corrected plan. Prefer this tool over many separate computer_act calls.
+
+Recovery playbook for a failed plan:
+
+1. Read which step failed and why; the failure names the step index, the
+   action, and the interface state. Do not resend the same plan.
+2. target_stale or element_not_found: re-observe or re-find, then rebuild
+   the plan from the fresh refs. The old ids are dead.
+3. Dialog or unexpected window: observe it, read its text, answer it by name
+   (Save/Discard/OK), then continue the original task in a new plan.
+4. Permission or approval failure: request the named scope and stop. Never
+   route around an approval with a different tool.
+5. Partial progress: resume from the first unverified step, not from the
+   top. Steps before it already changed the world; repeating them can double
+   type, double save, or double send.

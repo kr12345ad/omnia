@@ -11,18 +11,30 @@ provides:
 Workflow:
 
 1. action=list to see the available superskills and their method names.
+   Do this before assuming no bridge exists: a bridge call is one step
+   where UI work is ten, and it never misclicks.
 2. action=describe with a skill id to read its instructions and the full
-   method list with parameter descriptions.
+   method list with parameter descriptions. Read the instructions fully
+   before acting; they encode the application's real menus, dialogs, and
+   verification steps, including the ones generic tools cannot see.
 3. Follow the instructions for UI work, and use action=call when a bridge
-   method is the right tool. Pass method and a params object.
+   method is the right tool. Pass method and a params object. Prefer the
+   bridge for structured reads and writes (lists, tables, documents,
+   settings) and the UI for everything the bridge does not cover.
 4. action=save creates or updates a superskill from a definition. Use it when
    the user asks for a new superskill, for example "make one for LibreOffice".
    Ground the instructions in the real interface first: launch the app,
    observe it, and describe menus, dialogs, and verification steps precisely.
    Bridge methods are optional; a superskill with UI instructions alone is
-   useful.
-5. action=delete removes one by id.
+   useful. Give the skill a short lowercase id, a plain name, exact method
+   names with parameter shapes, and the scopes each method needs; test every
+   method once with action=call before handing the skill over.
+5. action=delete removes one by id. Confirm with the user first when the
+   skill was not created in this session.
 
 Bridge calls are permission-checked by the Omnia Server using the scopes the
 superskill declares; the user approves them through the normal permission
-flow. A superskill never grants more access than it declares.
+flow. A superskill never grants more access than it declares. If a bridge
+call fails, read the error before retrying: a missing method name means
+describe again, a scope error means request approval, and a connection
+error means the bridge process is down, not that the parameters were wrong.

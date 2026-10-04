@@ -3,6 +3,8 @@ import { HttpClient } from "effect/unstable/http"
 import * as Tool from "../tool"
 import DESCRIPTION from "./visual.txt"
 import { configFromEnv, computerId, request } from "./client"
+import { scopesForVisual } from "./policy"
+import { CAPS, clip } from "./output"
 
 export const OPERATIONS = ["ground", "click", "type", "scroll", "drag", "resize", "inspect", "general"] as const
 
@@ -14,6 +16,9 @@ export const Parameters = Schema.Struct({
   target: Schema.String.annotate({
     description:
       "The control or region in plain language, for example 'the blue Export button' or 'the layer thumbnail in the left panel'.",
+  }),
+  text: Schema.optional(Schema.String).annotate({
+    description: "Text for a type operation, or other content the visual action needs.",
   }),
   question: Schema.optional(Schema.String).annotate({
     description:
@@ -113,8 +118,8 @@ export const ComputerVisualTool = Tool.define<typeof Parameters, Record<string, 
           const config = yield* configFromEnv()
           yield* ctx.ask({
             permission: "computer",
-            patterns: ["visual", params.operation],
-            always: ["*"],
+            patterns: [`visual:${params.operation}`],
+            always: [`visual:${params.operation}`],
             metadata: { operation: params.operation, target: params.target },
           })
           const id = yield* computerId(http, config)
@@ -124,11 +129,12 @@ export const ComputerVisualTool = Tool.define<typeof Parameters, Record<string, 
             targetDescription: params.target,
             ...(params.task === undefined ? {} : { taskContext: params.task }),
             ...(params.question === undefined ? {} : { question: params.question }),
+            ...(params.text === undefined ? {} : { text: params.text }),
             execute: params.execute !== false,
             sessionId: ctx.sessionID,
             approve: true,
             approvedBy: `session:${ctx.sessionID}`,
-            approvedScopes: ["UI_CONTROL"],
+            approvedScopes: scopesForVisual(params.operation),
           })
           const result = response.result ?? response.analysis?.result
           const decision = response.decision ?? response.analysis?.decision
@@ -145,8 +151,11 @@ export const ComputerVisualTool = Tool.define<typeof Parameters, Record<string, 
             lines.push("Remote visual processing is disabled by policy, so the screenshot was not sent.")
             lines.push("Enable remote screen data in computer-use settings or install a local visual model.")
           } else if (result?.success !== true) {
-            lines.push(result?.reasoning ?? response.error ?? "No visual provider produced an action.")
-            if (decision?.reason !== undefined && decision.reason.length > 0) lines.push(`routing: ${decision.reason.join("; ")}`)
+            lines.push(
+              clip(result?.reasoning ?? response.error ?? "No visual provider produced an action.", CAPS.visualText),
+            )
+            if (decision?.reason !== undefined && decision.reason.length > 0)
+              lines.push(`routing: ${decision.reason.join("; ")}`)
           } else {
             const path =
               decision?.provider === "semantic"
@@ -156,22 +165,40 @@ export const ComputerVisualTool = Tool.define<typeof Parameters, Record<string, 
                   : "a hosted visual provider"
             lines.push(`Grounding path: ${path}. Confidence ${(result.confidence * 100).toFixed(0)}%.`)
             if (result.action === undefined) {
-              lines.push(`Answer: ${result.reasoning ?? "the model returned no answer."}`)
+              lines.push(`Answer: ${clip(result.reasoning ?? "the model returned no answer.", CAPS.visualText)}`)
             } else {
               lines.push(`Proposed action: ${describeAction(result.action)}.`)
             }
             const execution = result.action === undefined ? undefined : response.execution
             if (execution !== undefined) {
               const outcome = execution.outcome.result
-              lines.push(outcome.success ? `Executed: ${outcome.message ?? "done"}.` : `Execution failed: ${outcome.error?.message ?? outcome.message ?? "unknown error"}.`)
-              lines.push(execution.verified ? "Verified by observation: the interface changed as expected." : "Not verified: confirm the result with computer_observe before continuing.")
+              lines.push(
+                outcome.success
+                  ? `Executed: ${clip(outcome.message ?? "done", CAPS.visualText)}.`
+                  : `Execution failed: ${clip(outcome.error?.message ?? outcome.message ?? "unknown error", CAPS.visualText)}.`,
+              )
+              const status = outcome.verification?.status ?? (execution.verified ? "verified" : "unverified")
+              lines.push(
+                status === "verified"
+                  ? "Verified by observation: the interface changed as expected."
+                  : `Not verified (${status}): confirm the result with computer_observe before continuing.`,
+              )
             } else if (params.execute === false) {
               lines.push("Proposal only. Call computer_act with these coordinates, or retry with execute enabled.")
             }
           }
           if (fallbacks !== undefined && fallbacks > 0) lines.push(`Fallback providers tried: ${fallbacks}.`)
-          if (decision?.requiresApproval === true) lines.push("Computer-use mode is set to ask; the user may need to confirm.")
-          yield* ctx.metadata({ title, metadata: { operation: params.operation, provider: decision?.provider, verified: response.execution?.verified } })
+          if (decision?.blockedByPolicy === true) lines.push("Remote visual processing is blocked by policy.")
+          if (decision?.requiresApproval === true)
+            lines.push("Computer-use mode is set to ask; the user may need to confirm.")
+          yield* ctx.metadata({
+            title,
+            metadata: {
+              operation: params.operation,
+              provider: decision?.provider,
+              verified: response.execution?.verified,
+            },
+          })
           return {
             title,
             output: lines.join("\n"),

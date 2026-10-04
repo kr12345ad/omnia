@@ -1,5 +1,7 @@
-import { Effect } from "effect"
+import { Cause, Effect, Option, Schema } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
+import { createHmac } from "node:crypto"
+import { clip } from "./output"
 
 export interface OmniaServerConfig {
   url: string
@@ -8,22 +10,70 @@ export interface OmniaServerConfig {
 }
 
 export function configFromEnv(): Effect.Effect<OmniaServerConfig> {
-  const url = process.env.OMNIA_SERVER_URL
-  const token = process.env.OMNIA_SERVER_TOKEN
-  if (!url || !token) {
-    throw new Error(
-      "Computer control is unavailable: the Omnia Server is not running. " +
-        "Open Omnia Desktop on this computer so the server starts, then retry.",
-    )
-  }
-  return Effect.succeed({
-    url,
-    token,
-    ...(process.env.OMNIA_COMPUTER_ID === undefined ? {} : { computerId: process.env.OMNIA_COMPUTER_ID }),
-  })
+  return Effect.try({
+    try: () => {
+      const url = process.env.OMNIA_SERVER_URL?.trim()
+      const token = process.env.OMNIA_SERVER_TOKEN?.trim()
+      if (!url || !token) {
+        throw new Error(
+          "Computer control is unavailable: the Omnia Server is not running. " +
+            "Open Omnia Desktop on this computer so the server starts, then retry.",
+        )
+      }
+      const parsed = new URL(url)
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        throw new Error("OMNIA_SERVER_URL must be an http:// or https:// URL.")
+      }
+      const computerId = process.env.OMNIA_COMPUTER_ID?.trim()
+      return {
+        url: url.replace(/\/+$/, ""),
+        token,
+        ...(computerId === undefined || computerId.length === 0 ? {} : { computerId }),
+      }
+    },
+    catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+  }).pipe(Effect.orDie)
 }
 
-const LONG_PATHS = ["/do", "/text"]
+const LONG_PATHS = ["/do"]
+
+export interface RequestOptions {
+  readonly validate?: (value: unknown) => boolean
+}
+
+const SESSION_PROOF_CACHE_LIMIT = 256
+const sessionProofCache = new Map<string, string>()
+
+function sessionProof(token: string, sessionId: string): string {
+  const cacheKey = `${token}\n${sessionId}`
+  const cached = sessionProofCache.get(cacheKey)
+  if (cached !== undefined) return cached
+  const proof = createHmac("sha256", token).update(sessionId).digest("hex")
+  if (sessionProofCache.size >= SESSION_PROOF_CACHE_LIMIT) sessionProofCache.clear()
+  sessionProofCache.set(cacheKey, proof)
+  return proof
+}
+
+function bodySessionId(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined
+  const value = (body as { sessionId?: unknown }).sessionId
+  return typeof value === "string" && value.length > 0 ? value : undefined
+}
+
+export const ActionEnvelope = Schema.Struct({
+  ok: Schema.Boolean,
+  result: Schema.Struct({ success: Schema.Boolean }),
+})
+
+export const BatchEnvelope = Schema.Struct({
+  ok: Schema.Boolean,
+  result: Schema.Struct({ success: Schema.Boolean, steps: Schema.Array(Schema.Unknown) }),
+})
+
+export const ObservationEnvelope = Schema.Struct({
+  ok: Schema.Boolean,
+  observation: Schema.Struct({ id: Schema.String }),
+})
 
 export function request<Response>(
   http: HttpClient.HttpClient,
@@ -31,25 +81,64 @@ export function request<Response>(
   method: "GET" | "POST" | "DELETE",
   path: string,
   body?: unknown,
+  options?: RequestOptions,
 ): Effect.Effect<Response> {
-  const timeoutMs = LONG_PATHS.some((suffix) => path.endsWith(suffix)) ? 600000 : 120000
+  const longRunning =
+    LONG_PATHS.some((suffix) => path.endsWith(suffix)) ||
+    (typeof body === "object" && body !== null && (body as { action?: unknown }).action === "run_command")
+  const timeoutMs = longRunning ? 600000 : 120000
   return Effect.gen(function* () {
     const base = HttpClientRequest.make(method)(`${config.url}${path}`).pipe(
       HttpClientRequest.bearerToken(config.token),
       HttpClientRequest.acceptJson,
     )
-    const request = body === undefined ? base : HttpClientRequest.bodyJsonUnsafe(base, body)
+    const sessionId = bodySessionId(body)
+    // The desktop UI and the agent runtime share one bearer token, so the
+    // session id travels with a proof that only a client holding the token can
+    // produce. The token itself never appears in the header.
+    const authenticated =
+      sessionId === undefined
+        ? base
+        : HttpClientRequest.setHeader(base, "x-omnia-session-proof", sessionProof(config.token, sessionId))
+    const request = body === undefined ? authenticated : HttpClientRequest.bodyJsonUnsafe(authenticated, body)
     const response = yield* http.execute(request).pipe(
       Effect.timeoutOrElse({
         duration: timeoutMs,
         orElse: () => Effect.die(new Error(`Omnia Server request timed out after ${Math.round(timeoutMs / 1000)}s.`)),
       }),
-      Effect.catch(() => Effect.die(new Error("Omnia Server request failed."))),
+      Effect.catchCause((cause) => {
+        const error = Cause.squash(cause)
+        return Effect.die(
+          new Error(`Omnia Server request failed: ${error instanceof Error ? error.message : String(error)}`, {
+            cause: error,
+          }),
+        )
+      }),
     )
-    const json = (yield* response.json.pipe(
-      Effect.catch(() => Effect.die(new Error("Omnia Server returned invalid JSON."))),
-    )) as { ok?: unknown; error?: unknown; result?: unknown } & Record<string, unknown>
-    if (json.ok !== true) {
+    const bodyText = yield* response.text.pipe(
+      Effect.catchCause((cause) =>
+        Effect.die(
+          new Error(`Omnia Server response could not be read (HTTP ${response.status}).`, {
+            cause: Cause.squash(cause),
+          }),
+        ),
+      ),
+    )
+    const decoded = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)(bodyText)
+    if (Option.isNone(decoded) || typeof decoded.value !== "object" || decoded.value === null) {
+      throw new Error(`Omnia Server returned invalid JSON (HTTP ${response.status}, ${bodyText.length} characters).`)
+    }
+    const json = decoded.value as { ok?: unknown; error?: unknown; result?: unknown; analysis?: unknown } & Record<
+      string,
+      unknown
+    >
+    if (options?.validate !== undefined && json.ok === true && !options.validate(json)) {
+      throw new Error(`Omnia Server returned an unexpected response for ${path} (HTTP ${response.status}).`)
+    }
+    // The server reports operation outcomes through ok:false with a structured
+    // result/analysis. Only a body without any structured payload is a
+    // transport failure; otherwise let the caller inspect result.success.
+    if (json.ok !== true && json.result === undefined && json.analysis === undefined) {
       throw new Error(describeFailure(json, response.status))
     }
     return json as Response
@@ -57,38 +146,79 @@ export function request<Response>(
 }
 
 function describeFailure(json: { error?: unknown; result?: unknown }, status: number): string {
-  if (typeof json.error === "string" && json.error.length > 0) return json.error
-  const result = json.result
-  if (typeof result === "object" && result !== null) {
-    const error = (result as { error?: unknown }).error
-    if (typeof error === "object" && error !== null) {
-      const message = (error as { message?: unknown }).message
-      const code = (error as { code?: unknown }).code
-      if (typeof message === "string" && message.length > 0) {
-        return typeof code === "string" && code.length > 0 ? `${message} [${code}]` : message
-      }
-    }
-    const message = (result as { message?: unknown }).message
-    if (typeof message === "string" && message.length > 0) return message
-  }
+  const described = describeError(json.error) ?? describeResultFailure(json.result)
+  const hint = authHint(status)
+  if (described !== undefined) return hint === undefined ? described : `${described} — ${hint}`
+  if (hint !== undefined) return `Omnia Server rejected the request (HTTP ${status}): ${hint}.`
   return `Omnia Server reported failure (HTTP ${status}).`
 }
 
-export function computerId(
-  http: HttpClient.HttpClient,
-  config: OmniaServerConfig,
-): Effect.Effect<string> {
+function describeResultFailure(result: unknown): string | undefined {
+  if (typeof result !== "object" || result === null) return undefined
+  const fromResult = describeError((result as { error?: unknown }).error)
+  if (fromResult !== undefined) return fromResult
+  const message = (result as { message?: unknown }).message
+  return typeof message === "string" && message.length > 0 ? message : undefined
+}
+
+function authHint(status: number): string | undefined {
+  if (status === 401) {
+    return "the Omnia Server token is missing, expired, or invalid; restart Omnia Desktop on the server computer to refresh it"
+  }
+  if (status === 403) {
+    return "the request was denied; approve the action or check the required permissions in Omnia Settings > Computer"
+  }
+  return undefined
+}
+
+function describeError(error: unknown): string | undefined {
+  if (typeof error === "string" && error.length > 0) return error
+  if (typeof error !== "object" || error === null) return undefined
+  const record = error as { message?: unknown; code?: unknown; details?: unknown }
+  const message = typeof record.message === "string" && record.message.length > 0 ? record.message : undefined
+  const code = typeof record.code === "string" && record.code.length > 0 ? `[${record.code}]` : undefined
+  const details = record.details === undefined ? undefined : `details=${clip(JSON.stringify(record.details), 400)}`
+  if (message === undefined && code === undefined && details === undefined) return undefined
+  return [message ?? "request failed", code, details].filter((part): part is string => part !== undefined).join(" ")
+}
+
+const COMPUTER_CACHE_TTL_MS = 30_000
+const computerCache = new Map<string, { id: string; expiresAt: number }>()
+
+const ComputersResponse = Schema.Struct({
+  ok: Schema.Boolean,
+  computers: Schema.Array(
+    Schema.Struct({
+      id: Schema.optional(Schema.String),
+      connected: Schema.optional(Schema.Boolean),
+    }),
+  ),
+})
+
+export function computerId(http: HttpClient.HttpClient, config: OmniaServerConfig): Effect.Effect<string> {
   if (config.computerId !== undefined && config.computerId.length > 0) return Effect.succeed(config.computerId)
+  const cacheKey = `${config.url}\n${config.token}`
+  const cached = computerCache.get(cacheKey)
+  if (cached !== undefined && cached.expiresAt > Date.now()) return Effect.succeed(cached.id)
   return Effect.gen(function* () {
     const response = yield* request<{ ok: true; computers: Array<{ id?: string; connected?: boolean }> }>(
       http,
       config,
       "GET",
       "/v1/computers",
+      undefined,
+      { validate: Schema.is(ComputersResponse) },
     )
-    const connected = response.computers.find((computer) => computer.connected !== false && typeof computer.id === "string")
-    const id = connected?.id ?? response.computers.find((computer) => typeof computer.id === "string")?.id
-    if (id === undefined) throw new Error("No computer is connected to the Omnia Server.")
+    const connected = response.computers.find(
+      (computer) => computer.connected === true && typeof computer.id === "string",
+    )
+    const id = connected?.id
+    if (id === undefined) {
+      throw new Error(
+        "No computer is connected to the Omnia Server; open Omnia Desktop on the computer you want to control.",
+      )
+    }
+    computerCache.set(cacheKey, { id, expiresAt: Date.now() + COMPUTER_CACHE_TTL_MS })
     return id
   })
 }

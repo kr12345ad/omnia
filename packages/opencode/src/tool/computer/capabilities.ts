@@ -1,8 +1,9 @@
-import { Effect, Schema } from "effect"
+import { Cause, Effect, Exit, Schema } from "effect"
 import { HttpClient } from "effect/unstable/http"
 import * as Tool from "../tool"
 import DESCRIPTION from "./capabilities.txt"
 import { configFromEnv, computerId, request } from "./client"
+import { CAPS, clipLines } from "./output"
 
 export const Parameters = Schema.Struct({})
 
@@ -30,6 +31,12 @@ type HealthResponse = {
   }
 }
 
+function failureText(exit: Exit.Exit<unknown, never>): string {
+  if (Exit.isSuccess(exit)) return "unknown failure"
+  const error = Cause.squash(exit.cause)
+  return error instanceof Error ? error.message : String(error)
+}
+
 export const ComputerCapabilitiesTool = Tool.define<typeof Parameters, Record<string, unknown>, HttpClient.HttpClient>(
   "computer_capabilities",
   Effect.gen(function* () {
@@ -42,32 +49,50 @@ export const ComputerCapabilitiesTool = Tool.define<typeof Parameters, Record<st
           const config = yield* configFromEnv()
           const id = yield* computerId(http, config)
           const [computer, health] = yield* Effect.all([
-            request<ComputerResponse>(http, config, "GET", `/v1/computers/${id}`),
-            request<HealthResponse>(http, config, "GET", "/v1/health"),
+            request<ComputerResponse>(http, config, "GET", `/v1/computers/${id}`).pipe(Effect.exit),
+            request<HealthResponse>(http, config, "GET", "/v1/health").pipe(Effect.exit),
           ])
-          const info = computer.computer
+          if (Exit.isFailure(computer) && Exit.isFailure(health)) {
+            throw new Error(
+              `The Omnia Server did not answer the capability or health request: ${failureText(computer)}; ${failureText(health)}`,
+            )
+          }
+          const info = Exit.isSuccess(computer) ? computer.value.computer : undefined
           const lines = [
-            `Omnia Server ${health.health.version} (status ${health.health.status}, protocol v${health.health.protocol}, uptime ${Math.round(health.health.uptimeMs / 1000)}s)`,
-            `${info.name} (${info.platform}, backend ${info.backend}, connected: ${info.connected})`,
-            ...info.capabilities.map(
-              (capability) =>
-                `- ${capability.capability}: ${capability.status}${capability.reason ? ` — ${capability.reason}` : ""}`,
-            ),
-            ...health.health.subsystems.map(
-              (subsystem) => `- server.${subsystem.name}: ${subsystem.status}${subsystem.reason ? ` — ${subsystem.reason}` : ""}`,
-            ),
+            Exit.isSuccess(health)
+              ? `Omnia Server ${health.value.health.version} (status ${health.value.health.status}, protocol v${health.value.health.protocol}, uptime ${Math.round(health.value.health.uptimeMs / 1000)}s)`
+              : `server status unavailable: ${failureText(health)}`,
+            ...(info === undefined
+              ? [`computer details unavailable: ${failureText(computer)}`]
+              : [
+                  `${info.name} (${info.platform}, backend ${info.backend}, connected: ${info.connected})`,
+                  ...info.capabilities.map(
+                    (capability) =>
+                      `- ${capability.capability}: ${capability.status}${capability.reason ? ` — ${capability.reason}` : ""}`,
+                  ),
+                ]),
+            ...(Exit.isSuccess(health)
+              ? health.value.health.subsystems.map(
+                  (subsystem) =>
+                    `- server.${subsystem.name}: ${subsystem.status}${subsystem.reason ? ` — ${subsystem.reason}` : ""}`,
+                )
+              : []),
           ]
-          const title = `Computer capabilities: ${info.platform}`
+          const degraded = info === undefined || Exit.isFailure(health)
+          if (degraded) lines.push("Retry once the missing half of the Omnia Server answers; this report is incomplete.")
+          const title =
+            info === undefined ? "Computer capabilities (incomplete)" : `Computer capabilities: ${info.platform}`
           yield* ctx.metadata({ title, metadata: {} })
           return {
             title,
-            output: lines.join("\n"),
+            output: clipLines(lines, CAPS.capabilities).join("\n"),
             metadata: {
-              platform: info.platform,
-              backend: info.backend,
-              connected: info.connected,
-              serverStatus: health.health.status,
-              capabilities: info.capabilities.map((capability) => `${capability.capability}=${capability.status}`),
+              ...(info === undefined ? {} : { platform: info.platform, backend: info.backend, connected: info.connected }),
+              ...(Exit.isSuccess(health) ? { serverStatus: health.value.health.status } : {}),
+              ...(info === undefined
+                ? {}
+                : { capabilities: info.capabilities.map((capability) => `${capability.capability}=${capability.status}`) }),
+              degraded,
             },
           }
         }),

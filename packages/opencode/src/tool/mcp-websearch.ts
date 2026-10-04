@@ -1,4 +1,4 @@
-import { Duration, Effect, Schema } from "effect"
+import { Duration, Effect, Option, Schema } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 
 export const EXA_URL = process.env.EXA_API_KEY
@@ -11,7 +11,10 @@ const McpResult = Schema.Struct({
     content: Schema.Array(
       Schema.Struct({
         type: Schema.String,
-        text: Schema.String,
+        // MCP content items are not required to carry text (image/audio/blob
+        // results do not), so decoding must not reject the whole payload
+        // because one item lacks it.
+        text: Schema.optional(Schema.String),
       }),
     ),
   }),
@@ -23,8 +26,11 @@ const parsePayload = (payload: string) =>
   Effect.gen(function* () {
     const trimmed = payload.trim()
     if (!trimmed.startsWith("{")) return undefined
-    const data = yield* decode(trimmed)
-    return data.result.content.find((item) => item.text)?.text
+    // An SSE stream carries whatever the server felt like sending; a frame we
+    // cannot decode must not abort the scan for the frames that follow it.
+    const data = yield* decode(trimmed).pipe(Effect.option)
+    if (Option.isNone(data)) return undefined
+    return data.value.result.content.find((item) => item.text)?.text
   })
 
 export const parseResponse = Effect.fn("McpWebSearch.parseResponse")(function* (body: string) {

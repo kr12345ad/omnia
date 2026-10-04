@@ -1,5 +1,23 @@
 List the applications currently open on the computer.
 
 Returns each open application with its active window title and whether it
-is the focused application. Use this to discover what the user is working
-with before observing or acting. This never changes anything.
+is the focused application, grouped by application:
+
+  - soffice: 2 windows
+    - Budget 2026 (focused)
+    - Untitled 1
+  - firefox: 1 window
+    - Inbox
+
+Use this to discover what the user is working with before observing or
+acting. This never changes anything. It is the cheapest possible first
+call: one round trip tells you which applications exist, which window is
+frontmost, and whether the app you need is even running.
+
+Follow it with computer_observe or computer_snapshot narrowed to the
+application you care about (app="soffice"), or with launch_app when the
+needed application is not listed at all. If the list is empty, no windows
+are reported by the accessibility layer: check computer_capabilities, since
+a degraded or unavailable tree explains an empty desktop better than any
+retry. Application names here are the same fragments that app, window, and
+launch_app accept, so copy them verbatim instead of rephrasing.

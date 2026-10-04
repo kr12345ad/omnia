@@ -28,3 +28,13 @@ application, the user, and the task. After a task, remember the reusable parts:
 the procedure that worked, the control names, the user's preferences, and any
 blocker you found. Keep entries short and factual; prefer several specific
 memories over one long note.
+
+Key conventions that keep recall working: prefix application knowledge with
+"application:<name>:" (for example "application:calc:export-steps",
+"application:writer:pdf-dialog"), task procedures with "task:<kind>:", and
+user constraints with "user:". One fact per entry, one entry per key;
+update the existing key when a better procedure is found instead of adding
+a rival note. Expire anything tied to a version, a layout, or a one-off
+("expiresInDays": 90); keep user constraints and stable procedures
+unexpiring. When recall returns contradictions, trust the newer, more
+specific entry and forget the stale one.

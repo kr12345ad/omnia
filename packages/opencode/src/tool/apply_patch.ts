@@ -75,6 +75,16 @@ export const ApplyPatchTool = Tool.define(
 
         switch (hunk.type) {
           case "add": {
+            // An add must never land on an existing file: the diff would be
+            // rendered against "" while writeWithDirs truncates, destroying the
+            // file behind an approval prompt that showed a pure addition.
+            const existing = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
+            if (existing !== undefined)
+              return yield* Effect.fail(
+                new Error(
+                  `apply_patch verification failed: cannot add ${path.relative(instance.worktree, filePath).replaceAll("\\", "/")} because that path already exists. Use an update hunk to change it, or delete it first.`,
+                ),
+              )
             const oldContent = ""
             const newContent =
               hunk.contents.length === 0 || hunk.contents.endsWith("\n") ? hunk.contents : `${hunk.contents}\n`
@@ -141,6 +151,16 @@ export const ApplyPatchTool = Tool.define(
 
             const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
             yield* assertExternalDirectoryEffect(ctx, movePath)
+            // A move writes the destination and then removes the source, so a
+            // destination that resolves to the source itself would delete the file
+            // it just wrote.
+            if (movePath !== undefined && FSUtil.resolve(movePath) === FSUtil.resolve(filePath)) {
+              return yield* Effect.fail(
+                new Error(
+                  `apply_patch verification failed: ${path.relative(instance.worktree, filePath).replaceAll("\\", "/")} cannot be moved onto itself. Drop the "*** Move to:" line to update it in place.`,
+                ),
+              )
+            }
 
             fileChanges.push({
               filePath,
@@ -221,9 +241,10 @@ export const ApplyPatchTool = Tool.define(
         const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
         switch (change.type) {
           case "add":
-            // Create parent directories (recursive: true is safe on existing/root dirs)
-
-            yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
+            // `wx` refuses to open an existing path, so a file created between
+            // the verification above and this write is never truncated.
+            yield* afs.ensureDir(path.dirname(change.filePath))
+            yield* afs.writeFileString(change.filePath, Bom.join(change.newContent, change.bom), { flag: "wx" })
             updates.push({ file: change.filePath, event: "add" })
             break
 

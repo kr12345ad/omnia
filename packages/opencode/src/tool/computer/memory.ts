@@ -3,6 +3,7 @@ import { HttpClient } from "effect/unstable/http"
 import * as Tool from "../tool"
 import DESCRIPTION from "./memory.txt"
 import { configFromEnv, request } from "./client"
+import { CAPS, clip, renderFailure, type FailureError } from "./output"
 
 export const Parameters = Schema.Struct({
   action: Schema.Literals(["recall", "remember", "forget", "list", "stats"]).annotate({
@@ -10,18 +11,26 @@ export const Parameters = Schema.Struct({
   }),
   query: Schema.optional(Schema.String).annotate({ description: "Search text for recall and forget." }),
   text: Schema.optional(Schema.String).annotate({ description: "Memory text for remember." }),
-  scope: Schema.optional(
-    Schema.Literals(["session", "task", "workspace", "user", "skill", "application"]),
-  ).annotate({ description: "Memory scope." }),
+  scope: Schema.optional(Schema.Literals(["session", "task", "workspace", "user", "skill", "application"])).annotate({
+    description: "Memory scope.",
+  }),
   key: Schema.optional(Schema.String).annotate({
     description: "Stable key for remember, for example application:calc:export-steps. Updates the existing memory.",
   }),
   application: Schema.optional(Schema.String).annotate({ description: "Application this memory is about." }),
-  tags: Schema.optional(Schema.Array(Schema.String)).annotate({ description: "Tags for recall filtering and remember." }),
-  confidence: Schema.optional(Schema.Number).annotate({ description: "Confidence 0 to 1. Defaults to 0.8." }),
-  expiresInDays: Schema.optional(Schema.Number).annotate({ description: "Expire the memory after this many days." }),
+  tags: Schema.optional(Schema.Array(Schema.String)).annotate({
+    description: "Tags for recall filtering and remember.",
+  }),
+  confidence: Schema.optional(Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 1 }))).annotate({
+    description: "Confidence 0 to 1. Defaults to 0.8.",
+  }),
+  expiresInDays: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 }))).annotate({
+    description: "Expire the memory after this many days.",
+  }),
   id: Schema.optional(Schema.String).annotate({ description: "Memory id for a targeted forget." }),
-  limit: Schema.optional(Schema.Number).annotate({ description: "Maximum results. Defaults to 10 for recall, 50 for list." }),
+  limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 200 }))).annotate({
+    description: "Maximum results. Defaults to 10 for recall, 50 for list.",
+  }),
 })
 
 type MemoryRecord = {
@@ -38,6 +47,25 @@ type MemoryRecord = {
   expiresAt?: number
 }
 
+type MemoryEnvelope = {
+  ok?: boolean
+  error?: FailureError | string
+  result?: { success?: boolean; message?: string; error?: FailureError }
+}
+
+function memoryFailure(response: unknown, path: string): string | undefined {
+  if (typeof response !== "object" || response === null) return undefined
+  const envelope = response as MemoryEnvelope
+  if (envelope.ok !== false && envelope.result?.success !== false) return undefined
+  const fallback =
+    typeof envelope.error === "string" && envelope.error.length > 0
+      ? envelope.error
+      : (envelope.result?.message ?? `The memory request ${path} failed.`)
+  const error =
+    envelope.result?.error ?? (typeof envelope.error === "object" && envelope.error !== null ? envelope.error : undefined)
+  return renderFailure(error, fallback)
+}
+
 function age(at: number): string {
   const seconds = Math.max(0, Math.round((Date.now() - at) / 1000))
   if (seconds < 60) return `${seconds}s`
@@ -49,7 +77,7 @@ function age(at: number): string {
 }
 
 function describe(record: MemoryRecord): string {
-  const parts = [`[${record.scope}]`, record.text]
+  const parts = [`[${record.scope}]`, clip(record.text, CAPS.memoryText)]
   if (record.key !== undefined) parts.push(`(key=${record.key})`)
   if (record.application !== undefined) parts.push(`app=${record.application}`)
   parts.push(`confidence=${record.confidence.toFixed(2)}`)
@@ -68,13 +96,19 @@ export const MemoryTool = Tool.define<typeof Parameters, Record<string, unknown>
         Effect.gen(function* () {
           const config = yield* configFromEnv()
           const call = <Response>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown) =>
-            request<Response>(http, config, method, path, body)
+            request<Response>(http, config, method, path, body).pipe(
+              Effect.tap((response) =>
+                Effect.sync(() => {
+                  const failure = memoryFailure(response, path)
+                  if (failure !== undefined) throw new Error(failure)
+                }),
+              ),
+            )
 
           if (params.action === "stats") {
-            const result = yield* call<{ stats: { total: number; byScope: Record<string, number>; expiringSoon: number } }>(
-              "GET",
-              "/v1/memories/stats",
-            )
+            const result = yield* call<{
+              stats: { total: number; byScope: Record<string, number>; expiringSoon: number }
+            }>("GET", "/v1/memories/stats")
             const title = `${result.stats.total} memories`
             yield* ctx.metadata({ title, metadata: {} })
             const lines = Object.entries(result.stats.byScope).map(([scope, count]) => `- ${scope}: ${count}`)
@@ -94,7 +128,7 @@ export const MemoryTool = Tool.define<typeof Parameters, Record<string, unknown>
             yield* ctx.ask({
               permission: "computer",
               patterns: [`memory:remember:${params.key ?? params.scope}`],
-              always: ["*"],
+              always: ["memory:remember:*"],
               metadata: { operation: "memory", action: "remember", scope: params.scope, key: params.key },
             })
             const result = yield* call<{ memory: MemoryRecord }>("POST", "/v1/memories", {
@@ -123,16 +157,30 @@ export const MemoryTool = Tool.define<typeof Parameters, Record<string, unknown>
             yield* ctx.ask({
               permission: "computer",
               patterns: [`memory:forget:${params.id ?? params.query ?? params.scope ?? "all"}`],
-              always: ["*"],
+              always: ["memory:forget:*"],
               metadata: { operation: "memory", action: "forget", query: params.query, id: params.id },
             })
             if (params.id !== undefined) {
-              const result = yield* call<{ removed: boolean }>("DELETE", `/v1/memories/${encodeURIComponent(params.id)}`)
+              const result = yield* call<{ removed: boolean }>(
+                "DELETE",
+                `/v1/memories/${encodeURIComponent(params.id)}`,
+                {
+                  sessionId: ctx.sessionID,
+                  approve: true,
+                  approvedBy: `session:${ctx.sessionID}`,
+                  approvedScopes: ["FILES_WRITE"],
+                },
+              )
               const title = result.removed ? `Forgot ${params.id}` : `Memory ${params.id} not found`
               yield* ctx.metadata({ title, metadata: {} })
               return { title, output: title, metadata: { success: result.removed } }
             }
-            if (params.query === undefined && params.key === undefined && params.scope === undefined && params.application === undefined) {
+            if (
+              params.query === undefined &&
+              params.key === undefined &&
+              params.scope === undefined &&
+              params.application === undefined
+            ) {
               throw new Error("The forget action requires id, query, key, scope, or application.")
             }
             const result = yield* call<{ removed: number }>("POST", "/v1/memories/forget", {

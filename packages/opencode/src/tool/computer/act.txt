@@ -1,36 +1,118 @@
 Perform one user-interface action on the computer.
 
+This changes the interface one action at a time: it clicks, types, and
+moves. computer_do does the same by plan, and computer_visual and
+computer_browser can act as well, so only the read tools
+(computer_context, computer_apps, computer_capabilities,
+computer_snapshot, computer_observe, computer_find, computer_inspect,
+computer_read) merely look. Treat every call as a real hand on the user's
+machine: aim with a ref, bind it to its observation, and verify the effect
+before moving on.
+
+Targeting, in strict order of preference:
+
+1. target: a stable element ID from the most recent computer_find or
+   computer_observe, for example atspi:3.5, plus observationId from the
+   same observation so the runtime can refuse a stale target instead of
+   clicking the wrong thing. This is the default. Use it for click,
+   double_click, right_click, middle_click, hover, type, focus, move,
+   scroll-on-element, and every ref-only action below.
+2. query (+ optional role and window): a control by meaning, for example
+   "Export button". The runtime resolves it server-side and rejects
+   ambiguous matches instead of guessing. Prefer this when you do not
+   have a fresh ref yet; it re-resolves against the live tree.
+3. x/y screen pixels: pointer actions only, and only when no element
+   target exists (canvas, image surface). Use only pixel centers reported
+   by observe, find, or inspect. Never invent, round, nudge, or average
+   coordinates. A guessed pixel is a misclick.
+
 Actions:
 
-- click, double_click, right_click, type, focus, move: require a target
-  element ID from the most recent computer_find or computer_observe.
+- click, double_click, right_click, middle_click, hover, move: accept a
+  target element ID from the most recent computer_find or computer_observe,
+  a query, or explicit x/y screen pixels. Target refs are scoped to the
+  observation they came from: pass observationId, re-observe after any
+  change, and re-find on target_stale. Refs are preferred over coordinates:
+  no vision model is needed to act on accessible controls.
+- type and focus: type requires text plus a target element ID, query, or
+  window to type into; focus requires a target or query. type first
+  focuses the field through the accessibility layer when it can, then
+  types; if the value does not read back, the field never had focus.
+- select, toggle, expand, collapse, increment, decrement, scroll_into_view:
+  act on an accessible control by its ref, for example toggling a checkbox,
+  expanding a tree node, or scrolling an item into view. They require a
+  target ref and never need a vision model.
+- set_value: set a control's value to text, by ref. Prefer this over typing
+  for combo boxes, spin buttons, and sliders: it is one atomic operation
+  instead of a focus plus keystrokes.
 - type: type text. Optional start and stop markers bound exactly what gets
   typed: start skips everything before the marker, stop ends immediately
   after it. If a marker is absent from text, nothing is typed and the
-  action reports marker_not_found, so typing can never run past the text the
-  model asked for. endKey optionally presses a key after typing.
+  action reports marker_not_found, so typing can never run past the text
+  the model asked for. endKey optionally presses a key after typing.
+  Verify typed text with computer_read or read_value; keystrokes that land
+  in the wrong field are silent unless you read them back.
 - key: send one key (a character or Return, Tab, Escape, BackSpace,
-  Delete, arrows, F1-F12).
-- hotkey: send a combination such as ["ctrl", "shift", "t"].
+  Delete, arrows, F1-F12). Keystrokes go to whatever holds keyboard
+  focus: confirm the focused element with computer_context or
+  computer_observe before sending anything destructive like Return,
+  Delete, or Ctrl+Q.
+- Window management: `window_tile` snaps a window to `left`, `right`, `top`,
+  `bottom`, `top-left`, `top-right`, `bottom-left`, `bottom-right`, or `center`
+  (position goes in `position`); `window_move` sets x/y; `window_maximize`,
+  `window_minimize`, `window_restore`, and `window_close` control window
+  state. Pass a window title fragment in `window`, or omit it to use the
+  focused window. After tiling or moving, re-observe: every bound shifts.
+- Display calibration: `calibration_start` returns a grid of known points;
+  `calibration_measure` takes a point id in `point` and moves the pointer to it,
+  reporting the observed position and delta; `calibration_save` commits the
+  affine correction; `calibration_status` reports the current profile. Rules:
+  start, then measure every point in order without clicking, save when all
+  deltas are within a few pixels (or after one retry pass), and report the
+  scale, offset, and worst residual.
+- hotkey: send a combination such as ["ctrl", "shift", "t"]. Chords act
+  globally on the focused window; confirm focus first.
 - scroll: direction up/down/left/right and amount, optionally targeting an
-  element so the pointer moves there first.
+  element so the pointer moves there first. Scrolling is the cheapest way
+  to reveal off-screen controls: prefer it over paging through snapshots
+  when the target is merely below the fold.
+- drag: from and to endpoints, each an element ID or x/y coordinates. Both
+  endpoints must resolve before the drag starts; a drag with one vague end
+  is two misclicks. Verify the drop effect (order changed, text moved)
+  before continuing.
+- paste_table: rows, a 2D array of cell values, optionally starting at a
+  target cell. This is the only sane way to fill spreadsheets and grids:
+  one paste instead of dozens of type actions. Verify by selecting the
+  range, copying with ctrl+c, and reading the clipboard back.
+- write_clipboard: text to put on the clipboard. Read it back with
+  read_clipboard before pasting anywhere that matters.
 - launch_app: start an application by name or command. Launching enables
-  accessibility for it, so its windows can be observed afterward.
+  accessibility for it, so its windows can be observed afterward. After
+  launching, observe or snapshot to prove the window exists before acting
+  in it; apps take a moment to appear.
 - activate_app: raise and focus an application that is already open.
-- close_app: ask an open application's window to close.
-- open_file: open a path with the computer's default application.
-- open_url: open a URL in the default browser.
+  Prefer this over launching a second copy.
+- close_app: ask an open application's window to close. If a save dialog
+  appears, answer it by name (Save/Discard), never by guessed pixel.
+- open_file: open a path with the computer's default application. The
+  application that opens owns the rest of the task: observe it next.
+- open_url: open an http:// or https:// URL in the default browser. Only
+  public addresses; loopback, private, and metadata targets are refused.
 - read_text: read the text content of a control or application.
 - read_value: read the current value of a control, for example a text
-  field or cell. Uses the focused control when no target is given.
+  field or cell. Uses the focused control when no target is given. After
+  typing or set_value, read_value is the proof the value landed.
 - run_command: run a shell command on the connected computer. Returns the
-  exit code, stdout, and stderr, and the result is verified against the exit
-  code. Prefer this for work that is better done with a command than by
-  clicking, for example listing files, git operations, or package managers.
+  exit code, stdout, and stderr, and the result is verified against the
+  exit code. Prefer this for work that is better done with a command than
+  by clicking, for example listing files, git operations, or package
+  managers. Never use it to fake interface work the user asked to see
+  done in the app.
 - credentials: list the credentials stored for this computer. Only names,
   usernames, and matching rules are returned; secret values are never shown.
 
 Stored credentials:
+
 - A user can store credentials for a computer in Settings > Computer >
   Computers, with rules that describe when each one applies (a command
   substring, an application, or a URL prefix).
@@ -40,16 +122,33 @@ Stored credentials:
   line; for other commands it is exposed only as environment variables
   OMNIA_CREDENTIAL_USERNAME, OMNIA_CREDENTIAL_PASSWORD, and
   OMNIA_CREDENTIAL_TOKEN.
-- If a command matches a stored credential but using it was not approved,
+- Pass credential to type to enter a stored value into a field instead of
+  text: "auto" matches by application (or by page for browser typing), or
+  an id/name picks one explicitly. field selects "username" or "secret"
+  (default). The secret is typed on the computer and never returned.
+- If an action matches a stored credential but using it was not approved,
   the result says permission_required and names the credential. Retry with
   credential: "auto" to request it; never ask the user to type a password
   into the chat.
 
-Every action is revalidated against the live interface, executed through the
-best available route (accessibility action, global keyboard, or global
-pointer), and then verified by comparing observations: the result says
-whether the effect was verified, or failed, or needs approval.
+Verification rubric — every result is one of three:
+
+- verified: the runtime re-observed and proved the effect. Done; move on.
+- unverified: the effect was not confirmed. Treat it as not done:
+  re-observe (or re-read the value), then decide whether to retry. Never
+  chain the next step off an unverified state change.
+- failed: the runtime refused or the action errored, with a code. Read
+  the code, not just the message:
+  - target_stale: the ref belongs to an older observation. Re-observe or
+    re-find and act again with the fresh ref and observationId.
+  - marker_not_found: a type start/stop marker is absent. Nothing was
+    typed. Fix the marker, do not retype blindly.
+  - permission_required: request the named scope or credential and retry.
+  - operation_unavailable / invalid_action: the control or platform cannot
+    do this. Pick a different route (keyboard, menu, shell) instead of
+    hammering the same action.
 
 State-changing actions ask the user for approval first unless computer
-access was already approved. Never send coordinates yourself; never assume
-an action worked because input was sent.
+access was already approved. Prefer refs over coordinates; use only
+pixel centers reported by observe, find, or inspect, never guessed
+coordinates; never assume an action worked because input was sent.

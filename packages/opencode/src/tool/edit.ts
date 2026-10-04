@@ -32,16 +32,29 @@ function convertToLineEnding(text: string, ending: "\n" | "\r\n"): string {
   return text.replaceAll("\n", "\r\n")
 }
 
-const locks = new Map<string, Semaphore.Semaphore>()
+const locks = new Map<string, { semaphore: Semaphore.Semaphore; refs: number }>()
 
-function lock(filePath: string) {
-  const resolvedFilePath = FSUtil.resolve(filePath)
-  const hit = locks.get(resolvedFilePath)
-  if (hit) return hit
-
-  const next = Semaphore.makeUnsafe(1)
-  locks.set(resolvedFilePath, next)
-  return next
+// The table is keyed by resolved path, so without refcounting it keeps one entry
+// alive for every file the model ever edits. `run` drops the entry again once
+// the last holder or waiter of that path is done.
+function acquire(filePath: string) {
+  const key = FSUtil.resolve(filePath)
+  const held = locks.get(key) ?? { semaphore: Semaphore.makeUnsafe(1), refs: 0 }
+  locks.set(key, held)
+  held.refs += 1
+  return {
+    run: <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      held.semaphore
+        .withPermits(1)(effect)
+        .pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              held.refs -= 1
+              if (held.refs === 0 && locks.get(key) === held) locks.delete(key)
+            }),
+          ),
+        ),
+  }
 }
 
 export const Parameters = Schema.Struct({
@@ -85,7 +98,7 @@ export const EditTool = Tool.define(
           let diff = ""
           let contentOld = ""
           let contentNew = ""
-          yield* lock(filePath).withPermits(1)(
+          yield* acquire(filePath).run(
             Effect.gen(function* () {
               if (params.oldString === "") {
                 const existed = yield* afs.existsSafe(filePath)
@@ -555,7 +568,9 @@ export const MultiOccurrenceReplacer: Replacer = function* (content, find) {
     if (index === -1) break
 
     yield find
-    startIndex = index + find.length
+    // A zero-length find matches at the same index forever; step past it so the
+    // generator always terminates.
+    startIndex = index + Math.max(find.length, 1)
   }
 }
 
@@ -703,6 +718,11 @@ export function replace(content: string, oldString: string, newString: string, r
     MultiOccurrenceReplacer,
   ]) {
     for (const search of replacer(content, oldString)) {
+      // A zero-length match is never what the caller asked to replace: the fuzzy
+      // replacers emit one for an all-whitespace oldString whenever the file has
+      // a blank line, and `replaceAll("")` interleaves newString between every
+      // character of the file.
+      if (search.length === 0) continue
       const index = content.indexOf(search)
       if (index === -1) continue
       notFound = false

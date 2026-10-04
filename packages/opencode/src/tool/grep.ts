@@ -59,20 +59,21 @@ export const GrepTool = Tool.define(
 
           const search = FSUtil.resolve(requested)
           const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
-          const cwd = info?.type === "Directory" ? search : path.dirname(search)
+          const isDirectory = info?.type === "Directory"
+          const cwd = isDirectory ? search : path.dirname(search)
           const result = yield* ripgrep.grep({
             cwd,
             pattern: params.pattern,
+            // Without this a file target greps every sibling in its directory and
+            // hands their contents to the model.
+            file: info?.type === "File" ? path.basename(search) : undefined,
             include: params.include,
             limit: 100,
           })
           if (result.length === 0) return empty
 
           const rows = result.map((item) => ({
-            path: path.resolve(
-              requestedInfo?.type === "Directory" ? requested : path.dirname(requested),
-              item.entry.path,
-            ),
+            path: path.resolve(isDirectory ? requested : path.dirname(requested), item.entry.path),
             line: item.line,
             text: item.text,
           }))

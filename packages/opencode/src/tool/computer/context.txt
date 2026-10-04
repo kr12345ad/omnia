@@ -6,4 +6,25 @@ status including which tab is current.
 
 Call this first when a task starts, after switching applications, or whenever
 an action lands somewhere unexpected. It answers "where am I" without
-guessing from stale observations.
+guessing from stale observations. Typical moments:
+
+- task start: confirm the expected app and window are actually frontmost
+  before the first act, instead of assuming the last session left them so.
+- after launch_app, activate_app, or focus_window: prove the window really
+  came forward; window managers sometimes refuse or delay.
+- after a surprising result: a click that "succeeded" but changed nothing
+  usually means the pointer or the focus was somewhere else. Context shows
+  both, so the retry aims at the real state.
+- before typing or hotkeys: confirm the focused element is the intended
+  field. Keystrokes go to whatever holds focus, not to whatever you last
+  looked at.
+
+It changes nothing and needs no target. Pair it with computer_observe when
+you also need the control list, or computer_snapshot when you want the same
+ground truth as machine-readable JSON.
+
+Permissions: this one tool needs three scopes at once — UI_READ for the
+accessibility tree, POINTER for the pointer position, and BROWSER for the
+browser status. If any of the three has not been approved the server refuses
+the whole call and you get "Context unavailable" plus the missing scopes, so ask
+the user to approve them instead of retrying or routing around it.

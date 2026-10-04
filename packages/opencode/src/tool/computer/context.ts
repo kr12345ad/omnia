@@ -2,7 +2,9 @@ import { Effect, Schema } from "effect"
 import { HttpClient } from "effect/unstable/http"
 import * as Tool from "../tool"
 import DESCRIPTION from "./context.txt"
-import { configFromEnv, computerId, request } from "./client"
+import { ActionEnvelope, configFromEnv, computerId, request } from "./client"
+import { renderFailure } from "./output"
+import { scopesForAction } from "./policy"
 
 export const Parameters = Schema.Struct({})
 
@@ -34,20 +36,29 @@ export const ComputerContextTool = Tool.define<typeof Parameters, Record<string,
         Effect.gen(function* () {
           const config = yield* configFromEnv()
           const id = yield* computerId(http, config)
-          const result = yield* request<ContextResponse>(http, config, "POST", `/v1/computers/${id}/actions`, {
-            action: "get_context",
-            approve: true,
-            approvedBy: `session:${ctx.sessionID}`,
-            approvedScopes: ["UI_READ"],
-            sessionId: ctx.sessionID,
-          })
+          const result = yield* request<ContextResponse>(
+            http,
+            config,
+            "POST",
+            `/v1/computers/${id}/actions`,
+            {
+              action: "get_context",
+              approve: true,
+              approvedBy: `session:${ctx.sessionID}`,
+              // get_context needs UI_READ, POINTER, and BROWSER together; the
+              // pointer position and the browser status come with the tree.
+              approvedScopes: scopesForAction("get_context"),
+              sessionId: ctx.sessionID,
+            },
+            { validate: Schema.is(ActionEnvelope) },
+          )
           const outcome = result.result
           if (!outcome.success) {
             const title = "Context unavailable"
             yield* ctx.metadata({ title, metadata: {} })
             return {
               title,
-              output: outcome.error?.message ?? outcome.message ?? "The runtime could not report its context.",
+              output: renderFailure(outcome.error, outcome.message ?? "The runtime could not report its context."),
               metadata: { success: false, error: outcome.error?.code },
             }
           }
@@ -70,7 +81,9 @@ export const ComputerContextTool = Tool.define<typeof Parameters, Record<string,
             lines.push("focus: none reported")
           }
           if (metadata.pointer !== undefined) {
-            lines.push(`pointer: ${metadata.pointer.x},${metadata.pointer.y}${metadata.pointer.held ? " (button held)" : ""}`)
+            lines.push(
+              `pointer: ${metadata.pointer.x},${metadata.pointer.y}${metadata.pointer.held ? " (button held)" : ""}`,
+            )
           }
           if (metadata.browser !== undefined) {
             const browser = metadata.browser
@@ -79,7 +92,9 @@ export const ComputerContextTool = Tool.define<typeof Parameters, Record<string,
             )
           }
           if (metadata.windows !== undefined && metadata.windows.length > 0) {
-            lines.push(`open windows: ${metadata.windows.map((entry) => entry.name).join(", ")}`)
+            const names = metadata.windows.slice(0, 20).map((entry) => entry.name)
+            if (metadata.windows.length > 20) names.push(`… and ${metadata.windows.length - 20} more`)
+            lines.push(`open windows: ${names.join(", ")}`)
           }
           if (metadata.platform !== undefined) lines.push(`platform: ${metadata.platform}`)
           return {

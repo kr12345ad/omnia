@@ -8,6 +8,7 @@ import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
+import { sessionModeMetadata } from "./session-mode"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
 import { Effect, Exit, Schema, Scope } from "effect"
@@ -108,10 +109,15 @@ export const TaskTool = Tool.define(
         depth++
         current = yield* sessions.get(current.parentID)
       }
-      if (depth >= (cfg.subagent_depth ?? 1)) {
+      // Discussion-room specialists are expected to break off into their own
+      // subagents after the meeting, so they get one extra level of depth.
+      const discussionSpecialist =
+        (parent.metadata as { discussion?: { role?: unknown } } | undefined)?.discussion?.role === "specialist"
+      const maxDepth = (cfg.subagent_depth ?? 1) + (discussionSpecialist ? 1 : 0)
+      if (depth >= maxDepth) {
         return yield* Effect.fail(
           new Error(
-            `Subagent depth limit reached (${cfg.subagent_depth ?? 1}). Increase "subagent_depth" to allow nested subagents.`,
+            `Subagent depth limit reached (${maxDepth}). Increase "subagent_depth" to allow nested subagents.`,
           ),
         )
       }
@@ -159,6 +165,7 @@ export const TaskTool = Tool.define(
           parentID: ctx.sessionID,
           title: params.description + ` (@${next.name} subagent)`,
           agent: next.name,
+          metadata: sessionModeMetadata(parent.metadata),
           permission: [
             ...childPermission,
             ...childToolDenies.filter(

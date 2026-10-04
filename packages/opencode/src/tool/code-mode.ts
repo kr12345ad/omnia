@@ -118,9 +118,12 @@ function projectMcpResult(result: CallToolResult, collect: (attachment: Attachme
 type Run = (input: unknown) => Effect.Effect<unknown, unknown>
 
 function toolTree(catalog: readonly CatalogEntry[], run: (entry: CatalogEntry) => Run) {
-  const tree: Record<string, Record<string, SandboxTool.Definition>> = {}
+  // Null-prototype records at both levels: an MCP server or tool literally named
+  // `__proto__` or `constructor` would otherwise be assigned onto Object.prototype
+  // (or onto the Object constructor) and pollute the whole process.
+  const tree: Record<string, Record<string, SandboxTool.Definition>> = Object.create(null)
   for (const entry of catalog) {
-    const namespace = (tree[entry.server] ??= {})
+    const namespace = (tree[entry.server] ??= Object.create(null))
     namespace[entry.local] = SandboxTool.make({
       description: entry.tool.def.description ?? "",
       input: entry.tool.def.inputSchema as SandboxTool.JsonSchema,

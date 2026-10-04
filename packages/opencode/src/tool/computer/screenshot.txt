@@ -1,7 +1,24 @@
 Capture the computer's screen to an image file.
 
-Returns the path of a PNG captured through the best available backend.
-The file can be read with the read tool when visual inspection is needed —
+Returns the path of a PNG captured through the best available backend. The
+file can be read with the read tool when visual inspection is needed —
 for example with a canvas application, an image-only control, or a surface
 that exposes no accessibility tree. Prefer semantic observation first; use
 this only when text-first information is not enough.
+
+Optional region {x, y, width, height} captures one rectangle instead of the
+whole screen. Prefer a region when you know roughly where to look: it is
+faster, smaller, and keeps unrelated screen content out of the picture.
+Coordinates are screen pixels, the same system the observe/find pixel
+centers use.
+
+Rules:
+
+- Never use a screenshot to ground an action. Screenshots confirm; refs act.
+  If you catch yourself reading pixels to decide where to click, stop and
+  use computer_find, computer_inspect, or computer_visual instead.
+- One screenshot per question. A fresh screenshot after the interface
+  changes; never reuse an old image to aim a new click.
+- Screenshots are for you and for the human in the loop: a canvas diff, an
+  error dialog's exact wording, a layout a tree cannot describe. They are
+  not evidence that an action worked; only a verified action result is.

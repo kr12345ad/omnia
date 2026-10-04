@@ -10,7 +10,22 @@ Use it when:
 - a find returns several similar candidates and you need to tell them apart,
 - you are unsure whether a control is enabled, checked, or already focused,
 - you need the exact pixel to click when no semantic action exists,
-- you want to confirm what a dialog contains before typing into it.
+- you want to confirm what a dialog contains before typing into it,
+- a previous act failed and you need to see what actually changed.
+
+Parameters: target (a stable element id from computer_find or
+computer_observe) or query (the control by meaning, for example "Export
+button"), optional role to disambiguate, and optional observationId binding
+the target to the observation it came from.
+
+Reading the result: the ancestor chain answers "where does this live" (which
+window, dialog, tab, or panel), the children answer "what does it contain"
+(a combo box's options, a toolbar's buttons), states answer "can I use it
+right now" (a disabled control reports disabled: do not click it, find what
+enables it first), and actions answer "how may I use it" (prefer a named
+action such as invoke or set-text over a raw click; prefer set-text over
+typing into a field you can set).
 
 If the control is not in the current observation, re-observe first; inspect
-does not act, it only reports.
+does not act, it only reports. An inspect that comes back empty or stale
+means the interface moved: observe or snapshot again, then re-find.

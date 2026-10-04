@@ -47,7 +47,14 @@ export const WebFetchTool = Tool.define(
             },
           })
 
-          const timeout = Math.min((params.timeout ?? DEFAULT_TIMEOUT / 1000) * 1000, MAX_TIMEOUT)
+          // `timeout` is an unconstrained number, so a model-emitted 0 or
+          // negative value would become a zero/negative deadline and fail the
+          // request before it is ever sent. Anything non-positive falls back to
+          // the default; positive values are still capped at MAX_TIMEOUT.
+          const timeout =
+            params.timeout !== undefined && params.timeout > 0
+              ? Math.min(params.timeout * 1000, MAX_TIMEOUT)
+              : DEFAULT_TIMEOUT
 
           // Build Accept header based on requested format with q parameters for fallbacks
           let acceptHeader = "*/*"

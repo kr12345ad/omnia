@@ -2,6 +2,28 @@ Report what the computer runtime can and cannot do right now.
 
 Returns the platform, the active backend, and the state of each
 capability: screen reading, accessibility trees, keyboard input, pointer
-input, and direct interface control. States are available, degraded,
-unavailable, or unknown — never promises. Check this before assuming an
-action will work, and quote it when explaining limits to the user.
+input, and direct interface control. It also reports the Omnia Server
+itself: version, protocol, uptime, connected computers, and subsystem
+health. States are available, degraded, unavailable, or unknown — never
+promises. Check this before assuming an action will work, and quote it
+when explaining limits to the user.
+
+How to read it:
+
+- available: the capability works. Proceed normally.
+- degraded: it works partially. Expect truncated trees, missing names, or
+  slow input; narrow every observation with app or window, keep plans
+  short, and verify twice.
+- unavailable: it does not work here. Do not attempt actions that need it.
+  If the accessibility tree is unavailable, say what you can still do
+  (shell commands, files, browser) and offer the closest alternative
+  instead of pretending.
+- unknown: the runtime could not tell. Treat as degraded until proven
+  otherwise.
+
+Call it once at the start of a session on a new computer, and again
+whenever the interface stops making sense: an empty observation, controls
+that never resolve, or input that never lands usually trace back to a
+capability, not to your plan. If the server half of the report is missing,
+the report says so explicitly and marks itself incomplete: retry once the
+missing half answers rather than working from half a picture.

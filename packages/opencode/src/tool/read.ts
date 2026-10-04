@@ -17,6 +17,11 @@ const MAX_BYTES = 50 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
 const SAMPLE_BYTES = 4096
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
+// An attachment is base64-encoded into a single `data:` URL, so the process
+// holds roughly 2.3x the file size as one string. Matches the cap the session
+// layer already applies to binary MCP resources.
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+const MAX_ATTACHMENT_LABEL = `${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB`
 
 class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
 
@@ -263,7 +268,10 @@ export const ReadTool = Tool.define<
 
       if (stat.type === "Directory") {
         const items = yield* list(filepath)
-        const limit = params.limit ?? DEFAULT_READ_LIMIT
+        // `limit` is a NonNegativeInt, so the model can emit 0. A zero page
+        // returns nothing and then points back at the same offset, which is an
+        // unwinnable pagination loop — fall back to the default instead.
+        const limit = params.limit || DEFAULT_READ_LIMIT
         const offset = params.offset || 1
         const start = offset - 1
         const sliced = items.slice(start, start + limit)
@@ -304,6 +312,14 @@ export const ReadTool = Tool.define<
       const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
 
       if (isImage || isPdfAttachment(mime)) {
+        const size = Number(stat.size)
+        if (size > MAX_ATTACHMENT_BYTES) {
+          return yield* Effect.fail(
+            new Error(
+              `Cannot attach ${filepath}: ${Math.ceil(size / 1024 / 1024)} MB exceeds the ${MAX_ATTACHMENT_LABEL} attachment limit`,
+            ),
+          )
+        }
         const bytes = yield* fs.readFile(filepath)
         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
         return {
@@ -328,7 +344,7 @@ export const ReadTool = Tool.define<
         return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
       }
 
-      const file = yield* lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
+      const file = yield* lines(filepath, { limit: params.limit || DEFAULT_READ_LIMIT, offset: params.offset || 1 })
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
         return yield* Effect.fail(
           new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),

@@ -8,6 +8,7 @@ import { Permission } from "@/permission"
 import { Tool } from "@/tool/tool"
 import { ToolJsonSchema } from "@/tool/json-schema"
 import { ToolRegistry } from "@/tool/registry"
+import { sessionModeFromMetadata } from "@/tool/session-mode"
 import { Truncate } from "@/tool/truncate"
 
 import { Plugin } from "@/plugin"
@@ -94,6 +95,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     providerID: input.model.providerID,
     agent: input.agent,
     permission: input.session.permission,
+    mode: sessionModeFromMetadata(input.session.metadata),
   })) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
     tools[item.id] = tool({

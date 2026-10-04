@@ -65,6 +65,129 @@ const CMD_FILES = new Set([
 const FLAGS = new Set(["-destination", "-literalpath", "-path"])
 const SWITCHES = new Set(["-confirm", "-debug", "-force", "-nonewline", "-recurse", "-verbose", "-whatif"])
 
+// The child inherits only what a build tool legitimately needs. Everything else
+// in process.env — OPENCODE_SERVER_PASSWORD, OMNIA_SERVER_TOKEN, and every
+// provider key — would otherwise be readable by a model-authored command with
+// `env`, `printenv`, or a crash report, so this is an allowlist and not a
+// denylist.
+const SHELL_ENV_KEYS: ReadonlySet<string> = new Set([
+  // Identity and session.
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "PWD",
+  "OLDPWD",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "HOSTNAME",
+  // Locale, terminal, and paging.
+  "LANG",
+  "LANGUAGE",
+  "TZ",
+  "TERM",
+  "COLORTERM",
+  "TERM_PROGRAM",
+  "TERM_PROGRAM_VERSION",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "CLICOLOR",
+  "CLICOLOR_FORCE",
+  "COLUMNS",
+  "LINES",
+  "EDITOR",
+  "VISUAL",
+  "PAGER",
+  "CI",
+  // Display server and input method.
+  "DISPLAY",
+  "WAYLAND_DISPLAY",
+  "XAUTHORITY",
+  "DESKTOP_SESSION",
+  "GTK_IM_MODULE",
+  "QT_IM_MODULE",
+  "XMODIFIERS",
+  "INPUT_METHOD",
+  // Windows essentials: PowerShell and cmd resolve almost everything through these.
+  "SYSTEMROOT",
+  "WINDIR",
+  "SYSTEMDRIVE",
+  "PATHEXT",
+  "COMSPEC",
+  "PROGRAMDATA",
+  "PROGRAMFILES",
+  "PROGRAMFILES(X86)",
+  "PROGRAMW6432",
+  "COMMONPROGRAMFILES",
+  "COMMONPROGRAMFILES(X86)",
+  "ALLUSERSPROFILE",
+  "PUBLIC",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "USERNAME",
+  "USERDOMAIN",
+  "LOGONSERVER",
+  "COMPUTERNAME",
+  "PROCESSOR_ARCHITECTURE",
+  "PROCESSOR_IDENTIFIER",
+  "NUMBER_OF_PROCESSORS",
+  "PSMODULEPATH",
+  "WSLENV",
+  "WSL_DISTRO_NAME",
+  // Toolchain roots: paths, never credentials.
+  "NODE_ENV",
+  "BUN_INSTALL",
+  "COREPACK_HOME",
+  "NVM_DIR",
+  "NVM_BIN",
+  "VOLTA_HOME",
+  "PNPM_HOME",
+  "VIRTUAL_ENV",
+  "CONDA_PREFIX",
+  "MAMBA_ROOT_PREFIX",
+  "PYENV_ROOT",
+  "PYENV_VERSION",
+  "JAVA_HOME",
+  "GOROOT",
+  "GOPATH",
+  "GOMODCACHE",
+  "GOCACHE",
+  "CARGO_HOME",
+  "RUSTUP_HOME",
+  "GEM_HOME",
+  "GEM_PATH",
+  "RBENV_ROOT",
+  "ASDF_DIR",
+  "MISE_HOME",
+  "SDKMAN_DIR",
+  "ANDROID_HOME",
+  "ANDROID_SDK_ROOT",
+  "NDK_HOME",
+])
+// Safe, well-known families whose members are paths and settings, not secrets.
+const SHELL_ENV_PREFIXES = ["LC_", "XDG_"]
+
+// Never handed to a child, whatever the source: these carry this process's own
+// authority to reach the server and the configured providers.
+const SHELL_ENV_RESERVED_PREFIXES = ["OPENCODE_", "OMNIA_"]
+const SHELL_ENV_SECRET =
+  /(^|_)(API_?KEY|ACCESS_?KEY|SECRET_?ACCESS_?KEY|PRIVATE_?KEY|KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIALS?|SUBSCRIPTION)($|_)/i
+
+function isReservedEnvKey(key: string): boolean {
+  const upper = key.toUpperCase()
+  return SHELL_ENV_RESERVED_PREFIXES.some((prefix) => upper.startsWith(prefix)) || SHELL_ENV_SECRET.test(upper)
+}
+
+function isInheritedShellEnvKey(key: string): boolean {
+  const upper = key.toUpperCase()
+  return SHELL_ENV_KEYS.has(upper) || SHELL_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix))
+}
+
 type Part = {
   type: string
   text: string
@@ -419,10 +542,17 @@ export const ShellTool = Tool.define(
         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
         { env: {} },
       )
-      return {
-        ...process.env,
-        ...extra.env,
+      // The plugin hook is user-authored code, so its additions are trusted; the
+      // ambient process environment is not, so only allowlisted names survive.
+      // Reserved names never survive either source, which keeps the guarantee
+      // unconditional for every plugin.
+      const env: NodeJS.ProcessEnv = {}
+      for (const [key, value] of Object.entries({ ...process.env, ...extra.env })) {
+        if (value === undefined) continue
+        if (isReservedEnvKey(key)) continue
+        if (key in extra.env || isInheritedShellEnvKey(key)) env[key] = value
       }
+      return env
     })
 
     const run = Effect.fn("ShellTool.run")(function* (

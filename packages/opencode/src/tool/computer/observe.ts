@@ -2,19 +2,29 @@ import { Effect, Schema } from "effect"
 import { HttpClient } from "effect/unstable/http"
 import * as Tool from "../tool"
 import DESCRIPTION from "./observe.txt"
-import { configFromEnv, computerId, request } from "./client"
+import { ObservationEnvelope, configFromEnv, computerId, request } from "./client"
+import { CAPS } from "./output"
+import { applicationOf } from "./policy"
 
 export const Parameters = Schema.Struct({
   applicationId: Schema.optional(Schema.String).annotate({
     description: "Restrict the observation to one application, for example soffice. Defaults to everything visible.",
   }),
-  maxElements: Schema.optional(Schema.Number).annotate({
-    description: "Maximum controls to include in the text summary. Defaults to 120.",
+  app: Schema.optional(Schema.String).annotate({
+    description: "Alias for applicationId.",
+  }),
+  window: Schema.optional(Schema.String).annotate({
+    description: "Restrict the observation to one window by title or app fragment, for example Default Project.",
+  }),
+  limit: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 1000 }))).annotate({
+    description: `Maximum controls to include in the text summary. Defaults to ${CAPS.observeControls}.`,
   }),
 })
 
 type Element = {
   id?: string
+  ref?: string
+  reference?: { elementId?: string; id?: string }
   role?: string
   name?: string
   text?: string
@@ -37,6 +47,10 @@ type ObservationResponse = {
   }
 }
 
+function refOf(element: Element): string | undefined {
+  return element.id ?? element.ref ?? element.reference?.elementId ?? element.reference?.id
+}
+
 function center(element: Element): string {
   const bounds = element.bounds
   if (bounds === undefined) return ""
@@ -45,8 +59,15 @@ function center(element: Element): string {
 
 function summarize(element: Element): string {
   const label = element.name ?? element.text ?? element.id ?? "element"
+  const ref = refOf(element)
   const parts: string[] = []
-  const value = element.value === undefined ? undefined : typeof element.value === "string" ? element.value : JSON.stringify(element.value)
+  if (ref !== undefined) parts.push(`ref=${ref}`)
+  const value =
+    element.value === undefined
+      ? undefined
+      : typeof element.value === "string"
+        ? element.value
+        : JSON.stringify(element.value)
   if (value !== undefined && value.length > 0) parts.push(`value="${value.slice(0, 40)}"`)
   if (element.states !== undefined && element.states.length > 0) parts.push(`[${element.states.join(", ")}]`)
   if (element.actions !== undefined && element.actions.length > 0) parts.push(`actions=${element.actions.join(",")}`)
@@ -63,11 +84,12 @@ export const ComputerObserveTool = Tool.define<typeof Parameters, Record<string,
       execute: (params, ctx) =>
         Effect.gen(function* () {
           const config = yield* configFromEnv()
-          const app = params.applicationId?.trim() || undefined
+          const app = applicationOf(params)
+          const window = params.window?.trim() || undefined
           yield* ctx.ask({
             permission: "computer",
-            patterns: [`observe${app ? `:${app}` : ""}`],
-            always: ["*"],
+            patterns: [`observe:${app ?? "*"}`],
+            always: ["observe", "observe:*"],
             metadata: { operation: "observe", application: app ?? "desktop" },
           })
           const id = yield* computerId(http, config)
@@ -76,14 +98,18 @@ export const ComputerObserveTool = Tool.define<typeof Parameters, Record<string,
             config,
             "POST",
             `/v1/computers/${id}/observe`,
-            app === undefined ? {} : { applicationId: app },
+            {
+              ...(app === undefined ? {} : { applicationId: app }),
+              ...(window === undefined ? {} : { window }),
+            },
+            { validate: Schema.is(ObservationEnvelope) },
           )
           const observation = result.observation
           const elements = observation.elements ?? []
           const windows = elements.filter((element) => element.role === "window")
           const focused = elements.find((element) => (element.states ?? []).includes("focused"))
           const controls = elements.filter((element) => element.role !== "window" && element.role !== "application")
-          const shown = controls.slice(0, params.maxElements ?? 120)
+          const shown = controls.slice(0, params.limit ?? CAPS.observeControls)
           const applications = [
             ...new Set(
               elements
@@ -95,9 +121,14 @@ export const ComputerObserveTool = Tool.define<typeof Parameters, Record<string,
           if (applications.length > 0) lines.push(`applications: ${applications.join(", ")}`)
           if (windows.length > 0) {
             lines.push("windows:")
-            for (const window of windows.slice(0, 12)) {
+            for (const window of windows.slice(0, CAPS.observeWindows)) {
               const name = window.name ?? window.id ?? "window"
-              lines.push(`- "${name}" (${String(window.metadata?.application ?? "?")})${center(window)}`)
+              const ref = refOf(window)
+              const application =
+                typeof window.metadata?.application === "string" && window.metadata.application.length > 0
+                  ? window.metadata.application
+                  : "?"
+              lines.push(`- "${name}" (${application})${center(window)}${ref === undefined ? "" : ` ref=${ref}`}`)
             }
           }
           if (focused !== undefined) {

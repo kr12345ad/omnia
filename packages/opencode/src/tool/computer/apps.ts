@@ -10,7 +10,14 @@ type AppsResponse = {
   ok: true
   observation: {
     id: string
-    elements?: Array<{ id?: string; role?: string; name?: string; states?: string[]; metadata?: Record<string, unknown> }>
+    elements?: Array<{
+      id?: string
+      role?: string
+      name?: string
+      states?: string[]
+      metadata?: Record<string, unknown>
+    }>
+    warnings?: string[]
   }
 }
 
@@ -27,7 +34,7 @@ export const ComputerAppsTool = Tool.define<typeof Parameters, Record<string, un
           yield* ctx.ask({
             permission: "computer",
             patterns: ["apps"],
-            always: ["*"],
+            always: ["apps"],
             metadata: { operation: "apps" },
           })
           const id = yield* computerId(http, config)
@@ -38,20 +45,35 @@ export const ComputerAppsTool = Tool.define<typeof Parameters, Record<string, un
             yield* ctx.metadata({ title, metadata: {} })
             return { title, output: "No open application windows were reported.", metadata: { applications: 0 } }
           }
-          const lines = windows.map((window) => {
+          const byApplication = new Map<string, Array<{ name: string; focused: boolean }>>()
+          for (const window of windows) {
             const app =
               typeof window.metadata?.application === "string" && window.metadata.application.length > 0
                 ? window.metadata.application
                 : "unknown"
-            const focused = (window.states ?? []).includes("focused") ? " (focused)" : ""
-            return `- ${app}: ${window.name ?? window.id ?? "window"}${focused}`
-          })
-          const title = `${windows.length} open application${windows.length === 1 ? "" : "s"}`
+            const entries = byApplication.get(app) ?? []
+            entries.push({
+              name: window.name ?? window.id ?? "window",
+              focused: (window.states ?? []).includes("focused"),
+            })
+            byApplication.set(app, entries)
+          }
+          const lines = [...byApplication].flatMap(([app, entries]) => [
+            `- ${app}: ${entries.length} window${entries.length === 1 ? "" : "s"}`,
+            ...entries.map((entry) => `  - ${entry.name}${entry.focused ? " (focused)" : ""}`),
+          ])
+          const title = `${byApplication.size} open application${byApplication.size === 1 ? "" : "s"}`
           yield* ctx.metadata({ title, metadata: {} })
           return {
             title,
-            output: lines.join("\n"),
-            metadata: { applications: windows.length, observationId: result.observation.id },
+            output: [...lines, ...(result.observation.warnings ?? []).map((warning) => `warning: ${warning}`)].join(
+              "\n",
+            ),
+            metadata: {
+              applications: byApplication.size,
+              windows: windows.length,
+              observationId: result.observation.id,
+            },
           }
         }),
     }

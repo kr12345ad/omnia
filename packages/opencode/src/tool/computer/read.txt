@@ -2,7 +2,17 @@ Read the text content of a control, document, or application.
 
 Use this to see what a surface actually contains instead of taking a
 screenshot. It returns the text, its length, and a short hash so the model
-can confirm exactly what changed after an action.
+can confirm exactly what changed after an action. The marker line at the end
+tells you the contract:
+
+  [length=4821 offset=0 returned=4821 truncated=false]
+
+When truncated=true, read again with offset set to offset+returned to continue
+where the last call stopped; the hash lets you prove two reads describe the
+same content. A read is only ever a window: the runtime can only fetch a prefix
+of the surface, so it asks for every character up to the end of the window you
+asked for and cuts the window out of that prefix. truncated=true therefore
+means the surface is longer than what you received, never that you finished.
 
 Provide one of:
 
@@ -10,7 +20,24 @@ Provide one of:
 - query + optional role: locate the surface by meaning, for example
   "document text" or "Find field".
 - app or window: read the whole application or a window's application.
+  This is the fastest way to capture a document, a terminal, or a log view
+  without enumerating its controls first.
+
+Parameters:
+
+- limit: maximum characters in this window (defaults to a large cap). Keep it
+  modest for previews and raise it only when you need the whole body.
+- offset: starting character offset. Continue a truncated read with the offset
+  the marker line implies, never by re-reading from zero and hoping. A window
+  that starts past the runtime's read cap cannot be fetched, so narrow target
+  or query instead of raising offset past it.
+- observationId: bind a target to the observation it came from so a moved
+  interface is refused instead of misread.
 
 Documents, entries, combo boxes, and labels expose their text when the
 application publishes accessibility text. Canvas-only surfaces report
 honestly that no text is available; use computer_screenshot for those.
+A read that returns empty text on a control you can see usually means the
+wrong control was targeted or the tree is stale: inspect the target, then
+re-observe and read again. Never treat "no text" as "nothing there" without
+checking states first.

@@ -14,6 +14,11 @@ import PROMPT_COMPACTION from "./prompt/compaction.txt"
 import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
+import PROMPT_DISCUSSION_MANAGER from "./prompt/discussion-manager.txt"
+import PROMPT_DISCUSSION_STRATEGIST from "./prompt/discussion-strategist.txt"
+import PROMPT_DISCUSSION_BUILDER from "./prompt/discussion-builder.txt"
+import PROMPT_DISCUSSION_RESEARCHER from "./prompt/discussion-researcher.txt"
+import PROMPT_DISCUSSION_CRITIC from "./prompt/discussion-critic.txt"
 import { Permission } from "@/permission"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
 import { Global } from "@opencode-ai/core/global"
@@ -119,6 +124,10 @@ const layer = Layer.effect(
         const defaults = Permission.fromConfig({
           "*": "allow",
           doom_loop: "ask",
+          // Computer control drives the real desktop, can run processes, and can
+          // read stored credentials. Those tools call ctx.ask with this
+          // permission, so it must not fall through the "*": "allow" wildcard.
+          computer: "ask",
           external_directory: {
             "*": "ask",
             ...Object.fromEntries(whitelistedDirs.map((dir) => [dir, "allow"])),
@@ -261,6 +270,98 @@ const layer = Layer.effect(
               user,
             ),
             prompt: PROMPT_SUMMARY,
+          },
+          "discussion-manager": {
+            name: "discussion-manager",
+            description:
+              "Manager of a five-agent discussion room. Frames the problem, runs the rounds, decides, and assigns one piece of work to each specialist.",
+            prompt: PROMPT_DISCUSSION_MANAGER,
+            options: {},
+            temperature: 0.2,
+            mode: "primary",
+            native: true,
+            hidden: true,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                task: {
+                  "*": "deny",
+                },
+              }),
+              user,
+            ),
+          },
+          "discussion-strategist": {
+            name: "discussion-strategist",
+            description:
+              "Strategist in a discussion room: goals, tradeoffs, sequencing, and success metrics. Breaks off into subagents to execute assigned work.",
+            prompt: PROMPT_DISCUSSION_STRATEGIST,
+            options: {},
+            temperature: 0.3,
+            mode: "subagent",
+            native: true,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                todowrite: "allow",
+                task: "allow",
+              }),
+              user,
+            ),
+          },
+          "discussion-builder": {
+            name: "discussion-builder",
+            description:
+              "Builder in a discussion room: feasibility, dependencies, and the simplest working approach. Breaks off into subagents to execute assigned work.",
+            prompt: PROMPT_DISCUSSION_BUILDER,
+            options: {},
+            temperature: 0.2,
+            mode: "subagent",
+            native: true,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                todowrite: "allow",
+                task: "allow",
+              }),
+              user,
+            ),
+          },
+          "discussion-researcher": {
+            name: "discussion-researcher",
+            description:
+              "Researcher in a discussion room: evidence, prior art, and the unknowns that must be verified. Breaks off into subagents to execute assigned work.",
+            prompt: PROMPT_DISCUSSION_RESEARCHER,
+            options: {},
+            temperature: 0.2,
+            mode: "subagent",
+            native: true,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                todowrite: "allow",
+                task: "allow",
+              }),
+              user,
+            ),
+          },
+          "discussion-critic": {
+            name: "discussion-critic",
+            description:
+              "Critic in a discussion room: failure modes, risks, and the acceptance criteria that prove the decision right. Breaks off into subagents to execute assigned work.",
+            prompt: PROMPT_DISCUSSION_CRITIC,
+            options: {},
+            temperature: 0.2,
+            mode: "subagent",
+            native: true,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                todowrite: "allow",
+                task: "allow",
+              }),
+              user,
+            ),
           },
         }
 

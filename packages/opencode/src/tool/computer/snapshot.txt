@@ -1,0 +1,66 @@
+Read the computer as formatted JSON instead of looking at pixels.
+
+Returns the full structured snapshot for one scope as parseable JSON: every
+window and control with its stable ref, role, name, text, value, states,
+supported actions, bounds, and owning application, plus the observation id
+that scopes every ref in the payload. No screenshot is taken and no vision
+model is involved at any step.
+
+Parameters:
+
+- app or applicationId: restrict to one application, for example "soffice" or
+  "firefox". Omit for everything visible on the desktop.
+- window: restrict further to one window by title or app fragment, for example
+  "Budget 2026". Combine with app when several windows share a title.
+- limit: maximum controls to include (1-1000, default 200). The snapshot
+  stays valid JSON no matter what: if the payload would exceed the size cap
+  it is trimmed from the end and truncated is set to true.
+- offset: skip the first N controls. Page with offset=limit, 2*limit, and so
+  on; each page carries totalElements so you always know how much is left.
+
+Output shape (JSON):
+
+  {
+    "observationId": "obs-9",
+    "application": "soffice",
+    "totalElements": 412,
+    "returnedElements": 200,
+    "offset": 0,
+    "limit": 200,
+    "truncated": true,
+    "focusedRef": "atspi:2",
+    "windows": [ { "ref", "name", "application", "focused", "bounds", "states" } ],
+    "elements": [ { "ref", "role", "name", "text", "value", "description",
+                    "states", "actions", "bounds", "application" } ],
+    "warnings": [ "accessibility tree was truncated; narrow the scope" ]
+  }
+
+Every element id in "elements" is directly usable as the target of
+computer_act (click, type, focus, read, select, invoke, drag endpoints) and
+computer_inspect, together with "observationId" as observationId so the
+runtime can detect staleness. A ref from any other observation is refused
+with target_stale: never mix ids across snapshots, and re-snapshot after
+every state-changing action instead of reusing an old tree.
+
+The JSON-first loop for any application:
+
+1. computer_capabilities once, to learn what this computer supports. If the
+   accessibility tree reports unavailable or degraded, say so and offer the
+   closest alternative instead of pretending.
+2. computer_snapshot, narrowed with app or window, to get the formatted JSON
+   of the interface. Start wide, then narrow; never screenshot to orient.
+3. computer_find or computer_inspect to pin one control when the snapshot is
+   truncated or several candidates look alike.
+4. computer_act with the control's ref (or a query) plus the observationId
+   the ref came from. Refs beat coordinates, always: coordinates are
+   forbidden except on canvas or image surfaces that expose no ref, and even
+   there only the exact pixel centers reported by snapshot, find, or inspect
+   may be used. Never invent a pixel.
+5. Treat only a verified result as done. On target_stale, re-snapshot and
+   re-resolve instead of retrying blindly. On unverified, re-observe before
+   acting again.
+
+A screenshot is only ever for confirming something with a human, never for
+grounding an action. If a control is missing from the JSON, it cannot be
+acted on: narrow the scope, check computer_find, or re-snapshot after the
+interface changes. Guessing is how clicks land in the wrong window.

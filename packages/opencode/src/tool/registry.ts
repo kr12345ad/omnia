@@ -10,6 +10,7 @@ import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
+import { DiscussionRoomTool } from "./discussion"
 import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
@@ -27,8 +28,11 @@ import { ComputerReadTool } from "./computer/read"
 import { ComputerBrowserTool } from "./computer/browser"
 import { ComputerContextTool } from "./computer/context"
 import { ComputerInspectTool } from "./computer/inspect"
+import { ComputerSnapshotTool } from "./computer/snapshot"
+import { ComputerVisualTool } from "./computer/visual"
 import { SuperskillTool } from "./computer/superskill"
 import { MemoryTool } from "./computer/memory"
+import { COMPUTER_TOOL_IDS, toolEnabledInMode, type SessionMode } from "./session-mode"
 import * as Tool from "./tool"
 import { Config } from "@/config/config"
 import { type ToolContext as PluginToolContext, type ToolDefinition } from "@opencode-ai/plugin"
@@ -96,6 +100,7 @@ export interface Interface {
     modelID: ModelV2.ID
     agent: Agent.Info
     permission?: PermissionV1.Ruleset
+    mode?: SessionMode
   }) => Effect.Effect<Tool.Def[]>
 }
 
@@ -113,6 +118,7 @@ const layer = Layer.effect(
 
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
+    const discussion = yield* DiscussionRoomTool
     const read = yield* ReadTool
     const question = yield* QuestionTool
     const todo = yield* TodoWriteTool
@@ -138,6 +144,8 @@ const layer = Layer.effect(
     const computerBrowser = yield* ComputerBrowserTool
     const computerContext = yield* ComputerContextTool
     const computerInspect = yield* ComputerInspectTool
+    const computerSnapshot = yield* ComputerSnapshotTool
+    const computerVisual = yield* ComputerVisualTool
     const superskill = yield* SuperskillTool
     const memory = yield* MemoryTool
     const agent = yield* Agent.Service
@@ -241,6 +249,7 @@ const layer = Layer.effect(
           edit: Tool.init(edit),
           write: Tool.init(writetool),
           task: Tool.init(task),
+          discussion: Tool.init(discussion),
           fetch: Tool.init(webfetch),
           todo: Tool.init(todo),
           search: Tool.init(websearch),
@@ -256,6 +265,8 @@ const layer = Layer.effect(
           computerBrowser: Tool.init(computerBrowser),
           computerContext: Tool.init(computerContext),
           computerInspect: Tool.init(computerInspect),
+          computerSnapshot: Tool.init(computerSnapshot),
+          computerVisual: Tool.init(computerVisual),
           superskill: Tool.init(superskill),
           memory: Tool.init(memory),
           patch: Tool.init(patchtool),
@@ -277,6 +288,7 @@ const layer = Layer.effect(
             tool.edit,
             tool.write,
             tool.task,
+            tool.discussion,
             tool.fetch,
             tool.todo,
             tool.search,
@@ -293,6 +305,8 @@ const layer = Layer.effect(
             tool.computerBrowser,
             tool.computerContext,
             tool.computerInspect,
+            tool.computerSnapshot,
+            tool.computerVisual,
             tool.superskill,
             tool.memory,
             ...(tool.execute ? [tool.execute] : []),
@@ -340,26 +354,13 @@ const layer = Layer.effect(
       return codeMode.describeCatalog(tools, Object.keys(yield* mcp.clients()).map(McpCatalog.sanitize))
     })
 
-    const computerRuntime = process.env.OMNIA_SERVER_URL !== undefined && process.env.OMNIA_SERVER_TOKEN !== undefined
-    const computerToolIds = new Set([
-      ComputerObserveTool.id,
-      ComputerFindTool.id,
-      ComputerActTool.id,
-      ComputerAppsTool.id,
-      ComputerCapabilitiesTool.id,
-      ComputerScreenshotTool.id,
-      ComputerDoTool.id,
-      ComputerReadTool.id,
-      ComputerBrowserTool.id,
-      ComputerContextTool.id,
-      ComputerInspectTool.id,
-      SuperskillTool.id,
-      MemoryTool.id,
-    ])
-
     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
+      const computerRuntime =
+        (process.env.OMNIA_SERVER_URL?.trim().length ?? 0) > 0 &&
+        (process.env.OMNIA_SERVER_TOKEN?.trim().length ?? 0) > 0
       const filtered = (yield* all()).filter((tool) => {
-        if (computerToolIds.has(tool.id)) return computerRuntime
+        if (COMPUTER_TOOL_IDS.has(tool.id)) return computerRuntime && toolEnabledInMode(input.mode, tool.id)
+        if (!toolEnabledInMode(input.mode, tool.id)) return false
         if (tool.id === WebSearchTool.id) {
           return webSearchEnabled(input.providerID, { exa: flags.enableExa, parallel: flags.enableParallel })
         }
