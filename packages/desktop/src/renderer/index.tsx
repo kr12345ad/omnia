@@ -61,7 +61,7 @@ if (import.meta.env.VITE_SENTRY_DSN) {
 }
 
 const [updaterState, setUpdaterState] = createSignal<UpdaterState>({ status: "disabled" })
-void window.api.updater.subscribe(setUpdaterState)
+void window.api.updater.subscribe(setUpdaterState).catch(() => undefined)
 
 const deepLinkEvent = "opencode:deep-link"
 
@@ -78,7 +78,10 @@ const emitDeepLinks = (urls: string[]) => {
 }
 
 const listenForDeepLinks = () => {
-  void window.api.consumeInitialDeepLinks().then((urls) => emitDeepLinks(urls))
+  void window.api
+    .consumeInitialDeepLinks()
+    .then((urls) => emitDeepLinks(urls))
+    .catch(() => undefined)
   return window.api.onDeepLink((urls) => emitDeepLinks(urls))
 }
 
@@ -244,6 +247,8 @@ const createPlatform = (windowState: DesktopWindowState): Platform => {
 
     setForceFocus: (enabled) => window.api.setForceFocus(enabled),
 
+    setAgentWorking: (working) => window.api.setAgentWorking(working),
+
     recordFatalRendererError: (error) => window.api.recordFatalRendererError(error),
 
     restart: async () => {
@@ -305,6 +310,13 @@ const createPlatform = (windowState: DesktopWindowState): Platform => {
     superskills: window.api.superskills,
 
     memory: window.api.memory,
+    auth: window.api.auth,
+
+    computers: window.api.computers,
+
+    computerUse: window.api.computerUse,
+
+    browserPanel: window.api.browserPanel,
 
     checkAppExists: async (appName: string) => {
       return window.api.checkAppExists(appName)
@@ -441,11 +453,16 @@ function DesktopRoot(props: { windowState: DesktopWindowState }) {
 }
 
 render(() => {
+  // `get-window-id` throws when the sender cannot be resolved to a window. A
+  // rejection here would leave `windowState.latest` undefined and the splash
+  // on screen forever, so fall back to the browser-scoped identity that
+  // `platform.windowID ?? "browser"` and window-scoped persistence already
+  // handle.
   const [windowState] = createResource(async () => {
     const api = window.api as typeof window.api & {
       getWindowID?: () => Promise<string>
     }
-    return { id: await api.getWindowID?.() }
+    return { id: await api.getWindowID?.().catch(() => undefined) }
   })
 
   return (

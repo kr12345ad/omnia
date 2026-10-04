@@ -9,26 +9,50 @@ type Readiness = {
   detail?: string
 }
 
-const STATUS_LABEL: Record<string, string> = {
-  available: "Ready",
-  degraded: "Limited",
-  unavailable: "Unavailable",
-  unknown: "Not checked yet",
-  granted: "Ready",
-}
+const STATUS_LABEL = new Map<string, string>([
+  ["available", "Ready"],
+  ["degraded", "Limited"],
+  ["unavailable", "Unavailable"],
+  ["unknown", "Not checked yet"],
+  ["granted", "Ready"],
+])
 
-const STATUS_CLASS: Record<string, string> = {
-  available: "bg-icon-success-base",
-  degraded: "bg-icon-warning-base",
-  unavailable: "bg-icon-critical-base",
-  unknown: "bg-icon-weak-base",
-  granted: "bg-icon-success-base",
-}
+const STATUS_CLASS = new Map<string, string>([
+  ["available", "bg-icon-success-base"],
+  ["degraded", "bg-icon-warning-base"],
+  ["unavailable", "bg-icon-critical-base"],
+  ["unknown", "bg-icon-weak-base"],
+  ["granted", "bg-icon-success-base"],
+])
 
 const SETUP_PENDING_KEY = "omnia.setup.pending"
 
+// Reading `window.localStorage` throws a SecurityError on documents where
+// storage is denied, and `setItem` throws once the quota is exhausted. Neither
+// may escape: the `onMount` read below runs before `runFirstLaunchOnboarding`
+// starts, so a throw there would leave the `startup` promise unresolved and the
+// app stuck on its splash.
+function readSetupPending() {
+  try {
+    return window.localStorage?.getItem(SETUP_PENDING_KEY) === "1"
+  } catch {
+    return false
+  }
+}
+
+function writeSetupPending(value: boolean) {
+  try {
+    if (value) window.localStorage?.setItem(SETUP_PENDING_KEY, "1")
+    else window.localStorage?.removeItem(SETUP_PENDING_KEY)
+  } catch {}
+}
+
 function statusClass(status: string) {
-  return STATUS_CLASS[status] ?? "bg-icon-weak-base"
+  return STATUS_CLASS.get(status) ?? "bg-icon-weak-base"
+}
+
+function statusLabel(status: string) {
+  return STATUS_LABEL.get(status) ?? status
 }
 
 export function DesktopFirstLaunchOnboarding(props: { initialUrl: string; onLoaded: () => void }) {
@@ -40,7 +64,7 @@ export function DesktopFirstLaunchOnboarding(props: { initialUrl: string; onLoad
   const [checking, setChecking] = createSignal(true)
 
   onMount(() => {
-    if (window.localStorage?.getItem(SETUP_PENDING_KEY) === "1") {
+    if (readSetupPending()) {
       setSetup(true)
       void loadReadiness()
     }
@@ -48,7 +72,7 @@ export function DesktopFirstLaunchOnboarding(props: { initialUrl: string; onLoad
   })
 
   function dismiss() {
-    window.localStorage?.removeItem(SETUP_PENDING_KEY)
+    writeSetupPending(false)
     setSetup(false)
   }
 
@@ -78,7 +102,7 @@ export function DesktopFirstLaunchOnboarding(props: { initialUrl: string; onLoad
       // Show the setup screen as soon as first launch is confirmed so the
       // overlay cannot be lost if this view is re-created while the first
       // task is being opened.
-      window.localStorage?.setItem(SETUP_PENDING_KEY, "1")
+      writeSetupPending(true)
       setSetup(true)
       void loadReadiness()
 
@@ -167,7 +191,7 @@ export function DesktopFirstLaunchOnboarding(props: { initialUrl: string; onLoad
                     <span class={`w-1.5 h-1.5 rounded-full ${statusClass(entry.status)}`} />
                     <span class="text-text-strong">{entry.label}</span>
                     <span class="text-text-weak" title={entry.detail}>
-                      {STATUS_LABEL[entry.status] ?? entry.status}
+                      {statusLabel(entry.status)}
                     </span>
                   </div>
                 )}

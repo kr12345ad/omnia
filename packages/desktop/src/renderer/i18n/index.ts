@@ -117,6 +117,7 @@ function build(locale: Locale): Dictionary {
   if (locale === "en") return base
   if (locale === "zh") return { ...base, ...i18n.flatten(desktopZh) }
   if (locale === "zht") return { ...base, ...i18n.flatten(desktopZht) }
+  if (locale === "ko") return { ...base, ...i18n.flatten(desktopKo) }
   if (locale === "de") return { ...base, ...i18n.flatten(desktopDe) }
   if (locale === "es") return { ...base, ...i18n.flatten(desktopEs) }
   if (locale === "fr") return { ...base, ...i18n.flatten(desktopFr) }
@@ -175,7 +176,7 @@ function build(locale: Locale): Dictionary {
   if (locale === "tg") return { ...base, ...i18n.flatten(desktopTg) }
   if (locale === "tk") return { ...base, ...i18n.flatten(desktopTk) }
   if (locale === "uz") return { ...base, ...i18n.flatten(desktopUz) }
-  return { ...base, ...i18n.flatten(desktopKo) }
+  return base
 }
 
 const state = {
@@ -186,7 +187,18 @@ const state = {
 
 state.dict = build(state.locale)
 
-const translate = i18n.translator(() => state.dict, i18n.resolveTemplate)
+// `i18n.resolveTemplate` hands the interpolated value to `String.replace` as a replacement pattern, so a
+// `$&`, `$'`, `$\`` or `$$` inside an installed path or an error message is expanded and the copy shown to
+// the user is corrupted. Substitute through a replacer function so values are inserted verbatim.
+function resolveTemplate(template: string, params?: i18n.BaseTemplateArgs) {
+  if (!params) return template
+  return Object.entries(params).reduce(
+    (text, [key, value]) => text.replace(new RegExp(`{{\\s*${key}\\s*}}`, "g"), () => String(value)),
+    template,
+  )
+}
+
+const translate = i18n.translator(() => state.dict, resolveTemplate)
 
 export function t(key: keyof Dictionary, params?: Record<string, string | number>) {
   return translate(key, params)

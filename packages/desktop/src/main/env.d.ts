@@ -1,5 +1,6 @@
 interface ImportMetaEnv {
   readonly OPENCODE_CHANNEL: string
+  readonly OMNIA_DISABLE_UPDATES?: boolean
 }
 
 interface ImportMeta {

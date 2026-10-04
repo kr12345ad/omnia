@@ -24,6 +24,9 @@ const rendererHost = "renderer"
 const clipboardWritePermission = "clipboard-sanitized-write"
 const notificationPermission = "notifications"
 const rendererPermissions = new Set([clipboardWritePermission, notificationPermission])
+// The application has no location features. Geolocation is denied explicitly
+// so no future allow-list change can enable it, and so the policy is auditable.
+const deniedPermissions = new Set(["geolocation"])
 const oc2Theme = oc2ThemeJson as DesktopTheme
 const oc2Background = {
   light: resolveThemeVariant(oc2Theme.light, false)["background-base"],
@@ -76,6 +79,9 @@ export function setAppQuitting(quitting = true) {
 export function setBackgroundColor(color: string) {
   backgroundColor = color
   BrowserWindow.getAllWindows().forEach((win) => {
+    // Only real app windows take the theme background; the Omnia overlay is
+    // transparent and must stay that way.
+    if (!windowIDs.has(win)) return
     win.setBackgroundColor(color)
     if (process.platform === "darwin") win.invalidateShadow()
   })
@@ -132,6 +138,9 @@ export function setPinchZoomEnabled(enabled: boolean) {
   getStore().set(PINCH_ZOOM_ENABLED_KEY, enabled)
   for (const win of BrowserWindow.getAllWindows()) {
     pinchZoomEnabled.set(win, enabled)
+    // A window whose renderer crashed stays alive with a destroyed
+    // webContents; sending to it throws and would abort the remaining windows.
+    if (win.webContents.isDestroyed()) continue
     win.webContents.send("pinch-zoom-enabled-changed", enabled)
     if (!enabled && win.webContents.getZoomFactor() !== 1) win.webContents.setZoomFactor(1)
     updateZoom(win)
@@ -178,6 +187,9 @@ export function createMainWindow(id: string = randomUUID()) {
     y: state.y,
     width: state.width,
     height: state.height,
+    minWidth: 900,
+    minHeight: 600,
+    useContentSize: true,
     show: false,
     autoHideMenuBar: true,
     title: "Omnia",
@@ -201,6 +213,13 @@ export function createMainWindow(id: string = randomUUID()) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Streaming transcript + agent event loops should keep ticking even when
+      // the window is occluded or unfocused.
+      backgroundThrottling: false,
+      // V8 bytecode cache for the renderer entry keeps repeat launches fast.
+      v8CacheOptions: "code",
+      // The Omnia browser panel hosts one <webview> per embedded browser tab.
+      webviewTag: true,
     },
   })
 
@@ -239,7 +258,9 @@ export function openExternalURL(value: string) {
     writeLog("window", "blocked external target", { url: value }, "warn")
     return
   }
-  void shell.openExternal(url)
+  void shell.openExternal(url).catch((error) => {
+    writeLog("window", "failed to open external target", { url, error }, "error")
+  })
 }
 
 export function openLocalFileURL(value: string) {
@@ -248,9 +269,14 @@ export function openLocalFileURL(value: string) {
     writeLog("window", "blocked local file target", { url: value }, "warn")
     return
   }
-  void shell.openPath(path).then((error) => {
-    if (error) writeLog("window", "failed to open local file", { path, error }, "error")
-  })
+  void shell
+    .openPath(path)
+    .then((error) => {
+      if (error) writeLog("window", "failed to open local file", { path, error }, "error")
+    })
+    .catch((error) => {
+      writeLog("window", "failed to open local file", { path, error }, "error")
+    })
 }
 
 function wireNavigationPolicy(win: BrowserWindow) {
@@ -292,13 +318,21 @@ export function registerRendererProtocol() {
   if (protocol.isProtocolHandled(rendererProtocol)) return
 
   protocol.handle(rendererProtocol, async (request) => {
-    const url = new URL(request.url)
-    if (url.host !== rendererHost) {
-      writeLog("protocol", "rejected host", { url: request.url }, "warn")
+    let url: URL
+    let file: string
+    try {
+      url = new URL(request.url)
+      if (url.host !== rendererHost) {
+        writeLog("protocol", "rejected host", { url: request.url }, "warn")
+        return new Response("Not found", { status: 404 })
+      }
+      file = resolve(rendererRoot, `.${decodeURIComponent(url.pathname)}`)
+    } catch (error) {
+      // A malformed percent-escape or URL must not reject the protocol
+      // handler; the renderer gets a plain 404 like any other bad path.
+      writeLog("protocol", "rejected url", { url: request.url, error }, "warn")
       return new Response("Not found", { status: 404 })
     }
-
-    const file = resolve(rendererRoot, `.${decodeURIComponent(url.pathname)}`)
     const rel = relative(rendererRoot, file)
     if (rel.startsWith("..") || isAbsolute(rel)) {
       writeLog("protocol", "rejected path", { url: request.url, file }, "warn")
@@ -333,13 +367,13 @@ export function registerRendererProtocol() {
 
 function loadWindow(win: BrowserWindow, html: string) {
   const devUrl = process.env.ELECTRON_RENDERER_URL
-  if (devUrl) {
-    const url = new URL(html, devUrl)
-    void win.loadURL(url.toString())
-    return
-  }
-
-  void win.loadURL(`${rendererProtocol}://${rendererHost}/${html}`)
+  const url = devUrl ? new URL(html, devUrl).toString() : `${rendererProtocol}://${rendererHost}/${html}`
+  // loadURL rejects on every failed or superseded load (ERR_ABORTED for a
+  // reload, for example). did-fail-load already surfaces those to the user,
+  // so swallow the rejection here instead of leaving it unhandled in main.
+  void win.loadURL(url).catch((error) => {
+    writeLog("window", "loadURL rejected", { url, error }, "error")
+  })
 }
 
 function wireWindowRecovery(win: BrowserWindow, name: string) {
@@ -478,19 +512,37 @@ function addDocumentPolicy(response: Response, file: string) {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
 }
 
+// Electron keeps a single permission handler per session and every window
+// shares the default session, so the handlers are installed once and trust is
+// tracked per webContents. Installing them per window made the last window
+// created revoke clipboard/notification access for every earlier window.
+const trustedWebContents = new Set<number>()
+let permissionHandlersInstalled = false
+
 function allowRendererPermissions(win: BrowserWindow) {
   const webContentsId = win.webContents.id
+  trustedWebContents.add(webContentsId)
+  win.webContents.once("destroyed", () => trustedWebContents.delete(webContentsId))
 
-  win.webContents.session.setPermissionRequestHandler((webContents, permission, callback, details) => {
+  const session = win.webContents.session
+  if (permissionHandlersInstalled) return
+  permissionHandlersInstalled = true
+
+  session.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    if (deniedPermissions.has(permission)) {
+      callback(false)
+      return
+    }
     callback(
       rendererPermissions.has(permission) &&
         isTrustedRendererUrl(details.requestingUrl) &&
-        webContents.id === webContentsId,
+        trustedWebContents.has(webContents.id),
     )
   })
-  win.webContents.session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+  session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+    if (deniedPermissions.has(permission)) return false
     if (!rendererPermissions.has(permission)) return false
-    if (webContents && webContents.id !== webContentsId) return false
+    if (webContents && !trustedWebContents.has(webContents.id)) return false
     return isTrustedRendererUrl(details.requestingUrl) || isTrustedRendererUrl(requestingOrigin)
   })
 }

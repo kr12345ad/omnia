@@ -84,8 +84,8 @@ export type OmniaAction =
   | Pick<DoubleClickAction, "type" | "button" | "modifiers">
   | Pick<RightClickAction, "type" | "button" | "modifiers">
   | Pick<TypeAction, "type" | "text">
-  | Pick<KeyAction, "type" | "key" | "modifiers">
-  | Pick<ScrollAction, "type" | "deltaX" | "deltaY" | "amount">
+  | Pick<KeyAction, "type" | "key" | "keys" | "modifiers">
+  | Pick<ScrollAction, "type" | "direction" | "deltaX" | "deltaY" | "amount">
   | Pick<FocusAction, "type">
 
 export type OmniaExecuteRequest = {

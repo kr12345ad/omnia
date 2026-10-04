@@ -142,4 +142,114 @@ describe("Omnia operations", () => {
     })
     expect(observed).toBe(false)
   })
+
+  test("blocks a permission that is not granted for a required capability", async () => {
+    let executed = false
+    const registry = createOmniaDriverRegistry("linux")
+    registry.register(
+      createDriver({
+        capabilities: [
+          {
+            capability: "pointer",
+            status: "available",
+            permissions: [
+              {
+                id: "computer.input",
+                description: "Send pointer input",
+                status: "denied",
+                capabilities: ["pointer"],
+              },
+            ],
+          },
+        ],
+        revalidateTarget: async () => ({ ok: true, status: "ok", value: target }),
+        execute: async () => {
+          executed = true
+          return { success: true, status: "success" }
+        },
+      }),
+    )
+
+    expect(await createOmniaOperations(registry).execute({ target, action: { type: "click" } })).toEqual({
+      ok: false,
+      status: "permission_required",
+      permission: "computer.input",
+      canRequest: false,
+    })
+    expect(executed).toBe(false)
+  })
+
+  test("runs the action when every required capability is granted", async () => {
+    const registry = createOmniaDriverRegistry("linux")
+    registry.register(
+      createDriver({
+        capabilities: [
+          {
+            capability: "pointer",
+            status: "available",
+            permissions: [
+              {
+                id: "computer.input",
+                description: "Send pointer input",
+                status: "granted",
+                capabilities: ["pointer"],
+              },
+            ],
+          },
+        ],
+        revalidateTarget: async () => ({ ok: true, status: "ok", value: target }),
+        execute: async () => ({ success: true, status: "success" }),
+      }),
+    )
+
+    expect((await createOmniaOperations(registry).execute({ target, action: { type: "click" } })).status).toBe("ok")
+  })
+
+  test("blocks a revalidated reference whose role no longer matches", async () => {
+    let executed = false
+    const registry = createOmniaDriverRegistry("linux")
+    registry.register(
+      createDriver({
+        revalidateTarget: async () => ({
+          ok: true,
+          status: "ok",
+          value: { ...target, role: "textbox" },
+        }),
+        execute: async () => {
+          executed = true
+          return { success: true, status: "success" }
+        },
+      }),
+    )
+
+    expect(
+      await createOmniaOperations(registry).execute({
+        target: { ...target, role: "button" },
+        action: { type: "focus" },
+      }),
+    ).toEqual({ ok: false, status: "blocked", reason: "target_stale" })
+    expect(executed).toBe(false)
+  })
+
+  test("blocks an expired reference before the driver is consulted", async () => {
+    let revalidated = false
+    const registry = createOmniaDriverRegistry("linux")
+    registry.register(
+      createDriver({
+        revalidateTarget: async () => {
+          revalidated = true
+          return { ok: true, status: "ok", value: target }
+        },
+        execute: async () => ({ success: true, status: "success" }),
+      }),
+    )
+
+    expect(
+      await createOmniaOperations(registry).execute({
+        target: { ...target, expiresAt: Date.now() - 1 },
+        action: { type: "focus" },
+      }),
+    ).toEqual({ ok: false, status: "blocked", reason: "target_stale" })
+    expect(revalidated).toBe(false)
+  })
 })

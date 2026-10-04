@@ -8,7 +8,6 @@ import { app } from "electron"
 
 const execFileAsync = promisify(execFile)
 const root = dirname(fileURLToPath(import.meta.url))
-const stateHome = process.env.XDG_STATE_HOME
 const desktopStateNames = ["ai.opencode.desktop.dev", "ai.opencode.desktop.beta", "ai.opencode.desktop"]
 
 type Logger = {
@@ -17,6 +16,9 @@ type Logger = {
 }
 
 export async function startBackgroundCli(logger: Logger, shellStateHome?: string) {
+  // Read here, not at module load: the app assigns its own XDG_STATE_HOME
+  // during startup, after this module has already been evaluated.
+  const stateHome = process.env.XDG_STATE_HOME
   const bundled = app.isPackaged
     ? join(process.resourcesPath, executableName())
     : join(root, "../../resources", executableName())
@@ -27,11 +29,20 @@ export async function startBackgroundCli(logger: Logger, shellStateHome?: string
   const candidates = [
     ...new Set([stateHome, shellStateHome, ...desktopStateNames.map((name) => join(app.getPath("appData"), name))]),
   ].filter((candidate) => candidate === undefined || existsSync(candidate))
+  // A candidate without a running service exits non-zero, and a state home
+  // that disappears between the check and the probe fails to spawn: one
+  // failing probe must not abort the whole startup.
   const discovered = await Promise.all(
-    candidates.map(async (candidate) => ({
-      stateHome: candidate,
-      url: serviceUrl(await run(binary, ["service", "status"], logger, { stateHome: candidate })),
-    })),
+    candidates.map(async (candidate) => {
+      try {
+        return {
+          stateHome: candidate,
+          url: serviceUrl(await run(binary, ["service", "status"], logger, { stateHome: candidate })),
+        }
+      } catch {
+        return { stateHome: candidate, url: undefined }
+      }
+    }),
   )
   const found = discovered.find((candidate) => candidate.url !== undefined)
   logger.log("v2 CLI background instance checked", {

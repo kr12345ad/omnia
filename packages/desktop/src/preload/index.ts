@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron"
 import type { ElectronAPI, OmniaEvent, OmniaFailure, Superskill, WslServersEvent } from "./types"
+import type { BrowserPanelCommand } from "@opencode-ai/app/context/platform"
 import type { UpdaterState } from "@opencode-ai/app/updater"
 
 const updaterCallbacks = new Set<(state: UpdaterState) => void>()
@@ -35,6 +36,65 @@ const api: ElectronAPI = {
     forget: (input: { query?: string; key?: string; scope?: string; application?: string }) =>
       ipcRenderer.invoke("memories-forget", input),
     stats: () => ipcRenderer.invoke("memories-stats"),
+  },
+  auth: {
+    status: () => ipcRenderer.invoke("omnia-auth-status"),
+    signIn: () => ipcRenderer.invoke("omnia-auth-sign-in"),
+    signOut: () => ipcRenderer.invoke("omnia-auth-sign-out"),
+  },
+  computers: {
+    list: () => ipcRenderer.invoke("computers-list"),
+    stop: (computerId: string, reason?: string) => ipcRenderer.invoke("computers-stop", computerId, reason),
+    connect: (computerId: string) => ipcRenderer.invoke("computers-connect", computerId),
+    pair: {
+      create: (name?: string) => ipcRenderer.invoke("computers-pair-create", name),
+      cancel: (code: string) => ipcRenderer.invoke("computers-pair-cancel", code),
+      join: (code: string) => ipcRenderer.invoke("computers-pair-join", code),
+      leave: () => ipcRenderer.invoke("computers-pair-leave"),
+      status: () => ipcRenderer.invoke("computers-pair-status"),
+    },
+    controlPlane: {
+      get: () => ipcRenderer.invoke("computers-control-plane-get"),
+      set: (url: string | null) => ipcRenderer.invoke("computers-control-plane-set", url),
+    },
+    credentials: {
+      list: (computerId: string) => ipcRenderer.invoke("credentials-list", computerId),
+      save: (input) => ipcRenderer.invoke("credentials-save", input),
+      remove: (computerId: string, id: string) => ipcRenderer.invoke("credentials-remove", computerId, id),
+    },
+  },
+  computerUse: {
+    models: () => ipcRenderer.invoke("computer-use-models"),
+    status: () => ipcRenderer.invoke("computer-use-status"),
+    settings: () => ipcRenderer.invoke("computer-use-settings"),
+    updateSettings: (patch) => ipcRenderer.invoke("computer-use-settings-update", patch),
+    download: (id: string) => ipcRenderer.invoke("computer-use-model-download", id),
+    load: (id: string) => ipcRenderer.invoke("computer-use-model-load", id),
+    unload: (id: string) => ipcRenderer.invoke("computer-use-model-unload", id),
+    remove: (id: string) => ipcRenderer.invoke("computer-use-model-remove", id),
+    runtimes: () => ipcRenderer.invoke("computer-use-runtimes"),
+    downloadRuntime: (id: string) => ipcRenderer.invoke("computer-use-runtime-download", id),
+    removeRuntime: (id: string) => ipcRenderer.invoke("computer-use-runtime-remove", id),
+    calibration: () => ipcRenderer.invoke("computer-use-calibration"),
+    calibrationStart: () => ipcRenderer.invoke("computer-use-calibration-start"),
+    calibrationMeasure: (pointId: string) => ipcRenderer.invoke("computer-use-calibration-measure", pointId),
+    calibrationSave: (measurements: unknown) => ipcRenderer.invoke("computer-use-calibration-save", measurements),
+    calibrationReset: () => ipcRenderer.invoke("computer-use-calibration-reset"),
+  },
+  browserPanel: {
+    register: (input) => ipcRenderer.invoke("browser-panel-register", input),
+    unregister: (webContentsId) => ipcRenderer.invoke("browser-panel-unregister", webContentsId),
+    activate: (webContentsId) => ipcRenderer.invoke("browser-panel-activate", webContentsId),
+    list: () => ipcRenderer.invoke("browser-panel-list"),
+    answerDialog: (input) => ipcRenderer.invoke("browser-panel-answer-dialog", input),
+    onCommand: (callback) => {
+      const handler = (_: unknown, command: unknown) => {
+        if (!isBrowserPanelCommand(command)) return
+        callback(command)
+      }
+      ipcRenderer.on("browser-panel-command", handler)
+      return () => ipcRenderer.removeListener("browser-panel-command", handler)
+    },
   },
   omnia: {
     getCapabilities: () => ipcRenderer.invoke(omniaIpc.getCapabilities),
@@ -205,6 +265,7 @@ const api: ElectronAPI = {
   setTitlebar: (theme) => ipcRenderer.invoke("set-titlebar", theme),
   runDesktopMenuAction: (action) => ipcRenderer.invoke("run-desktop-menu-action", action),
   setBackgroundColor: (color: string) => ipcRenderer.invoke("set-background-color", color),
+  setAgentWorking: (working) => ipcRenderer.send("agent-working", working),
   exportDebugLogs: () => ipcRenderer.invoke("export-debug-logs"),
   setForceFocus: (enabled) => ipcRenderer.invoke("set-force-focus", enabled),
   recordFatalRendererError: (error) => ipcRenderer.invoke("record-fatal-renderer-error", error),
@@ -219,6 +280,22 @@ function createSubscriptionId() {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
+}
+
+function isBrowserPanelCommand(value: unknown): value is BrowserPanelCommand {
+  if (!isRecord(value) || typeof value.kind !== "string") return false
+  if (value.kind === "open") return typeof value.requestId === "string" && typeof value.url === "string"
+  if (value.kind === "activate" || value.kind === "close") return typeof value.tabId === "number"
+  if (value.kind === "dialog") {
+    return (
+      typeof value.tabId === "number" &&
+      typeof value.type === "string" &&
+      typeof value.message === "string" &&
+      (value.defaultPrompt === undefined || typeof value.defaultPrompt === "string") &&
+      (value.frameUrl === undefined || typeof value.frameUrl === "string")
+    )
+  }
+  return false
 }
 
 contextBridge.exposeInMainWorld("api", api)

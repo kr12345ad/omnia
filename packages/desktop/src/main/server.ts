@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url"
 import { app, utilityProcess } from "electron"
 import type { Details } from "electron"
 import { getLogger } from "./logging"
+import { controlPlaneAuth } from "./omnia/control-plane"
 import { getUserShell, loadShellEnv } from "./shell-env"
 import { getStore } from "./store"
 import { DEFAULT_SERVER_URL_KEY } from "./store-keys"
@@ -144,22 +145,32 @@ export async function spawnLocalServer(
   const wait = (async () => {
     const url = `http://${hostname}:${port}`
     let healthy = false
+    let settled = false
     const gone = exit.promise.then((code) => {
       if (healthy) return
+      settled = true
       throw new Error(`Sidecar exited before health check passed with code ${code}`)
     })
 
     const ready = async () => {
-      while (true) {
+      while (!settled) {
         await new Promise((resolve) => setTimeout(resolve, 100))
+        // Without this the poller keeps hitting the dead port every 100ms
+        // for the rest of the process lifetime once the exit race wins.
+        if (settled) return
         if (await checkHealth(url, password)) {
           healthy = true
+          settled = true
           return
         }
       }
     }
 
-    await Promise.race([ready(), gone])
+    try {
+      await Promise.race([ready(), gone])
+    } finally {
+      settled = true
+    }
   })()
 
   let stopping: Promise<void> | undefined
@@ -216,6 +227,15 @@ function createSidecarEnv(): Record<string, string> {
   )
   delete env.DEBUG
   if (process.platform === "linux") delete env.LD_PRELOAD
+  // The agent sessions this sidecar serves must expose the Omnia computer
+  // tools. Without this env the tools never register and the agent cannot
+  // click, type, or capture the screen (the hosted control plane drives the
+  // paired runtime).
+  const auth = controlPlaneAuth()
+  if (auth !== undefined) {
+    env.OMNIA_SERVER_URL = auth.url
+    env.OMNIA_SERVER_TOKEN = auth.clientToken
+  }
   return env
 }
 

@@ -27,6 +27,10 @@ import { nativeT } from "./native-translations"
 import { registerOmniaIpcHandlers } from "./omnia/ipc"
 import { registerSuperskillIpcHandlers } from "./omnia/superskills"
 import { registerMemoryIpcHandlers } from "./omnia/memory"
+import { registerGitHubAuthIpcHandlers } from "./omnia/auth"
+import { registerComputerIpcHandlers } from "./omnia/computers"
+import { registerComputerUseIpcHandlers } from "./omnia/computer-use"
+import { registerRemoteAgentIpcHandlers } from "./omnia/remote-agent"
 
 const pickerFilters = (ext?: string[]) => {
   if (!ext || ext.length === 0) return undefined
@@ -34,6 +38,15 @@ const pickerFilters = (ext?: string[]) => {
 }
 
 const pickedFiles = createPickedFileAuthorizations()
+
+// The store name becomes a file name inside userData, so it must stay a plain
+// file name: `../` segments or absolute paths would let a renderer read and
+// write files outside the app directory.
+function requireStoreName(name: unknown) {
+  if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name))
+    throw new Error("Invalid store name")
+  return name
+}
 
 type Deps = {
   killSidecar: () => Promise<void> | void
@@ -52,6 +65,7 @@ type Deps = {
   updater: UpdaterController
   showUpdater: () => Promise<void> | void
   setBackgroundColor: (color: string) => void
+  setAgentWorking: (sourceId: number, working: boolean) => void
   exportDebugLogs: () => Promise<string>
   recordFatalRendererError: (error: FatalRendererError) => Promise<void> | void
   setNativeTranslations: (bundle: DesktopNativeBundle) => void
@@ -61,6 +75,10 @@ export function registerIpcHandlers(deps: Deps) {
   registerOmniaIpcHandlers()
   registerSuperskillIpcHandlers()
   registerMemoryIpcHandlers()
+  registerGitHubAuthIpcHandlers()
+  registerComputerIpcHandlers()
+  registerComputerUseIpcHandlers()
+  registerRemoteAgentIpcHandlers()
   const drafts = createDesktopDraftStore(join(app.getPath("userData"), "drafts.sqlite"))
   const updaterSubscriptions = createUpdaterSubscriptions()
   app.once("will-quit", updaterSubscriptions.clear)
@@ -101,6 +119,18 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("updater-check", () => deps.updater.check())
   ipcMain.handle("updater-install", () => deps.updater.install())
   ipcMain.handle("set-background-color", (_event: IpcMainInvokeEvent, color: string) => deps.setBackgroundColor(color))
+  const agentWorkingSenders = new Set<number>()
+  ipcMain.on("agent-working", (event: IpcMainEvent, working: unknown) => {
+    const sourceId = event.sender.id
+    if (!agentWorkingSenders.has(sourceId)) {
+      agentWorkingSenders.add(sourceId)
+      event.sender.once("destroyed", () => {
+        agentWorkingSenders.delete(sourceId)
+        deps.setAgentWorking(sourceId, false)
+      })
+    }
+    deps.setAgentWorking(sourceId, working === true)
+  })
   ipcMain.handle("export-debug-logs", () => deps.exportDebugLogs())
   ipcMain.handle("set-force-focus", (event: IpcMainInvokeEvent, enabled: boolean) =>
     setForceFocus(event.sender, enabled),
@@ -119,7 +149,7 @@ export function registerIpcHandlers(deps: Deps) {
   })
   ipcMain.handle("store-get", (_event: IpcMainInvokeEvent, name: string, key: string) => {
     try {
-      const store = getStore(name)
+      const store = getStore(requireStoreName(name))
       const value = store.get(key)
       if (value === undefined || value === null) return null
       return typeof value === "string" ? value : JSON.stringify(value)
@@ -128,22 +158,24 @@ export function registerIpcHandlers(deps: Deps) {
     }
   })
   ipcMain.handle("store-set", (_event: IpcMainInvokeEvent, name: string, key: string, value: string) => {
-    getStore(name).set(key, value)
+    getStore(requireStoreName(name)).set(key, value)
   })
   ipcMain.handle("store-delete", (_event: IpcMainInvokeEvent, name: string, key: string) => {
-    getStore(name).delete(key)
-    void removeStoreFileIfEmpty(name)
+    const store = requireStoreName(name)
+    getStore(store).delete(key)
+    void removeStoreFileIfEmpty(store)
   })
   ipcMain.handle("store-clear", (_event: IpcMainInvokeEvent, name: string) => {
-    getStore(name).clear()
-    void removeStoreFileIfEmpty(name)
+    const store = requireStoreName(name)
+    getStore(store).clear()
+    void removeStoreFileIfEmpty(store)
   })
   ipcMain.handle("store-keys", (_event: IpcMainInvokeEvent, name: string) => {
-    const store = getStore(name)
+    const store = getStore(requireStoreName(name))
     return Object.keys(store.store)
   })
   ipcMain.handle("store-length", (_event: IpcMainInvokeEvent, name: string) => {
-    const store = getStore(name)
+    const store = getStore(requireStoreName(name))
     return Object.keys(store.store).length
   })
   ipcMain.handle("draft-get", (_event, key: string) => drafts.get(key))
@@ -244,9 +276,11 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("read-clipboard-image", () => {
     const image = clipboard.readImage()
     if (image.isEmpty()) return null
-    const buffer = image.toPNG().buffer
+    // The PNG bytes must be sliced out of the pooled Node buffer, otherwise
+    // the renderer receives adjacent heap contents and a corrupt image.
+    const png = image.toPNG()
     const size = image.getSize()
-    return { buffer, width: size.width, height: size.height }
+    return { buffer: png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength), width: size.width, height: size.height }
   })
 
   ipcMain.handle("get-window-id", (event: IpcMainInvokeEvent) => {

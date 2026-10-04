@@ -1,5 +1,5 @@
 import { readdir, readFile, rm, stat } from "node:fs/promises"
-import { join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 
 const EMPTY_STORE_MAX_BYTES = 128
 const DRAFT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
@@ -65,6 +65,11 @@ export async function deleteStoreFileIfEmpty(userDataPath: string, name: string)
   if (!storeKind(name)) return false
 
   const file = join(userDataPath, name)
+  // The store file name comes from the renderer, and `opencode.draft.<x>.dat`
+  // style names still match the kind patterns when <x> carries `../` segments.
+  // Refuse anything that does not resolve to a direct child of userData.
+  if (dirname(resolve(file)) !== resolve(userDataPath)) return false
+
   const stats = await stat(file).catch(() => undefined)
   if (!stats?.isFile()) return false
   if (!(await isEmptyStore(file, stats.size))) return false
@@ -74,6 +79,7 @@ export async function deleteStoreFileIfEmpty(userDataPath: string, name: string)
 }
 
 function storeKind(name: string): StoreKind | undefined {
+  if (name.includes("/") || name.includes("\\")) return
   if (/^opencode\.draft\..+\.dat$/.test(name)) return "draft"
   if (/^opencode\.workspace\..+\.dat$/.test(name)) return "workspace"
 }

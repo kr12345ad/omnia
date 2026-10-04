@@ -43,20 +43,13 @@ function probe(shell: string, mode: "-il" | "-l"): Probe {
   const err = out.error as NodeJS.ErrnoException | undefined
   if (err) {
     if (err.code === "ETIMEDOUT") return { type: "Timeout" }
-    console.log(`[server] Shell env probe failed for ${shell} ${mode}: ${err.message}`)
     return { type: "Unavailable" }
   }
 
-  if (out.status !== 0) {
-    console.log(`[server] Shell env probe exited with non-zero status for ${shell} ${mode}`)
-    return { type: "Unavailable" }
-  }
+  if (out.status !== 0) return { type: "Unavailable" }
 
   const env = parseShellEnv(out.stdout)
-  if (Object.keys(env).length === 0) {
-    console.log(`[server] Shell env probe returned empty env for ${shell} ${mode}`)
-    return { type: "Unavailable" }
-  }
+  if (Object.keys(env).length === 0) return { type: "Unavailable" }
 
   return { type: "Loaded", value: env }
 }

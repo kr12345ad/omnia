@@ -14,6 +14,12 @@ const OS_NAME = (() => {
 const [webviewZoom, setWebviewZoom] = createSignal(1)
 let requestedZoom = 1
 let pinchZoomEnabled = false
+// A renderer reload (View > Reload Webview, `// @refresh reload`) keeps the
+// webContents zoom factor, so the initial native read must seed the signal
+// instead of assuming 1. Once the main process pushes a change, that push is
+// newer than the in-flight read and must win.
+let zoomPushed = false
+let pinchZoomPushed = false
 let wheelPinch = undefined as
   | {
       active: boolean
@@ -32,6 +38,7 @@ const WHEEL_PINCH_END_DELAY = 160
 const clamp = (value: number) => Math.min(Math.max(value, MIN_ZOOM_LEVEL), MAX_ZOOM_LEVEL)
 
 const applyZoom = (next: number) => {
+  zoomPushed = true
   requestedZoom = next
   void window.api
     .setZoomFactor(next)
@@ -46,20 +53,36 @@ const applyZoom = (next: number) => {
 }
 
 window.api.onZoomFactorChanged((factor) => {
+  zoomPushed = true
   requestedZoom = clamp(factor)
   setWebviewZoom(requestedZoom)
 })
 
-void window.api.getPinchZoomEnabled().then((enabled) => {
-  pinchZoomEnabled = enabled
-})
+void window.api
+  .getZoomFactor()
+  .then((factor) => {
+    if (zoomPushed) return
+    requestedZoom = clamp(factor)
+    setWebviewZoom(requestedZoom)
+  })
+  .catch(() => undefined)
 
 window.api.onPinchZoomEnabledChanged((enabled) => {
+  pinchZoomPushed = true
   pinchZoomEnabled = enabled
   resetWheelPinch()
 })
 
+void window.api
+  .getPinchZoomEnabled()
+  .then((enabled) => {
+    if (pinchZoomPushed) return
+    pinchZoomEnabled = enabled
+  })
+  .catch(() => undefined)
+
 const setPinchZoomEnabled = (enabled: boolean) => {
+  pinchZoomPushed = true
   pinchZoomEnabled = enabled
   resetWheelPinch()
   return window.api.setPinchZoomEnabled(enabled)

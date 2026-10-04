@@ -1,151 +1,121 @@
 import { spawnSync } from "node:child_process"
-import { Browser, Daemon, Server } from "@opencode-ai/omnia"
-import { registerOmniaDriver } from "./registry"
-import type { OmniaDriver, OmniaResult, OmniaTargetReference } from "./types"
+import { systemPreferences } from "electron"
+import { Cua, Daemon } from "@opencode-ai/omnia"
 
-export interface LocalOmniaServer {
-  url: string
-  token: string
-  serverId: string
-  stop: () => Promise<void>
-}
-
-function toBridgeDriver(driver: Daemon.HostDriver): OmniaDriver {
+// The Cua engine owns observation and semantic actions on every platform; the
+// platform driver keeps the pieces the engine cannot express (pointer and
+// keyboard synthesis, clipboard, screenshots, process launch, input freeze).
+function platformFallbacks(driver: Daemon.HostDriver, platform: "darwin" | "win32"): Cua.CuaLegacyFallbacks {
+  const label = platform === "darwin" ? "macOS" : "Windows"
+  const unavailable = (message: string) => Promise.resolve({ success: false, status: "unavailable" as const, message })
+  const screenshot = async () =>
+    (await driver.execute({ type: "screenshot" })) as Awaited<ReturnType<Cua.CuaLegacyFallbacks["captureScreen"]>>
   return {
-    id: driver.id,
-    backend: driver.backend,
-    get capabilities() {
-      return driver.capabilities
-    },
-    getInfo: driver.getInfo,
-    observe: driver.observe,
-    find: driver.find,
-    execute: driver.execute,
-    revalidateTarget: async (target: OmniaTargetReference): Promise<OmniaResult<OmniaTargetReference>> => {
-      const result = await driver.revalidateTarget({
-        kind: "element",
-        elementId: target.elementId,
-        ...(target.observationId === undefined ? {} : { observationId: target.observationId }),
-        ...(target.generation === undefined ? {} : { generation: target.generation }),
-      })
-      if (!result.valid) return { ok: false, status: "blocked", reason: "target_stale" }
-      return { ok: true, status: "ok", value: target }
-    },
+    capabilities: () => [...(driver.capabilities ?? [])],
+    info: () => driver.getInfo(),
+    activeWindowId: async () => undefined,
+    captureScreen: screenshot,
+    clickAt: (x, y, button = 1, count = 1) =>
+      driver.execute({
+        type: "click",
+        target: { kind: "point", x, y },
+        button: button === 3 ? "right" : button === 2 ? "middle" : "left",
+        count,
+      }),
+    movePointer: (x, y) => driver.execute({ type: "move", target: { kind: "point", x, y } }),
+    sendGlobalKey: (keys) => driver.execute({ type: "key", key: keys }),
+    typeText: (value) => driver.execute({ type: "type", text: value }),
+    scrollPointer: (direction, amount, x, y) =>
+      driver.execute({
+        type: "scroll",
+        direction:
+          direction === "up" || direction === "down" || direction === "left" || direction === "right"
+            ? direction
+            : "down",
+        amount,
+        ...(x === undefined || y === undefined ? {} : { target: { kind: "point", x, y } }),
+      }),
+    dragPointer: (fromX, fromY, toX, toY) =>
+      driver.execute({
+        type: "drag",
+        from: { kind: "point", x: fromX, y: fromY },
+        to: { kind: "point", x: toX, y: toY },
+      }),
+    hoverPointer: (x, y, holdMs) => driver.hoverPointer?.(x, y, holdMs) ?? unavailable("Hovering is not supported."),
+    pointerPosition: () => driver.pointerPosition?.() ?? unavailable("Pointer position is not supported."),
+    mouseDown: () => driver.mouseDown?.() ?? unavailable("Mouse buttons are not supported."),
+    mouseUp: () => driver.mouseUp?.() ?? unavailable("Mouse buttons are not supported."),
+    releaseStuckKeys: () => driver.releaseStuckKeys?.() ?? unavailable("Releasing keys is not supported."),
+    readText: (input) => driver.readText?.(input) ?? unavailable("Reading element text is not supported."),
+    readClipboard: () => driver.readClipboard?.() ?? unavailable("Reading the clipboard is not supported."),
+    writeClipboard: (value) => driver.writeClipboard?.(value) ?? unavailable("Writing the clipboard is not supported."),
+    writeClipboardImage: () => unavailable(`Clipboard images are not supported on ${label}.`),
+    launchApp: (applicationId) => driver.execute({ type: "launch", applicationId }),
+    openTarget: (target) => driver.execute({ type: "open", target }),
+    runCommand: (request) => driver.runCommand?.(request) ?? unavailable("Shell commands are not supported."),
+    closeWindowId: () => unavailable(`Window ids are not used on ${label}.`),
+    minimizeWindowId: () => unavailable(`Minimizing by window id is not supported on ${label}.`),
+    restoreWindowId: () => unavailable(`Restoring by window id is not supported on ${label}.`),
+    grabInput: () => unavailable(`Input freeze is not supported on ${label}.`),
+    releaseInput: () => unavailable(`Input freeze is not supported on ${label}.`),
+    inputGrabState: () =>
+      Promise.resolve({
+        success: true,
+        status: "success" as const,
+        message: `Input freeze is not supported on ${label}.`,
+        frozen: false,
+        supported: false,
+      }),
+    subscribeInputGrab: () => () => {},
+    dispose: () => driver.dispose?.(),
   }
 }
 
-function toServerDriver(driver: Daemon.HostDriver): Server.ServerComputerDriver {
-  return {
-    id: driver.id,
-    backend: driver.backend,
-    getInfo: () => driver.getInfo(),
-    capabilities: () => driver.capabilities ?? [],
-    observe: (request) => driver.observe(request),
-    find: (request) => driver.find(request),
-    execute: (action) => driver.execute(action),
-    readText: (input) => driver.readText!(input),
-    readClipboard: () => driver.readClipboard!(),
-    writeClipboard: (text) => driver.writeClipboard!(text),
-    pointerPosition: () => driver.pointerPosition!(),
-    hoverPointer: (x, y, holdMs) => driver.hoverPointer!(x, y, holdMs),
-    mouseDown: (button) => driver.mouseDown!(button),
-    mouseUp: (button) => driver.mouseUp!(button),
-    releaseStuckKeys: () => driver.releaseStuckKeys!(),
-    revalidateTarget: (reference) => driver.revalidateTarget(reference),
-  }
-}
-
-interface ModelCatalogEntry {
-  id: string
-  name?: string
-  provider?: string
-  capabilities: Record<string, boolean | number>
-}
-
-export async function registerModelsWithOmniaServer(
-  server: Pick<LocalOmniaServer, "url" | "token">,
-  sidecar: { url: string; username?: string; password?: string },
-): Promise<number> {
-  const authorization =
-    sidecar.username === undefined
-      ? undefined
-      : `Basic ${Buffer.from(`${sidecar.username}:${sidecar.password ?? ""}`).toString("base64")}`
-  const response = await fetch(`${sidecar.url}/provider`, {
-    headers: authorization === undefined ? {} : { authorization },
-  })
-  if (!response.ok) throw new Error(`Provider list failed with HTTP ${response.status}.`)
-  const body = (await response.json()) as {
-    all?: Array<{ id?: string; models?: Record<string, { id?: string; name?: string; capabilities?: { toolcall?: boolean; reasoning?: boolean; attachment?: boolean }; limit?: { context?: number } }> }>
-  }
-  const models: ModelCatalogEntry[] = []
-  for (const provider of body.all ?? []) {
-    if (typeof provider.id !== "string") continue
-    for (const model of Object.values(provider.models ?? {})) {
-      if (typeof model.id !== "string") continue
-      models.push({
-        id: `${provider.id}/${model.id}`,
-        ...(typeof model.name === "string" ? { name: model.name } : {}),
-        provider: provider.id,
-        capabilities: {
-          tools: model.capabilities?.toolcall ?? true,
-          reasoning: model.capabilities?.reasoning ?? false,
-          vision: model.capabilities?.attachment ?? false,
-          context: model.limit?.context ?? 0,
-        },
-      })
-      if (models.length >= 500) break
+// The desktop app no longer embeds the Omnia server. This driver backs the
+// local runtime that registers with the hosted control plane and serves
+// computer-control commands through the signed remote channel.
+let accessibilityPromptShown = false
+export function createPlatformHostDriver(platform: NodeJS.Platform = process.platform): Daemon.HostDriver | undefined {
+  if (platform === "linux") ensureFlatpakAccessibility()
+  if (platform === "darwin") {
+    // Trigger the macOS Accessibility prompt so the installed app registers in
+    // System Settings > Privacy & Security > Accessibility and can be enabled.
+    // Prompt at most once per launch: the system re-shows the dialog on every
+    // call while untrusted, which reads as the app nagging. After the user
+    // grants access they must relaunch the app for the grant to take effect.
+    if (!systemPreferences.isTrustedAccessibilityClient(false) && !accessibilityPromptShown) {
+      accessibilityPromptShown = true
+      systemPreferences.isTrustedAccessibilityClient(true)
     }
-    if (models.length >= 500) break
+    const legacy = Daemon.createDarwinHostDriver()
+    return Cua.createCuaHostDriver({ platform: "darwin", legacy: platformFallbacks(legacy, "darwin"), surface: legacy })
   }
-  const registered = await fetch(`${server.url}/v1/models`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" },
-    body: JSON.stringify({ models }),
-  })
-  if (!registered.ok) throw new Error(`Model registration failed with HTTP ${registered.status}.`)
-  return models.length
+  // Windows was legacy-only; the CUA engine (UIA) now leads there too, with
+  // the PowerShell driver kept as the fallback surface for capabilities the
+  // engine cannot express.
+  if (platform === "win32") {
+    const legacy = Daemon.createWindowsHostDriver()
+    return Cua.createCuaHostDriver({ platform: "win32", legacy: platformFallbacks(legacy, "win32"), surface: legacy })
+  }
+  const host = new Daemon.LinuxHostDriver()
+  if (!host.available) return undefined
+  return Daemon.createHostDriver(host)
 }
 
 // Flatpak sandboxes LibreOffice away from the accessibility bus, which hides
 // its entire UI tree. Grant the narrow a11y bus permission once so the runtime
 // can see the app's controls.
 export function ensureFlatpakAccessibility(): void {
-  const info = spawnSync("flatpak", ["info", "org.libreoffice.LibreOffice"], { stdio: "ignore" })
+  const info = spawnSync("flatpak", ["info", "org.libreoffice.LibreOffice"], { stdio: "ignore", timeout: 5000 })
   if (info.status !== 0) return
   const permissions = spawnSync("flatpak", ["info", "--show-permissions", "org.libreoffice.LibreOffice"], {
     encoding: "utf8",
+    timeout: 5000,
   })
   if (permissions.stdout?.includes("org.a11y.Bus=talk")) return
   spawnSync(
     "flatpak",
     ["override", "--user", "--talk-name=org.a11y.Bus", "--env=NO_AT_BRIDGE=0", "org.libreoffice.LibreOffice"],
-    { stdio: "ignore" },
+    { stdio: "ignore", timeout: 5000 },
   )
-}
-
-export async function startLocalOmniaServer(): Promise<LocalOmniaServer | undefined> {
-  ensureFlatpakAccessibility()
-  const host = new Daemon.LinuxHostDriver()
-  if (!host.available) return undefined
-  const driver = Daemon.createHostDriver(host)
-  const browser = new Browser.BrowserRuntime({
-    log: (message, meta) => console.log(`[omnia-browser] ${message}`, meta ?? ""),
-  })
-  const handle = await Server.startOmniaServer({
-    drivers: [toServerDriver(driver)],
-    browser,
-  })
-  registerOmniaDriver(toBridgeDriver(driver))
-  process.env.OMNIA_SERVER_URL = handle.url
-  process.env.OMNIA_SERVER_TOKEN = handle.token
-  process.env.OMNIA_COMPUTER_ID = driver.id
-  return {
-    url: handle.url,
-    token: handle.token,
-    serverId: handle.serverId,
-    stop: async () => {
-      await browser.closeRuntime().catch(() => undefined)
-      await handle.stop()
-    },
-  }
 }

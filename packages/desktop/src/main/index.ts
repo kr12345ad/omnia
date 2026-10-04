@@ -10,10 +10,11 @@ import { app, BrowserWindow } from "electron"
 
 import { Deferred, Effect, Fiber } from "effect"
 import contextMenu from "electron-context-menu"
+import { Browser } from "@opencode-ai/omnia"
 
 import type { ServerReadyData } from "../preload/types"
 import { checkAppExists, resolveAppPath } from "./apps"
-import { CHANNEL } from "./constants"
+import { CHANNEL, UPDATER_ENABLED } from "./constants"
 import { registerIpcHandlers, sendDeepLinks, sendMenuCommand } from "./ipc"
 import { forwardInitializationFailure } from "./initialization"
 import { exportDebugLogs, initCrashReporter, initLogging, startNetLog, write as writeLog } from "./logging"
@@ -43,7 +44,19 @@ import {
   restoreMainWindows,
 } from "./windows"
 import { createWslServersController } from "./wsl/servers"
-import { registerModelsWithOmniaServer, startLocalOmniaServer, type LocalOmniaServer } from "./omnia/server-host"
+import { createAgentWorking } from "./omnia/agent-working"
+import {
+  destroyBrowserViewBridge,
+  registerBrowserViewIpc,
+  startBrowserViewBridge,
+} from "./omnia/browser-view"
+import {
+  agentEventSource,
+  createRemoteBrowserHandler,
+  readRegisteredComputerId,
+  setNativeActionObserver,
+  setRemoteBrowserHandler,
+} from "./omnia/remote-agent"
 import { registerWslIpcHandlers } from "./wsl/ipc"
 import { spawnWslSidecar } from "./wsl/sidecar"
 import { migrate } from "./migrate"
@@ -67,7 +80,6 @@ const jsCallStackFeature = "DocumentPolicyIncludeJSCallStacksInCrashReports"
 
 let logger: ReturnType<typeof initLogging>
 let server: SidecarListener | null = null
-let omniaServer: LocalOmniaServer | null = null
 
 const pendingDeepLinks: string[] = []
 
@@ -90,8 +102,10 @@ function emitDeepLinks(urls: string[]) {
 async function killSidecar() {
   if (!server) return
   const current = server
-  server = null
+  // Keep the reference until the stop settles so a failed teardown can be
+  // retried instead of leaking the child process.
   await current.stop()
+  server = null
 }
 
 function ensureLoopbackNoProxy() {
@@ -166,9 +180,16 @@ const main = Effect.gen(function* () {
       },
     },
   )
+  // Teardown must never reject: these callers are quit, relaunch and signal
+  // paths, where a rejection would skip `app.quit()` and surface as an
+  // unhandled rejection instead of the intended shutdown.
   const stopSidecars = async () => {
-    await killSidecar()
-    wslServers.stopAll()
+    try {
+      await killSidecar()
+      wslServers.stopAll()
+    } catch (error) {
+      logger.error("failed to stop sidecars", error)
+    }
   }
   const relaunch = () => {
     setAppQuitting()
@@ -193,6 +214,18 @@ const main = Effect.gen(function* () {
   ensureLoopbackNoProxy()
   useEnvProxy()
   app.commandLine.appendSwitch("proxy-bypass-list", "<-loopback>")
+  // Keep the renderer at full speed: no timer throttling, no backgrounding of
+  // occluded windows, and no IPC flood protection pausing for the agent's
+  // high-frequency event streams.
+  app.commandLine.appendSwitch("disable-renderer-backgrounding")
+  app.commandLine.appendSwitch("disable-background-timer-throttling")
+  app.commandLine.appendSwitch("disable-backgrounding-occluded-windows")
+  app.commandLine.appendSwitch("disable-ipc-flooding-protection")
+  // Chromium's background services (component updater, domain reliability,
+  // metrics) are pure startup noise for a locally hosted desktop app.
+  app.commandLine.appendSwitch("disable-background-networking")
+  app.commandLine.appendSwitch("disable-component-update")
+  app.commandLine.appendSwitch("disable-domain-reliability")
   const features = app.commandLine.getSwitchValue("enable-features")
   app.commandLine.appendSwitch("enable-features", features ? `${jsCallStackFeature},${features}` : jsCallStackFeature)
   if (!app.isPackaged) app.commandLine.appendSwitch("remote-debugging-port", "9222")
@@ -256,6 +289,40 @@ const main = Effect.gen(function* () {
 
   yield* Effect.promise(() => app.whenReady())
 
+  // A missing embedded-browser bridge must not stop the app: browser actions
+  // then fail closed at the control plane. When it starts, every remote-agent
+  // registration serves them through the local webview runtime.
+  const browserBridge = yield* Effect.promise(async () => {
+    try {
+      return await startBrowserViewBridge()
+    } catch (error) {
+      logger.warn("failed to start the embedded browser bridge", error)
+      return undefined
+    }
+  })
+  if (browserBridge !== undefined) {
+    setRemoteBrowserHandler(createRemoteBrowserHandler(new Browser.BrowserRuntime({ embedded: browserBridge })))
+    app.once("will-quit", () =>
+      void destroyBrowserViewBridge().catch((error) => logger.error("failed to stop the embedded browser bridge", error)),
+    )
+  }
+
+  const agentWorking = createAgentWorking({ computerId: () => readRegisteredComputerId() })
+  // The runtime's grab notifications are the only local signal that the user
+  // took input back with Escape; without them a stale freeze outlives the run.
+  agentWorking.attach(agentEventSource())
+  setNativeActionObserver({
+    started: () => agentWorking.notifyActionStart(),
+    ended: (ok: boolean) => agentWorking.notifyActionEnd(ok),
+  })
+  // before-quit covers relaunch and the updater install, which never reach
+  // will-quit; the release must not wait behind a freeze that may be hung.
+  app.on("before-quit", () => agentWorking.releaseNow())
+  app.once("will-quit", () => {
+    setNativeActionObserver(undefined)
+    agentWorking.destroy()
+  })
+
   if (!TEST_ONBOARDING) migrate()
   yield* Effect.promise(() => cleanupStoreFiles(app.getPath("userData"))).pipe(
     Effect.tap((result) =>
@@ -308,6 +375,7 @@ const main = Effect.gen(function* () {
     updater,
     showUpdater: () => showUpdaterDialog(updater, true),
     setBackgroundColor: (color) => setBackgroundColor(color),
+    setAgentWorking: (sourceId, working) => agentWorking.setRendererWorking(sourceId, working),
     exportDebugLogs: () => exportDebugLogs(),
     recordFatalRendererError: (error) => writeLog("renderer", "fatal renderer error", { ...error }, "error"),
     setNativeTranslations: (bundle) => {
@@ -315,10 +383,13 @@ const main = Effect.gen(function* () {
     },
   })
   registerWslIpcHandlers(wslServers)
-  void updater.start()
-  const updateTimer = setInterval(() => void updater.check(), 10 * 60 * 1000)
-  updateTimer.unref()
-  app.once("will-quit", () => clearInterval(updateTimer))
+  registerBrowserViewIpc()
+  if (UPDATER_ENABLED) {
+    void updater.start()
+    const updateTimer = setInterval(() => void updater.check(), 10 * 60 * 1000)
+    updateTimer.unref()
+    app.once("will-quit", () => clearInterval(updateTimer))
+  }
   yield* Effect.promise(() => startNetLog()).pipe(
     Effect.catch((error) =>
       Effect.sync(() => {
@@ -333,25 +404,6 @@ const main = Effect.gen(function* () {
     ensureLoopbackNoProxy()
     useEnvProxy()
 
-    const localServer = yield* Effect.promise(() => startLocalOmniaServer()).pipe(
-      Effect.tap((handle) =>
-        Effect.sync(() => {
-          if (handle) logger.log("omnia server started", { url: handle.url, serverId: handle.serverId })
-          else logger.log("omnia computer runtime unavailable on this platform")
-        }),
-      ),
-      Effect.catch((error) =>
-        Effect.sync(() => {
-          logger.warn("omnia server failed to start", error)
-          return undefined
-        }),
-      ),
-    )
-    omniaServer = localServer ?? null
-    app.once("will-quit", () => {
-      void omniaServer?.stop().catch(() => undefined)
-    })
-
     if (SIDECAR_VERSION === "v2") {
       logger.log("spawning v2 sidecar")
       const sidecar = yield* Effect.promise(() => startBackgroundCli(logger, shellEnv?.XDG_STATE_HOME))
@@ -360,15 +412,6 @@ const main = Effect.gen(function* () {
         username: sidecar.username,
         password: sidecar.password,
       })
-      if (omniaServer) {
-        void registerModelsWithOmniaServer(omniaServer, {
-          url: sidecar.url,
-          username: sidecar.username,
-          password: sidecar.password,
-        })
-          .then((count) => logger.log("registered models with the omnia server", { count }))
-          .catch((error) => logger.warn("model registration failed", error))
-      }
 
       if (process.platform === "win32") {
         void wslServers.initialize().catch((error) => logger.error("wsl server initialization failed", error))
@@ -420,11 +463,6 @@ const main = Effect.gen(function* () {
       username: "opencode",
       password,
     })
-    if (omniaServer) {
-      void registerModelsWithOmniaServer(omniaServer, { url, username: "opencode", password })
-        .then((count) => logger.log("registered models with the omnia server", { count }))
-        .catch((error) => logger.warn("model registration failed", error))
-    }
 
     if (process.platform === "win32") {
       void wslServers.initialize().catch((error) => logger.error("wsl server initialization failed", error))

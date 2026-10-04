@@ -114,16 +114,16 @@ function useSystemCertificates() {
     nodeTls.setDefaultCACertificates([
       ...new Set([...nodeTls.getCACertificates("default"), ...nodeTls.getCACertificates("system")]),
     ])
-  } catch (error) {
-    console.warn("failed to load system certificates", error)
+  } catch {
+    // System certificate discovery is best effort.
   }
 }
 
 function useEnvProxy() {
   try {
     ;(http as NodeHttpWithEnvProxy).setGlobalProxyFromEnv()
-  } catch (error) {
-    console.warn("failed to load proxy environment", error)
+  } catch {
+    // Proxy environment discovery is best effort.
   }
 }
 

@@ -1,4 +1,7 @@
 import type { DesktopMenuAction } from "@opencode-ai/app/desktop-menu"
+import type { BrowserPanelPlatform, GitHubAuthPlatform } from "@opencode-ai/app/context/platform"
+import type { ComputerPlatform } from "@opencode-ai/app/computers"
+import type { ComputerUsePlatform } from "@opencode-ai/app/computer-use"
 import type { WslServersPlatform } from "@opencode-ai/app/wsl/types"
 import type { UpdaterState } from "@opencode-ai/app/updater"
 import type { DesktopNativeBundle } from "@opencode-ai/app/i18n/desktop-native"
@@ -130,6 +133,10 @@ export type ElectronAPI = {
   omnia: OmniaAPI
   superskills: SuperskillPlatform
   memory: MemoryPlatform
+  auth: GitHubAuthPlatform
+  computers: ComputerPlatform
+  computerUse: ComputerUsePlatform
+  browserPanel: BrowserPanelPlatform
   killSidecar: () => Promise<void>
   installCli: () => Promise<string>
   awaitInitialization: () => Promise<ServerReadyData>
@@ -196,6 +203,7 @@ export type ElectronAPI = {
   setTitlebar: (theme: TitlebarTheme) => Promise<void>
   runDesktopMenuAction: (action: DesktopMenuAction) => Promise<void>
   setBackgroundColor: (color: string) => Promise<void>
+  setAgentWorking: (working: boolean) => void
   exportDebugLogs: () => Promise<string>
   setForceFocus: (enabled: boolean) => Promise<void>
   recordFatalRendererError: (error: FatalRendererError) => Promise<void>

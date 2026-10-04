@@ -9,9 +9,13 @@ async function serverCall(path: string, method: "GET" | "POST" | "DELETE", body?
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })
-  const json = (await response.json()) as Record<string, unknown>
-  if (response.ok !== true || json.ok !== true) {
-    throw new Error(typeof json.error === "string" ? json.error : `Request failed with HTTP ${response.status}.`)
+  // A proxy error page, an empty body, or a truncated response is not JSON.
+  // Report the HTTP status instead of surfacing an opaque SyntaxError from
+  // response.json() that hides why the call failed.
+  const parsed = await response.json().catch(() => undefined)
+  const json = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined
+  if (response.ok !== true || json?.ok !== true) {
+    throw new Error(typeof json?.error === "string" ? json.error : `Request failed with HTTP ${response.status}.`)
   }
   return json
 }

@@ -1,3 +1,4 @@
+import { requiredCapabilities } from "@opencode-ai/omnia/actions/backend"
 import type { CapabilitySupport, FindResult, Observation } from "@opencode-ai/omnia/protocol"
 import type { OmniaDriverRegistry } from "./registry"
 import {
@@ -5,6 +6,7 @@ import {
   isOmniaPermissionId,
   isRecord,
   OMNIA_MAX_RESULT_BYTES,
+  OmniaSizeLimitError,
   parseOmniaActionResult,
   parseOmniaCapabilities,
   parseOmniaComputerInfo,
@@ -76,7 +78,9 @@ async function observe(registry: OmniaDriverRegistry, request: OmniaObserveReque
   if (!driver.observe) return unavailable()
   const permission = permissionFailure(
     driver,
-    request.includeScreenshot ? ["observe", "screenshot", "screen-capture"] : ["observe", "accessibility-tree"],
+    request.includeScreenshot
+      ? [...requiredCapabilities("observe"), ...requiredCapabilities("screenshot")]
+      : requiredCapabilities("observe"),
   )
   if (permission) return permission
   const result = await callValue(() => driver.observe!(request))
@@ -88,7 +92,7 @@ async function find(registry: OmniaDriverRegistry, request: OmniaFindRequest): P
   const driver = registry.get()
   if (!driver) return unavailable("driver_unavailable")
   if (!driver.find) return unavailable()
-  const permission = permissionFailure(driver, ["find", "accessibility-tree"])
+  const permission = permissionFailure(driver, requiredCapabilities("find"))
   if (permission) return permission
   const result = await callValue(() => driver.find!(request))
   if (result.status !== "ok") return result
@@ -102,7 +106,8 @@ async function execute(
   const driver = registry.get()
   if (!driver) return unavailable("driver_unavailable")
   if (!driver.execute || !driver.revalidateTarget) return unavailable()
-  const permission = permissionFailure(driver, actionCapabilities(request))
+  if (isExpiredTarget(request.target)) return blocked("target_stale")
+  const permission = permissionFailure(driver, requiredCapabilities(request.action.type))
   if (permission) return permission
   const revalidation = await callValue(() => driver.revalidateTarget!(request.target))
   if (revalidation.status !== "ok") return revalidation
@@ -110,7 +115,7 @@ async function execute(
   if (unwrapped.status !== "ok") return unwrapped
   const target = mapValue(unwrapped.value, parseOmniaTargetReference)
   if (target.status !== "ok") return target
-  if (!sameTarget(request.target, target.value)) return blocked("target_stale")
+  if (isExpiredTarget(target.value) || !sameTarget(request.target, target.value)) return blocked("target_stale")
   const result = await callValue(() => driver.execute!(withOmniaTarget(request.action, target.value)))
   if (result.status !== "ok") return result
   const actionResult = mapValue(result.value, parseOmniaActionResult)
@@ -133,25 +138,16 @@ function sameTarget(expected: OmniaTargetReference, actual: OmniaTargetReference
     expected.generation === actual.generation &&
     expected.observationId === actual.observationId &&
     expected.source === actual.source &&
-    expected.backend === actual.backend
+    expected.backend === actual.backend &&
+    expected.role === actual.role
   )
 }
 
-function actionCapabilities(request: OmniaExecuteRequest) {
-  if (
-    request.action.type === "click" ||
-    request.action.type === "doubleclick" ||
-    request.action.type === "rightclick"
-  ) {
-    return ["mouse", "pointer"]
-  }
-  if (request.action.type === "type") return ["text-input", "keyboard"]
-  if (request.action.type === "key") return ["keyboard", "input"]
-  if (request.action.type === "scroll") return ["scroll", "pointer"]
-  return ["focus", "application-focus"]
+function isExpiredTarget(target: OmniaTargetReference) {
+  return target.expiresAt !== undefined && target.expiresAt <= Date.now()
 }
 
-function permissionFailure(driver: OmniaDriver, capabilities: string[]) {
+function permissionFailure(driver: OmniaDriver, capabilities: readonly string[]) {
   const permission = requiredPermission(driver.capabilities ?? [], capabilities)
   if (!permission) return
   return {
@@ -168,17 +164,19 @@ function resultPermission(driver: OmniaDriver, error: unknown, limitations: read
   return permissionFailure(driver, [])
 }
 
+const GRANTED_PERMISSION_STATES = new Set(["granted", "not-required"])
+
+// Every required capability must be explicitly granted by the permissions that
+// declare it. A capability no permission governs has no requirement to satisfy,
+// and a required name is never substituted with a different one.
 function requiredPermission(capabilities: readonly CapabilitySupport[], requested: readonly string[]) {
-  return capabilities
-    .flatMap((capability) => capability.permissions ?? [])
-    .find(
-      (permission) =>
-        (permission.status === "prompt" ||
-          permission.status === "denied" ||
-          permission.status === "restricted" ||
-          permission.status === "unknown") &&
-        (requested.length === 0 || permission.capabilities?.some((capability) => requested.includes(capability))),
-    )
+  const permissions = capabilities.flatMap((capability) => capability.permissions ?? [])
+  if (requested.length === 0) {
+    return permissions.find((permission) => !GRANTED_PERMISSION_STATES.has(permission.status))
+  }
+  return requested
+    .flatMap((capability) => permissions.filter((permission) => permission.capabilities?.includes(capability)))
+    .find((permission) => !GRANTED_PERMISSION_STATES.has(permission.status))
 }
 
 function isRecordError(value: unknown): value is { code: string } {
@@ -206,7 +204,8 @@ function mapValue<T>(value: unknown, parse: (value: unknown) => T): OmniaResult<
   if (!isOmniaPayloadWithinSize(value, OMNIA_MAX_RESULT_BYTES)) return blocked("result_too_large")
   try {
     return { ok: true, status: "ok", value: parse(value) }
-  } catch {
+  } catch (error) {
+    if (error instanceof OmniaSizeLimitError) return blocked("result_too_large")
     return blocked("invalid_result")
   }
 }

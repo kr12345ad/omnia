@@ -2,6 +2,7 @@ import { MainLogger } from "electron-log"
 import log from "electron-log/main.js"
 import { app, crashReporter, netLog, shell } from "electron"
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
+import type { Stats } from "node:fs"
 import { ZipWriter, BlobWriter, BlobReader } from "@zip.js/zip.js"
 import { dirname, join } from "node:path"
 import { homedir } from "node:os"
@@ -161,11 +162,21 @@ function collect(dir: string, prefix: string): Entry[] {
   const cutoff = Date.now() - EXPORT_WINDOW
   const result: Entry[] = []
   const walk = (current: string) => {
-    for (const entry of readdirSync(current)) {
-      const file = join(current, entry)
-      const info = statSync(file)
-      if (info.isDirectory()) {
+    // A log directory can hold entries that vanish or cannot be read while the
+    // export runs, and a symlinked directory would walk in circles forever.
+    const entries = readdirSync(current, { withFileTypes: true })
+    for (const entry of entries) {
+      const file = join(current, entry.name)
+      if (entry.isSymbolicLink()) continue
+      if (entry.isDirectory()) {
         walk(file)
+        continue
+      }
+      if (!entry.isFile()) continue
+      let info: Stats
+      try {
+        info = statSync(file)
+      } catch {
         continue
       }
       if (info.mtimeMs < cutoff) continue
@@ -174,7 +185,11 @@ function collect(dir: string, prefix: string): Entry[] {
       result.push({ name: join(prefix, file.slice(dir.length + 1)).replace(/\\/g, "/"), path: file })
     }
   }
-  walk(dir)
+  try {
+    walk(dir)
+  } catch (error) {
+    write("main", "debug log collection stopped early", { dir, error }, "warn")
+  }
   return result
 }
 

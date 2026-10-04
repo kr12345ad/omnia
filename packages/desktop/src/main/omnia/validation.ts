@@ -4,7 +4,10 @@ import {
   isCapabilitySupport,
   isComputerInfo,
   isFindResult,
+  isJsonValue,
+  isMetadata,
   isObservation,
+  SCROLL_DIRECTIONS,
 } from "@opencode-ai/omnia/protocol"
 import type {
   ActionResult,
@@ -14,6 +17,7 @@ import type {
   FindResult,
   Modifier,
   Observation,
+  ScrollDirection,
 } from "@opencode-ai/omnia/protocol"
 import type {
   OmniaAction,
@@ -31,6 +35,22 @@ export const OMNIA_MAX_EVENT_BYTES = 64 * 1024
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/
 const SUBSCRIPTION_ID = /^[A-Za-z0-9_-]{16,128}$/
 const MODIFIER_ORDER: Modifier[] = ["alt", "control", "meta", "shift"]
+const CHORD_KEY = /^[A-Za-z0-9]+(?:[+-][A-Za-z0-9]+)*$/
+const OMNIA_MAX_PAYLOAD_DEPTH = 24
+const OMNIA_MAX_PAYLOAD_NODES = 100_000
+const OMNIA_SIZE_OVERFLOW = "size-overflow"
+
+type OmniaMeasurement = number | typeof OMNIA_SIZE_OVERFLOW | undefined
+
+// Size overflow is a distinct boundary condition from a malformed payload: a
+// structurally valid value that exceeds the traversal budget must be reported
+// as too large, not as invalid, so callers can map it to result_too_large.
+export class OmniaSizeLimitError extends TypeError {
+  constructor() {
+    super("Omnia payload exceeds size limits")
+    this.name = "OmniaSizeLimitError"
+  }
+}
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false
@@ -39,11 +59,14 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function assertOmniaPayloadSize(value: unknown, limit = OMNIA_MAX_PAYLOAD_BYTES) {
-  if (measureOmniaPayload(value, limit) === undefined) invalidPayload()
+  const size = measureOmniaPayload(value, limit)
+  if (size === undefined) invalidPayload()
+  if (size === OMNIA_SIZE_OVERFLOW || size > limit) sizeLimit()
 }
 
 export function isOmniaPayloadWithinSize(value: unknown, limit: number) {
-  return measureOmniaPayload(value, limit) !== undefined
+  const size = measureOmniaPayload(value, limit)
+  return typeof size === "number" && size <= limit
 }
 
 export function parseOmniaSubscriptionId(value: unknown) {
@@ -74,11 +97,22 @@ export function parseOmniaObserveRequest(value: unknown = {}): OmniaObserveReque
 
 export function parseOmniaFindRequest(value: unknown): OmniaFindRequest {
   assertOmniaPayloadSize(value)
-  assertShape(value, ["query", "role", "name", "source", "backend", "limit", "includeOffscreen", "observationId"])
+  assertShape(value, [
+    "query",
+    "role",
+    "name",
+    "window",
+    "source",
+    "backend",
+    "limit",
+    "includeOffscreen",
+    "observationId",
+  ])
   const query = readIdentifier(value.query, 512).trim()
   if (!query) invalidPayload()
   if (value.role !== undefined) readIdentifier(value.role, 256)
   if (value.name !== undefined) readIdentifier(value.name, 4_096)
+  if (value.window !== undefined) readIdentifier(value.window, 512)
   if (value.source !== undefined) readIdentifier(value.source, 256)
   if (value.backend !== undefined) readIdentifier(value.backend, 256)
   if (value.observationId !== undefined) readIdentifier(value.observationId, 512)
@@ -88,6 +122,7 @@ export function parseOmniaFindRequest(value: unknown): OmniaFindRequest {
     query,
     role: value.role as string | undefined,
     name: value.name as string | undefined,
+    window: value.window as string | undefined,
     source: value.source as string | undefined,
     backend: value.backend as string | undefined,
     limit: (value.limit as number | undefined) ?? 50,
@@ -107,21 +142,40 @@ export function parseOmniaExecuteRequest(value: unknown): OmniaExecuteRequest {
 
 export function parseOmniaTargetReference(value: unknown): OmniaTargetReference {
   assertOmniaPayloadSize(value)
-  assertShape(value, ["elementId", "generation", "observationId", "source", "backend", "role", "expiresAt"])
+  assertShape(value, [
+    "kind",
+    "elementId",
+    "generation",
+    "observationId",
+    "source",
+    "backend",
+    "role",
+    "locator",
+    "expiresAt",
+    "metadata",
+  ])
+  if (value.kind !== undefined && value.kind !== "element") invalidPayload()
   if (!isIntegerInRange(value.generation, 0, Number.MAX_SAFE_INTEGER)) invalidPayload()
   if (value.expiresAt !== undefined && !isTimestamp(value.expiresAt)) invalidPayload()
   if (value.observationId !== undefined) readIdentifier(value.observationId, 512)
   if (value.source !== undefined) readIdentifier(value.source, 256)
   if (value.backend !== undefined) readIdentifier(value.backend, 256)
   if (value.role !== undefined) readIdentifier(value.role, 256)
+  const locator = value.locator
+  if (locator !== undefined && !isJsonValue(locator)) invalidPayload()
+  const metadata = value.metadata
+  if (metadata !== undefined && !isMetadata(metadata)) invalidPayload()
   return {
     elementId: readIdentifier(value.elementId, 512),
     generation: readGeneration(value.generation),
+    ...(value.kind !== undefined ? { kind: "element" as const } : {}),
     ...(value.observationId !== undefined ? { observationId: readIdentifier(value.observationId, 512) } : {}),
     ...(value.source !== undefined ? { source: readIdentifier(value.source, 256) } : {}),
     ...(value.backend !== undefined ? { backend: readIdentifier(value.backend, 256) } : {}),
     ...(value.role !== undefined ? { role: readIdentifier(value.role, 256) } : {}),
+    ...(locator !== undefined ? { locator } : {}),
     ...(value.expiresAt !== undefined ? { expiresAt: readTimestamp(value.expiresAt) } : {}),
+    ...(metadata !== undefined ? { metadata } : {}),
   }
 }
 
@@ -137,31 +191,31 @@ export function withOmniaTarget(action: OmniaAction, target: OmniaTargetReferenc
 }
 
 export function parseOmniaObservation(value: unknown): Observation {
-  assertOmniaPayloadSize(value, OMNIA_MAX_RESULT_BYTES)
+  assertOmniaResultSize(value)
   if (!isObservation(value)) invalidResult()
   return structuredClone(value)
 }
 
 export function parseOmniaFindResult(value: unknown): FindResult {
-  assertOmniaPayloadSize(value, OMNIA_MAX_RESULT_BYTES)
+  assertOmniaResultSize(value)
   if (!isFindResult(value)) invalidResult()
   return structuredClone(value)
 }
 
 export function parseOmniaActionResult(value: unknown): ActionResult {
-  assertOmniaPayloadSize(value, OMNIA_MAX_RESULT_BYTES)
+  assertOmniaResultSize(value)
   if (!isActionResult(value)) invalidResult()
   return structuredClone(value)
 }
 
 export function parseOmniaCapabilities(value: unknown): CapabilitySupport[] {
-  assertOmniaPayloadSize(value, OMNIA_MAX_RESULT_BYTES)
+  assertOmniaResultSize(value)
   if (!Array.isArray(value) || value.length > 256 || value.some((item) => !isCapabilitySupport(item))) invalidResult()
   return structuredClone(value) as CapabilitySupport[]
 }
 
 export function parseOmniaComputerInfo(value: unknown): ComputerInfo {
-  assertOmniaPayloadSize(value, OMNIA_MAX_RESULT_BYTES)
+  assertOmniaResultSize(value)
   if (!isComputerInfo(value)) invalidResult()
   return structuredClone(value)
 }
@@ -241,13 +295,23 @@ function parseOmniaAction(value: unknown): OmniaAction {
     return { type: "type", text: value.text }
   }
   if (value.type === "key") {
-    assertShape(value, ["type", "key", "modifiers"])
-    return { type: "key", key: readKey(value.key), modifiers: parseModifiers(value.modifiers) }
+    assertShape(value, ["type", "key", "keys", "modifiers"])
+    const keys = value.keys
+    return {
+      type: "key",
+      key: readKey(value.key),
+      ...(keys !== undefined ? { keys: readKey(keys) } : {}),
+      modifiers: parseModifiers(value.modifiers),
+    }
   }
   if (value.type === "scroll") {
-    assertShape(value, ["type", "deltaX", "deltaY", "amount"])
+    assertShape(value, ["type", "direction", "deltaX", "deltaY", "amount"])
     if (
-      (value.deltaX === undefined && value.deltaY === undefined && value.amount === undefined) ||
+      (value.direction === undefined &&
+        value.deltaX === undefined &&
+        value.deltaY === undefined &&
+        value.amount === undefined) ||
+      (value.direction !== undefined && !SCROLL_DIRECTIONS.some((direction) => direction === value.direction)) ||
       (value.deltaX !== undefined && !isFiniteNumber(value.deltaX)) ||
       (value.deltaY !== undefined && !isFiniteNumber(value.deltaY)) ||
       (value.amount !== undefined && (!isFiniteNumber(value.amount) || value.amount < 0)) ||
@@ -259,6 +323,7 @@ function parseOmniaAction(value: unknown): OmniaAction {
     }
     return {
       type: "scroll",
+      direction: value.direction as ScrollDirection | undefined,
       deltaX: value.deltaX as number | undefined,
       deltaY: value.deltaY as number | undefined,
       amount: value.amount as number | undefined,
@@ -288,7 +353,7 @@ function parseStringArray(value: unknown, maxItems: number, maxLength: number) {
 
 function readKey(value: unknown) {
   const key = readIdentifier(value, 64)
-  if (key.length > 1 && !/^(?:[A-Za-z0-9]+|F\d{1,2})$/.test(key)) invalidPayload()
+  if (key.length > 1 && !CHORD_KEY.test(key)) invalidPayload()
   return key
 }
 
@@ -335,13 +400,19 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value)
 }
 
+function assertOmniaResultSize(value: unknown) {
+  const size = measureOmniaPayload(value, OMNIA_MAX_RESULT_BYTES)
+  if (size === undefined) invalidResult()
+  if (size === OMNIA_SIZE_OVERFLOW || size > OMNIA_MAX_RESULT_BYTES) sizeLimit()
+}
+
 function measureOmniaPayload(
   value: unknown,
   limit: number,
   depth = 0,
   state = { nodes: 0, seen: new WeakSet<object>() },
-): number | undefined {
-  if (depth > 24 || ++state.nodes > 100_000) return
+): OmniaMeasurement {
+  if (depth > OMNIA_MAX_PAYLOAD_DEPTH || ++state.nodes > OMNIA_MAX_PAYLOAD_NODES) return OMNIA_SIZE_OVERFLOW
   if (value === null) return 4
   if (typeof value === "string") return Buffer.byteLength(value, "utf8") + 2
   if (typeof value === "number") return Number.isFinite(value) ? String(value).length + 1 : undefined
@@ -359,7 +430,7 @@ function measureObject(
   limit: number,
   depth: number,
   state: { nodes: number; seen: WeakSet<object> },
-): number | undefined {
+): OmniaMeasurement {
   if (Array.isArray(value)) {
     const keys = Reflect.ownKeys(value)
     if (keys.length !== value.length + 1 || keys.some((key) => typeof key !== "string")) return
@@ -368,7 +439,10 @@ function measureObject(
       const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
       if (!descriptor?.enumerable || !("value" in descriptor)) return
       const size = measureOmniaPayload(descriptor.value, limit, depth + 1, state)
-      if (size === undefined || (total += size) > limit) return
+      if (size === undefined) return
+      if (size === OMNIA_SIZE_OVERFLOW) return OMNIA_SIZE_OVERFLOW
+      total += size
+      if (total > limit) return OMNIA_SIZE_OVERFLOW
     }
     return total + (value.length > 0 ? Math.max(1, value.length) : 0)
   }
@@ -382,7 +456,10 @@ function measureObject(
     const descriptor = Object.getOwnPropertyDescriptor(value, key)
     if (!descriptor?.enumerable || !("value" in descriptor)) return
     const size = measureOmniaPayload(descriptor.value, limit, depth + 1, state)
-    if (size === undefined || (total += Buffer.byteLength(key, "utf8") + 3 + size) > limit) return
+    if (size === undefined) return
+    if (size === OMNIA_SIZE_OVERFLOW) return OMNIA_SIZE_OVERFLOW
+    total += Buffer.byteLength(key, "utf8") + 3 + size
+    if (total > limit) return OMNIA_SIZE_OVERFLOW
   }
   return total + Math.max(0, keys.length - 1)
 }
@@ -393,4 +470,8 @@ function invalidPayload(): never {
 
 function invalidResult(): never {
   throw new TypeError("Invalid Omnia result")
+}
+
+function sizeLimit(): never {
+  throw new OmniaSizeLimitError()
 }

@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en" class="overlay-paused">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Omnia</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --halo-radius: 0px;
+        --halo-deep: 37, 99, 235;
+        --halo-base: 59, 130, 246;
+        --halo-light: 96, 165, 250;
+        --halo-sky: 147, 197, 253;
+        --halo-cyan: 103, 232, 249;
+        --halo-violet: 129, 140, 248;
+        --halo-pale: 219, 234, 254;
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+      }
+
+      /* The halo is a stack of soft blue light: a faint resting ring, two wide
+         blurred bands, a crisp traveling line, and a narrow shimmer. Every band
+         is a gradient ring clipped by a mask, then blurred by its parent, so the
+         glow spreads inward across the screen edge and the middle stays clear. */
+      .halo {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        border-radius: var(--halo-radius);
+        animation: halo-breathe 6s ease-in-out infinite;
+        will-change: opacity;
+      }
+
+      .halo-base {
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        border: 2px solid rgba(var(--halo-base), 0.2);
+        box-shadow: inset 0 0 32px rgba(var(--halo-base), 0.14);
+      }
+
+      .halo-band {
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        pointer-events: none;
+      }
+
+      .halo-ring {
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        padding: var(--ring-width, 3px);
+        -webkit-mask:
+          linear-gradient(#000 0 0) content-box,
+          linear-gradient(#000 0 0);
+        -webkit-mask-composite: xor;
+        mask:
+          linear-gradient(#000 0 0) content-box,
+          linear-gradient(#000 0 0);
+        mask-composite: exclude;
+      }
+
+      .halo-ring::before {
+        content: "";
+        position: absolute;
+        inset: -45%;
+        background: var(--ring-gradient);
+        animation: halo-travel var(--ring-duration, 10s) linear infinite;
+        will-change: transform;
+      }
+
+      .halo-band-outer {
+        filter: blur(26px) saturate(1.15);
+        opacity: 0.55;
+      }
+
+      .halo-band-outer .halo-ring {
+        --ring-width: 10px;
+        --ring-duration: 17s;
+        --ring-gradient: conic-gradient(
+          from 0deg,
+          rgba(var(--halo-deep), 0) 0deg,
+          rgba(var(--halo-base), 0.34) 60deg,
+          rgba(var(--halo-light), 0.46) 120deg,
+          rgba(var(--halo-violet), 0.28) 190deg,
+          rgba(var(--halo-sky), 0.4) 250deg,
+          rgba(var(--halo-cyan), 0.3) 300deg,
+          rgba(var(--halo-deep), 0) 360deg
+        );
+      }
+
+      .halo-band-mid {
+        filter: blur(12px) saturate(1.2);
+        opacity: 0.62;
+      }
+
+      .halo-band-mid .halo-ring {
+        --ring-width: 5px;
+        --ring-duration: 12s;
+        --ring-gradient: conic-gradient(
+          from 40deg,
+          rgba(var(--halo-base), 0) 0deg,
+          rgba(var(--halo-base), 0.5) 60deg,
+          rgba(var(--halo-sky), 0.55) 130deg,
+          rgba(var(--halo-violet), 0.4) 200deg,
+          rgba(var(--halo-cyan), 0.45) 260deg,
+          rgba(var(--halo-base), 0.35) 310deg,
+          rgba(var(--halo-base), 0) 360deg
+        );
+      }
+
+      .halo-band-mid .halo-ring::before {
+        animation-direction: reverse;
+      }
+
+      .halo-band-core {
+        filter: blur(0.2px) saturate(1.15);
+        opacity: 1;
+      }
+
+      .halo-band-core .halo-ring {
+        --ring-width: 3px;
+        --ring-duration: 8s;
+        --ring-gradient: conic-gradient(
+          from 0deg,
+          rgba(var(--halo-deep), 0.2) 0deg,
+          rgba(var(--halo-base), 0.6) 40deg,
+          rgba(var(--halo-pale), 1) 72deg,
+          rgba(var(--halo-sky), 0.75) 96deg,
+          rgba(var(--halo-cyan), 0.5) 118deg,
+          rgba(var(--halo-deep), 0.2) 155deg,
+          rgba(var(--halo-violet), 0.45) 205deg,
+          rgba(var(--halo-pale), 0.88) 240deg,
+          rgba(var(--halo-base), 0.55) 268deg,
+          rgba(var(--halo-deep), 0.2) 320deg,
+          rgba(var(--halo-deep), 0.2) 360deg
+        );
+      }
+
+      .halo-band-shimmer {
+        filter: blur(7px);
+        opacity: 0.45;
+      }
+
+      .halo-band-shimmer .halo-ring {
+        --ring-width: 3px;
+        --ring-duration: 6s;
+        --ring-gradient: conic-gradient(
+          from 180deg,
+          rgba(var(--halo-pale), 0) 0deg,
+          rgba(var(--halo-pale), 0.75) 20deg,
+          rgba(var(--halo-pale), 0) 48deg,
+          rgba(var(--halo-pale), 0) 360deg
+        );
+      }
+
+      .halo-band-shimmer .halo-ring::before {
+        animation-direction: reverse;
+      }
+
+      html.overlay-paused .halo,
+      html.overlay-paused .halo-ring::before {
+        animation-play-state: paused;
+      }
+
+      @keyframes halo-travel {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @keyframes halo-breathe {
+        0%,
+        100% {
+          opacity: 0.82;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .halo {
+          animation: none;
+          opacity: 0.9;
+        }
+        .halo-ring::before {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="halo" aria-hidden="true">
+      <div class="halo-base"></div>
+      <div class="halo-band halo-band-outer"><div class="halo-ring"></div></div>
+      <div class="halo-band halo-band-mid"><div class="halo-ring"></div></div>
+      <div class="halo-band halo-band-core"><div class="halo-ring"></div></div>
+      <div class="halo-band halo-band-shimmer"><div class="halo-ring"></div></div>
+    </div>
+    <script type="module" src="./overlay.ts"></script>
+  </body>
+</html>

@@ -165,6 +165,12 @@ function runInteractiveCommand(command: string, args: string[], opts: RunWslOpti
         })()
       : undefined
 
+    // addEventListener never fires for an already-aborted signal, so an
+    // install cancelled before it reached this point would keep running for
+    // the full 15 minute timeout.
+    if (opts.signal?.aborted) abortHandler()
+    if (settled) return
+
     child.onData((data: string) => {
       stdout += data
     })

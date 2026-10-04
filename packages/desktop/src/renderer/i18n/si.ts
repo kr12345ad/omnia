@@ -1,4 +1,4 @@
-export const dict: Record<string, string> = {
+export const dict = {
   "desktop.menu.checkForUpdates": "යාවත්කාලීන සඳහා පරීක්ෂා කරන්න...",
   "desktop.menu.installCli": "CLI ස්ථාපනය කරන්න...",
   "desktop.menu.reloadWebview": "Webview නැවත පූරණය කරන්න",

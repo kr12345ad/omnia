@@ -23,12 +23,18 @@ export function createDesktopDraftStore(filename: string) {
   db.select({ value: documents.value })
     .from(documents)
     .all()
-    .forEach(({ value }) =>
-      JSON.parse(value, (_key, item) => {
-        if (item?.blob && typeof item.blob.id === "string") used.add(item.blob.id)
-        return item
-      }),
-    )
+    .forEach(({ value }) => {
+      try {
+        JSON.parse(value, (_key, item) => {
+          if (item?.blob && typeof item.blob.id === "string") used.add(item.blob.id)
+          return item
+        })
+      } catch {
+        // A row that is not JSON references no blob. It must not abort startup:
+        // the renderer stores arbitrary strings, so one bad row would otherwise
+        // keep failing every launch from now on.
+      }
+    })
   db.select({ id: blobs.id })
     .from(blobs)
     .all()
