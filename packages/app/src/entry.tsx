@@ -97,6 +97,10 @@ if (!(root instanceof HTMLElement) && import.meta.env.DEV) {
 }
 
 const getCurrentUrl = () => {
+  // Hosted deployments inject the server base URL (e.g. a /test1/api path
+  // behind a reverse proxy) because location.origin points at the site root.
+  const injected = (globalThis as { __OMNIA_SERVER_URL__?: unknown }).__OMNIA_SERVER_URL__
+  if (typeof injected === "string" && injected.length > 0) return injected
   if (location.hostname.includes("opencode.ai")) return "http://localhost:4096"
   if (import.meta.env.DEV)
     return `http://${import.meta.env.VITE_OPENCODE_SERVER_HOST ?? "localhost"}:${import.meta.env.VITE_OPENCODE_SERVER_PORT ?? "4096"}`

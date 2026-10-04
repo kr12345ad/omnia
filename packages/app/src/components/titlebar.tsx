@@ -28,6 +28,7 @@ import { useLanguage } from "@/context/language"
 import { useSettings } from "@/context/settings"
 import { WindowsAppMenu } from "./windows-app-menu"
 import { ModeToggle } from "./mode-toggle"
+import { GitHubAuthButton } from "./github-auth"
 import { applyPath, backPath, forwardPath } from "./titlebar-history"
 import { TitlebarTabStrip } from "@/components/titlebar-tab-strip"
 import { makeEventListener } from "@solid-primitives/event-listener"
@@ -35,17 +36,19 @@ import { createMediaQuery } from "@solid-primitives/media"
 import { readSessionTabsRemovedDetail, SESSION_TABS_REMOVED_EVENT } from "@/components/titlebar-session-events"
 import { useGlobal } from "@/context/global"
 import { ServerConnection, useServer } from "@/context/server"
-import { tabKey, useTabs } from "@/context/tabs"
+import { useServerSync } from "@/context/server-sync"
+import { tabKey, useTabs, type DraftTab } from "@/context/tabs"
 import type { PromptSession } from "@/context/prompt"
 import "./titlebar.css"
 import { newTabTooltipKeybind } from "./command-tooltip-keybind"
 import { normalizeSessionInfo } from "@/utils/session"
+import { resolveSessionMode, type SessionMode } from "@/utils/session-mode"
 
 const legacyTitlebarHeight = 40
 const v2TitlebarHeight = 36
 const minTitlebarZoom = 0.25
 const windowsControlsBaseWidth = 138 // 3 native Windows caption buttons at 46px each.
-const macTrafficLightsBaseWidth = 84
+const macTrafficLightsBaseWidth = 72
 
 export type TitlebarUpdate = {
   version: () => string | undefined
@@ -72,6 +75,8 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
   const navigate = useNavigate()
   const location = useLocation()
   const params = useParams()
+  const tabs = useTabs()
+  const sync = useServerSync()
   const useV2Titlebar = createMemo(() => settings.general.newLayoutDesigns())
   const mobile = createMediaQuery("(max-width: 767px)")
   const bottom = createMemo(() => useV2Titlebar() && mobile() && settings.general.mobileTitlebarPosition() === "bottom")
@@ -107,6 +112,33 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
     const parts = location.pathname.replace(/\/+$/, "").split("/")
     return parts.at(-1) === "session"
   })
+  // A session or draft shows its fixed mode; home shows the next-session toggle.
+  // Agent/Code is chosen at creation. A draft stays editable until its first
+  // message is sent; a real session is locked to the mode it was created with.
+  const activeMode = createMemo<{ mode: SessionMode; fixed: boolean; draftID?: string }>(() => {
+    const route = layout.route()
+    if (route.type === "draft") {
+      const draft = tabs.store.find(
+        (tab): tab is DraftTab => tab.type === "draft" && tab.draftID === route.draftID,
+      )
+      return { mode: draft?.mode ?? settings.general.mode(), fixed: false, draftID: route.draftID }
+    }
+    if (route.type !== "session") return { mode: settings.general.mode(), fixed: false }
+    return {
+      mode: resolveSessionMode({
+        stored: settings.general.sessionModes.get(route.sessionId),
+        metadata: sync().session.get(route.sessionId)?.metadata,
+      }),
+      fixed: true,
+    }
+  })
+
+  const selectMode = (mode: SessionMode) => {
+    const state = activeMode()
+    if (state.fixed) return
+    settings.general.setMode(mode)
+    if (state.draftID !== undefined) tabs.updateDraft(state.draftID, { mode })
+  }
 
   createEffect(() => {
     const current = path()
@@ -195,7 +227,6 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
             const layout = useLayout()
             const global = useGlobal()
 
-            const tabs = useTabs()
             const tabsStore = tabs.store
             const tabsStoreActions = tabs
             const [session] = createResource(
@@ -272,14 +303,18 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                   sessionId: activeSession.id,
                 }
                 const model = tabs.stateValue<PromptSession>(sessionTab, "prompt")?.model.current()
-                tabs.newDraft({ server: sessionTab.server, directory: activeSession.directory }, "", model)
+                tabs.newDraft(
+                  { server: sessionTab.server, directory: activeSession.directory, mode: activeMode().mode },
+                  "",
+                  model,
+                )
                 return
               }
 
               const activeTab = currentTab()
               if (activeTab?.type === "draft") {
                 const model = tabs.stateValue<PromptSession>(activeTab, "prompt")?.model.current()
-                tabs.newDraft({ server: activeTab.server, directory: activeTab.directory }, "", model)
+                tabs.newDraft({ server: activeTab.server, directory: activeTab.directory, mode: activeTab.mode }, "", model)
                 return
               }
 
@@ -369,11 +404,28 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                   "md:pl-4": !macTrafficLights(),
                 }}
               >
-                <ChannelIndicator debugTools={props.debugTools} />
-                <Show when={windows() || linux()}>
+                <Show when={!mac()}>
+                  <ChannelIndicator debugTools={props.debugTools} />
+                </Show>
+                <Show when={windows() || linux() || mac()}>
                   <WindowsAppMenu command={command} platform={platform} variant="v2" />
                 </Show>
-                <ModeToggle />
+                <ModeToggle mode={activeMode().mode} fixed={activeMode().fixed} onSelect={selectMode} />
+                <Show when={platform.platform === "desktop" && platform.browserPanel !== undefined}>
+                  <TooltipV2 placement="bottom" value={language.t("browser.panel.toggle")} class="shrink-0">
+                    <IconButtonV2
+                      type="button"
+                      variant="ghost-muted"
+                      size="large"
+                      class="!w-9 shrink-0"
+                      icon={<IconV2 name="monitor" />}
+                      state={settings.general.browserPanelOpen() ? "pressed" : undefined}
+                      onClick={() => settings.general.setBrowserPanelOpen(!settings.general.browserPanelOpen())}
+                      aria-label={language.t("browser.panel.toggle")}
+                      aria-pressed={settings.general.browserPanelOpen()}
+                    />
+                  </TooltipV2>
+                </Show>
                 <TooltipV2
                   placement="bottom"
                   value={
@@ -450,10 +502,10 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
             >
               <Show when={windows() || linux()}>
                 <WindowsAppMenu command={command} platform={platform} />
-                <ModeToggle />
+                <ModeToggle mode={activeMode().mode} fixed={activeMode().fixed} onSelect={selectMode} />
               </Show>
               <Show when={mac()}>
-                <div class="xl:hidden w-10 shrink-0 flex items-center justify-center">
+                <div class="w-10 shrink-0 flex items-center justify-center">
                   <IconButton
                     icon="menu"
                     variant="ghost"
@@ -565,7 +617,9 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                     <div id="opencode-titlebar-left" class="flex items-center gap-3 min-w-0 px-2" />
                   </div>
                 </div>
-                <ChannelIndicator debugTools={props.debugTools} />
+                <Show when={!mac()}>
+                  <ChannelIndicator debugTools={props.debugTools} />
+                </Show>
               </div>
             </div>
 
@@ -583,6 +637,7 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
               }}
               data-tauri-drag-region
             >
+              <GitHubAuthButton />
               <div id="opencode-titlebar-right" class="flex items-center gap-1 shrink-0 justify-end" />
               <Show when={windows()}>
                 <div class="shrink-0" style={{ width: windowsControlsWidth() }} />
@@ -611,6 +666,7 @@ type TitlebarV2RightState = {
 function TitlebarV2Right(props: { state: TitlebarV2RightState }) {
   return (
     <div class="relative z-20 flex shrink-0 items-center justify-end gap-0 overflow-visible">
+      <GitHubAuthButton />
       <Show when={props.state.update.visible}>
         <TitlebarUpdateIconButton state={props.state.update} />
       </Show>
@@ -666,7 +722,7 @@ function ChannelIndicator(props: { debugTools?: { visible: boolean; toggle: () =
 
   return (
     <>
-      {["beta", "dev"].includes(channel) && (
+      {channel !== undefined && ["beta", "dev"].includes(channel) && (
         <div class="bg-icon-interactive-base text-[#FFF] font-medium px-2 rounded-sm uppercase font-mono">
           {channel.toUpperCase()}
         </div>

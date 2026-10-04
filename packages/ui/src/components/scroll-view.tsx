@@ -153,6 +153,7 @@ export function ScrollView(props: ScrollViewProps) {
   const showThumb = () => state.showThumb
 
   let scrollIdleTimer: ReturnType<typeof setTimeout> | undefined
+  let stopThumbDrag: (() => void) | undefined
 
   const markScrolling = () => {
     setState("isScrolling", true)
@@ -168,6 +169,7 @@ export function ScrollView(props: ScrollViewProps) {
 
   onCleanup(() => {
     if (scrollIdleTimer !== undefined) clearTimeout(scrollIdleTimer)
+    stopThumbDrag?.()
   })
 
   const updateThumb = () => {
@@ -256,17 +258,25 @@ export function ScrollView(props: ScrollViewProps) {
       })
     }
 
-    const done = (e: PointerEvent) => {
-      setState("isDragging", false)
-      thumbRef.releasePointerCapture(e.pointerId)
-      thumbRef.removeEventListener("pointermove", onPointerMove)
-      thumbRef.removeEventListener("pointerup", done)
-      thumbRef.removeEventListener("pointercancel", done)
+    const done = (event: PointerEvent) => {
+      stopThumbDrag?.()
+      if (typeof thumbRef.releasePointerCapture !== "function") return
+      if (typeof thumbRef.hasPointerCapture === "function" && !thumbRef.hasPointerCapture(event.pointerId)) return
+      thumbRef.releasePointerCapture(event.pointerId)
     }
 
     thumbRef.addEventListener("pointermove", onPointerMove)
     thumbRef.addEventListener("pointerup", done)
     thumbRef.addEventListener("pointercancel", done)
+
+    stopThumbDrag = () => {
+      stopThumbDrag = undefined
+      setState("isDragging", false)
+      thumbRef.removeEventListener("pointermove", onPointerMove)
+      thumbRef.removeEventListener("pointerup", done)
+      thumbRef.removeEventListener("pointercancel", done)
+      done(e)
+    }
   }
 
   const renderThumb = () => (

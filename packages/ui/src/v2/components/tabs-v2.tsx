@@ -107,6 +107,14 @@ function TabsV2CloseButton(props: TabsV2CloseButtonProps) {
           split.onClick(e)
         }
       }}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return
+        e.preventDefault()
+        e.stopPropagation()
+        if (typeof split.onClick === "function") {
+          split.onClick(e as unknown as MouseEvent & { currentTarget: HTMLDivElement; target: Element })
+        }
+      }}
       onMouseDown={(e) => {
         e.preventDefault()
         e.stopPropagation()

@@ -47,6 +47,8 @@ export function TextReveal(props: {
   let outRef: HTMLSpanElement | undefined
   let rootRef: HTMLSpanElement | undefined
   let frame: number | undefined
+  let fontFrame: number | undefined
+  let disposed = false
 
   const win = () => inRef?.scrollWidth ?? 0
   const wout = () => outRef?.scrollWidth ?? 0
@@ -98,19 +100,28 @@ export function TextReveal(props: {
       setState("ready", true)
       return
     }
+    const scheduleReady = () => {
+      fontFrame = requestAnimationFrame(() => {
+        fontFrame = undefined
+        setState("ready", true)
+      })
+    }
     if (!fonts) {
-      requestAnimationFrame(() => setState("ready", true))
+      scheduleReady()
       return
     }
     void fonts.ready.finally(() => {
+      if (disposed) return
       widen(win())
-      requestAnimationFrame(() => setState("ready", true))
+      scheduleReady()
     })
   })
 
   onCleanup(() => {
-    if (frame === undefined || typeof cancelAnimationFrame !== "function") return
-    cancelAnimationFrame(frame)
+    disposed = true
+    if (typeof cancelAnimationFrame !== "function") return
+    if (frame !== undefined) cancelAnimationFrame(frame)
+    if (fontFrame !== undefined) cancelAnimationFrame(fontFrame)
   })
 
   return (

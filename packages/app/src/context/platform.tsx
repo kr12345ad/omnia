@@ -8,6 +8,64 @@ import type { UpdaterPlatform } from "../updater"
 import type { DraftStore } from "@/utils/draft-store"
 import type { SuperskillPlatform } from "@/superskills"
 import type { MemoryPlatform } from "@/memory"
+import type { ComputerPlatform } from "@/computers"
+import type { ComputerUsePlatform } from "@/computer-use"
+
+export type GitHubProfile = {
+  id: number
+  login: string
+  name?: string
+  avatarUrl?: string
+  email?: string
+  htmlUrl?: string
+}
+
+export type GitHubAuthStatus = {
+  authenticated: boolean
+  profile?: GitHubProfile
+  controlPlaneUrl?: string
+}
+
+/** GitHub sign-in through the hosted control plane (desktop only) */
+export type GitHubAuthPlatform = {
+  status(): Promise<GitHubAuthStatus>
+  signIn(): Promise<GitHubAuthStatus>
+  signOut(): Promise<GitHubAuthStatus>
+}
+
+export type BrowserPanelTab = {
+  readonly id: number
+  readonly url: string
+  readonly title?: string
+  readonly active?: boolean
+  readonly loading?: boolean
+}
+
+export type BrowserPanelCommand =
+  | { readonly kind: "open"; readonly requestId: string; readonly url: string }
+  | { readonly kind: "activate"; readonly tabId: number }
+  | { readonly kind: "close"; readonly tabId: number }
+  | {
+      readonly kind: "dialog"
+      readonly tabId: number
+      readonly type: string
+      readonly message: string
+      readonly defaultPrompt?: string
+      readonly frameUrl?: string
+    }
+
+export type BrowserPanelPlatform = {
+  register(input: { webContentsId: number; requestId?: string; url?: string }): Promise<BrowserPanelTab | null>
+  unregister(webContentsId: number): Promise<void>
+  activate(webContentsId: number): Promise<void>
+  list(): Promise<readonly BrowserPanelTab[]>
+  answerDialog(input: {
+    webContentsId: number
+    accept: boolean
+    promptText?: string
+  }): Promise<{ handled: boolean } | undefined>
+  onCommand(callback: (command: BrowserPanelCommand) => void): () => void
+}
 
 type PickerPaths = string | string[] | null
 type OpenDirectoryPickerOptions = { title?: string; multiple?: boolean }
@@ -57,6 +115,18 @@ type PlatformBase = {
 
   /** Long-term memory: knowledge the agent keeps across sessions (desktop only) */
   memory?: MemoryPlatform
+
+  /** GitHub sign-in through the hosted control plane (desktop only) */
+  auth?: GitHubAuthPlatform
+
+  /** Connected computers and their stored credentials (desktop only) */
+  computers?: ComputerPlatform
+
+  /** Local computer-use models: download, load, and remove them on demand (desktop only) */
+  computerUse?: ComputerUsePlatform
+
+  /** Embedded browser panel backed by Electron <webview> pages (desktop only) */
+  browserPanel?: BrowserPanelPlatform
 
   /** Open a native attachment picker and read selected files sequentially (desktop only) */
   openAttachmentPickerDialog?(
@@ -126,6 +196,9 @@ type PlatformBase = {
 
   /** Force focus styles on interactive elements through desktop devtools (desktop only) */
   setForceFocus?(enabled: boolean): Promise<void>
+
+  /** Report whether the active agent session is working so the desktop can show its working indicator (desktop only) */
+  setAgentWorking?(working: boolean): Promise<void> | void
 
   /** Record a fatal renderer error in platform logs (desktop only) */
   recordFatalRendererError?(error: FatalRendererErrorLog): Promise<void>

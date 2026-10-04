@@ -5,6 +5,7 @@ import { createStore } from "solid-js/store"
 import { Collapsible } from "@opencode-ai/ui/collapsible"
 import type { IconProps } from "@opencode-ai/ui/icon"
 import { TextShimmer } from "@opencode-ai/ui/text-shimmer"
+import { ToolWorkingAnimation } from "./tool-working-animation"
 
 export type TriggerTitle = {
   title: string
@@ -27,6 +28,7 @@ export interface BasicToolProps {
   trigger: TriggerTitle | JSX.Element | ((open: Accessor<boolean>) => JSX.Element)
   children?: JSX.Element
   status?: string
+  indicator?: ((status: string | undefined) => JSX.Element) | false
   hideDetails?: boolean
   defaultOpen?: boolean
   open?: boolean
@@ -189,6 +191,18 @@ export function BasicTool(props: BasicToolProps) {
       data-hide-details={props.hideDetails ? "true" : undefined}
     >
       <div data-slot="basic-tool-tool-trigger-content">
+        <Show
+          when={
+            props.indicator !== false &&
+            (props.status === "pending" || props.status === "running" || props.status === "completed")
+          }
+        >
+          <span data-slot="basic-tool-tool-indicator" style={{ "align-self": "center" }}>
+            {(typeof props.indicator === "function"
+              ? props.indicator
+              : (status: string | undefined) => <ToolWorkingAnimation status={status} />)(props.status)}
+          </span>
+        </Show>
         <div data-slot="basic-tool-tool-info">
           <Switch>
             <Match when={dynamicTrigger !== undefined}>{dynamicTrigger}</Match>

@@ -376,6 +376,19 @@ export default function Page() {
   const sessionOwnership = createSessionOwnership(sessionKey)
   const newSessionDesign = createMemo(() => settings.general.newLayoutDesigns())
 
+  let lastAgentWorking: boolean | undefined
+  createEffect(() => {
+    const id = params.id
+    const working = id ? sync().data.session_working(id) : false
+    if (working === lastAgentWorking) return
+    lastAgentWorking = working
+    void platform.setAgentWorking?.(working)
+  })
+  onCleanup(() => {
+    lastAgentWorking = undefined
+    void platform.setAgentWorking?.(false)
+  })
+
   createEffect(() => {
     if (!prompt.ready()) return
     untrack(() => {

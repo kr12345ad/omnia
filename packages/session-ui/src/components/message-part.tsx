@@ -1992,7 +1992,7 @@ ToolRegistry.register({
     const i18n = useI18n()
     const application = createMemo(() => {
       const value = props.metadata.application ?? props.input.applicationId
-      return typeof value === "string" && value ? value : "desktop"
+      return typeof value === "string" && value ? value : i18n.t("ui.tool.computer.desktop")
     })
     const count = createMemo(() => {
       const value = props.metadata.elementCount
@@ -2457,6 +2457,7 @@ ToolRegistry.register({
       <BasicTool
         icon="task"
         status={props.status}
+        indicator={false}
         trigger={trigger()}
         hideDetails
         triggerAsLink
@@ -2513,36 +2514,36 @@ ToolRegistry.register({
                 </span>
               </Show>
             </div>
-            <div class="flex flex-wrap items-center gap-1.5">
-              <For each={participants()}>
-                {(participant) => (
-                  <button
-                    type="button"
-                    class="flex items-center gap-1.5 rounded-md border border-border-weak-base bg-background-base px-2 py-1 text-11-medium text-text-strong transition-colors hover:bg-surface-raised-base-hover"
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      open(participant.id)
-                    }}
-                  >
-                    <span
-                      class="size-1.5 rounded-full"
-                      classList={{
-                        "bg-icon-success-base": participant.status === "idle",
-                        "bg-icon-warning-base": participant.status === "busy",
-                      }}
-                    />
-                    {participant.label}
-                  </button>
-                )}
-              </For>
-            </div>
           </div>
         )}
+        defaultOpen={running()}
       >
         <Show when={topic()}>
-          <div class="px-1 pb-1 text-12-regular text-text-strong">{topic()}</div>
+          <div class="px-1 pb-1 text-[13px] font-[440] text-v2-text-text-base">{topic()}</div>
         </Show>
-        <div class="px-1 pb-2 text-11-regular text-text-weak">{i18n.t("ui.tool.discussion.hint")}</div>
+        <div class="flex flex-wrap items-center gap-1.5 px-1 pb-2">
+          <For each={participants()}>
+            {(participant) => (
+              <button
+                type="button"
+                disabled={data.navigateToSession === undefined}
+                class="flex items-center gap-1.5 rounded-md border border-v2-border-border-muted bg-v2-background-bg-base px-2 py-1 text-[11px] font-[530] text-v2-text-text-base transition-colors enabled:hover:bg-v2-overlay-simple-overlay-hover disabled:cursor-default disabled:opacity-70"
+                onClick={() => open(participant.id)}
+              >
+                <span
+                  class="size-1.5 rounded-full"
+                  classList={{
+                    "bg-v2-state-fg-success": participant.status === "idle",
+                    "bg-v2-state-fg-warning": participant.status === "busy",
+                    "bg-v2-state-fg-danger": participant.status === "retry",
+                  }}
+                />
+                {participant.label}
+              </button>
+            )}
+          </For>
+        </div>
+        <div class="px-1 pb-2 text-[11px] font-[440] text-v2-text-text-muted">{i18n.t("ui.tool.discussion.hint")}</div>
       </BasicTool>
     )
   },

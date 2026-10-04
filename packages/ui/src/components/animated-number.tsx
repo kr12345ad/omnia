@@ -14,6 +14,33 @@ function spin(from: number, to: number, direction: 1 | -1) {
   return -((from - to + 10) % 10)
 }
 
+function reducedMotion() {
+  if (typeof window === "undefined") return true
+  if (typeof window.matchMedia !== "function") return true
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+}
+
+/**
+ * The offset selects one cell of `TRACK`, and the digit only stays on screen while that offset is
+ * inside `[10, 20)` — outside it every cell sits outside the masked 1em window and renders blank.
+ * Renormalizing relies on a transitionend that never arrives under reduced motion (the CSS zeroes
+ * the duration) or when the transition is interrupted, so the offset is snapped in those cases and
+ * only spun while it provably lands back inside the window.
+ */
+export function animatedNumberStep(input: {
+  step: number
+  from: number
+  to: number
+  direction: 1 | -1
+  reducedMotion: boolean
+}) {
+  const delta = spin(input.from, input.to, input.direction)
+  if (!delta || input.reducedMotion) return { step: input.to + 10, animating: false }
+  const step = input.step + delta
+  if (step < 10 || step >= 20) return { step: input.to + 10, animating: false }
+  return { step, animating: true }
+}
+
 function Digit(props: { value: number; direction: 1 | -1 }) {
   const [state, setState] = createStore({
     step: props.value + 10,
@@ -27,30 +54,29 @@ function Digit(props: { value: number; direction: 1 | -1 }) {
     on(
       () => props.value,
       (next) => {
-        const delta = spin(last, next, props.direction)
+        const update = animatedNumberStep({
+          step: step(),
+          from: last,
+          to: next,
+          direction: props.direction,
+          reducedMotion: reducedMotion(),
+        })
         last = next
-        if (!delta) {
-          setState("animating", false)
-          setState("step", next + 10)
-          return
-        }
-
-        setState("animating", true)
-        setState("step", (value) => value + delta)
+        setState(update)
       },
       { defer: true },
     ),
   )
+
+  const settle = () => setState({ animating: false, step: normalize(step()) + 10 })
 
   return (
     <span data-slot="animated-number-digit">
       <span
         data-slot="animated-number-strip"
         data-animating={animating() ? "true" : "false"}
-        onTransitionEnd={() => {
-          setState("animating", false)
-          setState("step", (value) => normalize(value) + 10)
-        }}
+        onTransitionEnd={settle}
+        onTransitionCancel={settle}
         style={{
           "--animated-number-offset": `${step()}`,
           "--animated-number-duration": `var(--tool-motion-odometer-ms, ${DURATION}ms)`,

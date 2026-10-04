@@ -1,4 +1,4 @@
-import { splitProps, type JSX } from "solid-js"
+import { onCleanup, splitProps, type JSX } from "solid-js"
 
 export interface ResizeHandleProps extends Omit<JSX.HTMLAttributes<HTMLDivElement>, "onResize"> {
   direction: "horizontal" | "vertical"
@@ -28,9 +28,14 @@ export function ResizeHandle(props: ResizeHandleProps) {
     "classList",
   ])
 
+  let stopDrag: (() => void) | undefined
+
+  onCleanup(() => stopDrag?.())
+
   const handleMouseDown = (e: MouseEvent) => {
     if (e.detail > 1) return
     e.preventDefault()
+    stopDrag?.()
     const edge = local.edge ?? (local.direction === "vertical" ? "start" : "end")
     const start = local.direction === "horizontal" ? e.clientX : e.clientY
     const rtl =
@@ -70,16 +75,21 @@ export function ResizeHandle(props: ResizeHandleProps) {
     }
 
     const onMouseUp = () => {
-      document.body.style.userSelect = ""
-      document.body.style.overflow = ""
-      document.removeEventListener("mousemove", onMouseMove)
-      document.removeEventListener("mouseup", onMouseUp)
+      stopDrag?.()
 
       if (collapsed) {
         onCollapse?.()
         return
       }
       onCollapseChange?.(false)
+    }
+
+    stopDrag = () => {
+      stopDrag = undefined
+      document.body.style.userSelect = ""
+      document.body.style.overflow = ""
+      document.removeEventListener("mousemove", onMouseMove)
+      document.removeEventListener("mouseup", onMouseUp)
     }
 
     document.addEventListener("mousemove", onMouseMove)

@@ -3,6 +3,7 @@ import { batch, createEffect, createMemo, createSignal, onCleanup } from "solid-
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import { persisted } from "@/utils/persist"
 import { usePlatform } from "@/context/platform"
+import type { SessionMode } from "@/utils/session-mode"
 
 export interface NotificationSettings {
   agent: boolean
@@ -22,6 +23,9 @@ export interface SoundSettings {
 export interface Settings {
   general: {
     mode: "work" | "code"
+    // Mode is fixed at session creation and mirrored here, keyed by session ID,
+    // so the UI can show it without waiting for the server session record.
+    sessionModes: Record<string, SessionMode>
     autoSave: boolean
     releaseNotes: boolean
     followup: "queue" | "steer"
@@ -34,6 +38,8 @@ export interface Settings {
     shellToolPartsExpanded: boolean
     editToolPartsExpanded: boolean
     showCustomAgents: boolean
+    browserPanelOpen: boolean
+    browserPanelWidth: number
     mobileTitlebarPosition: "top" | "bottom"
     newLayoutDesigns?: boolean
     layoutTransitionEligible?: boolean
@@ -184,6 +190,7 @@ export function terminalFontFamily(font: string | undefined) {
 const defaultSettings: Settings = {
   general: {
     mode: "work",
+    sessionModes: {},
     autoSave: true,
     releaseNotes: true,
     followup: "steer",
@@ -196,6 +203,8 @@ const defaultSettings: Settings = {
     shellToolPartsExpanded: false,
     editToolPartsExpanded: false,
     showCustomAgents: false,
+    browserPanelOpen: false,
+    browserPanelWidth: 460,
     mobileTitlebarPosition: "top",
   },
   appearance: {
@@ -226,6 +235,9 @@ const defaultSettings: Settings = {
 function withFallback<T>(read: () => T | undefined, fallback: T) {
   return createMemo(() => read() ?? fallback)
 }
+
+// Most recent session ids kept in the persisted session-mode map.
+const sessionModeLimit = 200
 
 export const { use: useSettings, provider: SettingsProvider } = createSimpleContext({
   name: "Settings",
@@ -367,6 +379,29 @@ export const { use: useSettings, provider: SettingsProvider } = createSimpleCont
         setMode(value: "work" | "code") {
           setStore("general", "mode", value)
         },
+        sessionModes: {
+          get(sessionID: string) {
+            return store.general?.sessionModes?.[sessionID]
+          },
+          // Only call this when creating a session: a session's mode is immutable.
+          remember(sessionID: string, mode: SessionMode) {
+            setStore("general", "sessionModes", sessionID, mode)
+            const modes = store.general?.sessionModes
+            if (!modes) return
+            // The map is persisted to localStorage and keyed by every session ever
+            // created, so keep only the newest ids. A mode is written once per
+            // session, which makes key insertion order recency order; dropped ids
+            // still resolve from the session's persisted `metadata.mode`.
+            const keys = Object.keys(modes)
+            if (keys.length <= sessionModeLimit) return
+            const keep = keys.slice(keys.length - sessionModeLimit)
+            setStore(
+              "general",
+              "sessionModes",
+              reconcile(Object.fromEntries(keep.map((key) => [key, modes[key]]))),
+            )
+          },
+        },
         autoSave: withFallback(() => store.general?.autoSave, defaultSettings.general.autoSave),
         setAutoSave(value: boolean) {
           setStore("general", "autoSave", value)
@@ -426,6 +461,20 @@ export const { use: useSettings, provider: SettingsProvider } = createSimpleCont
         showCustomAgents,
         setShowCustomAgents(value: boolean) {
           setStore("general", "showCustomAgents", value)
+        },
+        browserPanelOpen: withFallback(
+          () => store.general?.browserPanelOpen,
+          defaultSettings.general.browserPanelOpen,
+        ),
+        setBrowserPanelOpen(value: boolean) {
+          setStore("general", "browserPanelOpen", value)
+        },
+        browserPanelWidth: withFallback(
+          () => store.general?.browserPanelWidth,
+          defaultSettings.general.browserPanelWidth,
+        ),
+        setBrowserPanelWidth(value: number) {
+          setStore("general", "browserPanelWidth", Math.min(Math.max(Math.round(value), 320), 1400))
         },
         mobileTitlebarPosition: withFallback(
           () => store.general?.mobileTitlebarPosition,

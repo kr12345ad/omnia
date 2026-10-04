@@ -23,8 +23,10 @@ import { usePermission } from "@/context/permission"
 import { type ImageAttachmentPart, usePrompt } from "@/context/prompt"
 import { usePlatform } from "@/context/platform"
 import { useSDK } from "@/context/sdk"
+import { useSettings } from "@/context/settings"
 import { useSync } from "@/context/sync"
 import { createSessionTabs } from "@/pages/session/helpers"
+import { resolveSessionMode } from "@/utils/session-mode"
 import { showToast } from "@/utils/toast"
 import { PromptInputV2, type PromptInputV2Suggestion } from "@opencode-ai/session-ui/v2/prompt-input"
 import {
@@ -89,6 +91,7 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
   const permission = usePermission()
   const language = useLanguage()
   const platform = usePlatform()
+  const settings = useSettings()
   const prompt = props.state ?? usePrompt()
   let editor: HTMLDivElement | undefined
 
@@ -128,9 +131,17 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
     return text.trim().length === 0 && attachments().length === 0 && commentCount() === 0
   })
   const stopping = createMemo(() => working() && blank())
+  const appMode = createMemo(() =>
+    resolveSessionMode({
+      stored: props.controls.session.id ? settings.general.sessionModes.get(props.controls.session.id) : undefined,
+      metadata: info()?.metadata,
+      fallback: settings.general.mode(),
+    }),
+  )
   const placeholder = createMemo(() =>
     promptPlaceholder({
       mode: mode(),
+      appMode: appMode(),
       commentCount: commentCount(),
       example: mode() === "shell" ? "git status" : "",
       suggest: false,

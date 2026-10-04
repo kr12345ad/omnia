@@ -13,9 +13,12 @@ import {
 } from "solid-js"
 import { createStore, produce } from "solid-js/store"
 import { Dynamic } from "solid-js/web"
+import { ThinkingAnimation } from "@opencode-ai/session-ui/thinking-animation"
 import { useNavigate } from "@solidjs/router"
 import { useMutation } from "@tanstack/solid-query"
 import { createVirtualizer, defaultRangeExtractor, elementScroll, type VirtualItem } from "@tanstack/solid-virtual"
+import { createSmoothScroll } from "./smooth-scroll"
+import { animate } from "animejs"
 import { Accordion } from "@opencode-ai/ui/accordion"
 import { Button } from "@opencode-ai/ui/button"
 import { Card } from "@opencode-ai/ui/card"
@@ -134,6 +137,7 @@ function TimelineThinkingRow(props: { reasoningHeading?: string; showReasoningSu
 
   return (
     <div data-slot="session-turn-thinking">
+      <ThinkingAnimation />
       <TextShimmer text={language.t("ui.sessionTurn.status.thinking")} />
       <Show when={!props.showReasoningSummaries}>
         <TextReveal text={props.reasoningHeading} class="session-turn-thinking-heading" travel={25} duration={700} />
@@ -274,6 +278,7 @@ export function MessageTimeline(props: {
   const platform = usePlatform()
 
   const [listRoot, setListRoot] = createSignal<HTMLDivElement>()
+  const smoothScroll = createSmoothScroll(() => listRoot() ?? null)
   const sessionID = createMemo(() => params.id)
   const sessionStatus = createMemo(() => {
     const id = sessionID()
@@ -348,31 +353,66 @@ export function MessageTimeline(props: {
   const timelineRowByKey = projection.rowByKey
   const timelineRows = projection.rows
 
-  let prependAnchor: { key: string; offset: number } | undefined
+  let prependAnchor: { key: string; top: number } | undefined
+  let prependAnchorElement: HTMLElement | undefined
   let prependAnchorFrame: number | undefined
+  let prependMeasureFrame: number | undefined
   let prependLoading = false
   const clearPrependAnchor = () => {
     prependLoading = false
     prependAnchor = undefined
-    if (prependAnchorFrame === undefined) return
-    cancelAnimationFrame(prependAnchorFrame)
+    prependAnchorElement = undefined
+    if (prependAnchorFrame !== undefined) cancelAnimationFrame(prependAnchorFrame)
     prependAnchorFrame = undefined
+    if (prependMeasureFrame !== undefined) cancelAnimationFrame(prependMeasureFrame)
+    prependMeasureFrame = undefined
   }
-  const capturePrependAnchor = () => {
-    prependLoading = true
-    updatePrependAnchor()
+  // The anchor is the first row still inside the viewport, so the scan stops at
+  // that row instead of measuring (and sorting) every rendered row, and the
+  // element is cached so later measurements cost a single rect.
+  const pickPrependAnchor = (view: DOMRect) => {
+    const root = listRoot()
+    if (!root) return undefined
+    const element = [...root.querySelectorAll<HTMLElement>("[data-timeline-key]")].find((row) => {
+      const rect = row.getBoundingClientRect()
+      return rect.bottom > view.top && rect.top < view.bottom
+    })
+    const key = element?.dataset.timelineKey
+    if (!element || !key) return undefined
+    prependAnchorElement = element
+    // Document-space top: invariant under the user's own scrolling, so the
+    // correction below only compensates content growth above the anchor and
+    // never fights an active scroll gesture.
+    return { key, top: element.getBoundingClientRect().top - view.top + root.scrollTop }
   }
-  const updatePrependAnchor = () => {
+  const measurePrependAnchor = () => {
     const root = listRoot()
     if (!root) return
     const view = root.getBoundingClientRect()
-    const anchor = [...root.querySelectorAll<HTMLElement>("[data-timeline-key]")]
-      .map((element) => ({ element, rect: element.getBoundingClientRect() }))
-      .filter((item) => item.rect.bottom > view.top && item.rect.top < view.bottom)
-      .sort((a, b) => a.rect.top - b.rect.top)[0]
-    if (!anchor) return
-    if (!anchor.element.dataset.timelineKey) return
-    prependAnchor = { key: anchor.element.dataset.timelineKey, offset: anchor.rect.top - view.top }
+    const cached = prependAnchorElement
+    const rect = cached?.isConnected ? cached.getBoundingClientRect() : undefined
+    if (cached && rect && cached.dataset.timelineKey && rect.bottom > view.top && rect.top < view.bottom) {
+      prependAnchor = { key: cached.dataset.timelineKey, top: rect.top - view.top + root.scrollTop }
+      return
+    }
+    // The cached row scrolled away (or the virtualizer recycled the node):
+    // re-pick the first visible row once.
+    const picked = pickPrependAnchor(view)
+    if (!picked) return
+    prependAnchor = picked
+  }
+  const capturePrependAnchor = () => {
+    prependLoading = true
+    measurePrependAnchor()
+  }
+  // Scroll ticks arrive far denser than frames, so coalesce them into at most
+  // one measurement per frame.
+  const updatePrependAnchor = () => {
+    if (prependMeasureFrame !== undefined) return
+    prependMeasureFrame = requestAnimationFrame(() => {
+      prependMeasureFrame = undefined
+      measurePrependAnchor()
+    })
   }
   const restorePrependAnchor = (done: boolean) => {
     if (done) prependLoading = false
@@ -389,17 +429,25 @@ export function MessageTimeline(props: {
       const anchor = prependAnchor
       if (!anchor) return
       const element = root.querySelector<HTMLElement>(`[data-timeline-key="${CSS.escape(anchor.key)}"]`)
-      const delta = element
-        ? element.getBoundingClientRect().top - root.getBoundingClientRect().top - anchor.offset
+      const currentTop = element
+        ? element.getBoundingClientRect().top - root.getBoundingClientRect().top + root.scrollTop
         : undefined
-      if (delta !== undefined && Math.abs(delta) > 0.5) {
-        root.scrollTop += delta
+      if (currentTop !== undefined && Math.abs(currentTop - anchor.top) > 0.5) {
+        root.scrollTop += currentTop - anchor.top
+        // Consume the correction so the same growth is never applied twice and
+        // user scrolling (which does not change the document top) stays free.
+        prependAnchor = { key: anchor.key, top: currentTop }
         stable = 0
       } else {
         stable += 1
       }
       frames += 1
-      if (stable >= 30 || frames >= 180) {
+      // Correcting only matters while rows keep arriving above the anchor: a
+      // quiet stretch during a prepend means it stalled (the next restore
+      // restarts this loop), and once prepending is done a short quiet window
+      // absorbs trailing measurements. Every frame here forces a reflow, so
+      // stop instead of burning the whole budget.
+      if (stable >= (prependLoading ? 12 : 4) || frames >= 45) {
         if (!prependLoading) prependAnchor = undefined
         return
       }
@@ -462,7 +510,7 @@ export function MessageTimeline(props: {
     queueMicrotask(() => {
       resizeAnchorScheduled = false
       if (!props.shouldAnchorBottom() || props.hasScrollGesture()) return
-      virtualizer.scrollToEnd()
+      smoothScroll.toEnd()
     })
   }
   virtualizer.resizeItem = (index, size) => {
@@ -503,9 +551,11 @@ export function MessageTimeline(props: {
       if (index === undefined) return
       virtualizer.scrollToIndex(index, { align: "center" })
     })
-    props.setScrollToEnd?.(() => virtualizer.scrollToEnd())
+    props.setScrollToEnd?.(() => smoothScroll.toEnd())
     props.setHistoryAnchor?.({ capture: capturePrependAnchor, restore: restorePrependAnchor })
   })
+
+  onCleanup(() => smoothScroll.cancel())
 
   let overscanFrame: number | undefined
   onMount(() => {
@@ -524,8 +574,7 @@ export function MessageTimeline(props: {
     if (!props.shouldAnchorBottom() || props.hasScrollGesture()) return
     if (resizePinFrame !== undefined) cancelAnimationFrame(resizePinFrame)
     clearPrependAnchor()
-    if (prependAnchorFrame !== undefined) cancelAnimationFrame(prependAnchorFrame)
-    virtualizer.scrollToEnd()
+    smoothScroll.toEnd()
   }
 
   let measuredSessionKey = sessionKey()
@@ -1230,7 +1279,27 @@ export function MessageTimeline(props: {
     return renderTimelineRow(() => props.row, props.onSizeChange)
   }
 
-  function VirtualTimelineRow(props: { rowKey: string }) {
+  const APPEARED_ROWS_LIMIT = 4000
+const appearedRows = new Set<string>()
+
+// New timeline rows (thinking, tool rows, response parts) fade in instead of
+// popping in. Keys already rendered once are skipped so virtualized scrolling
+// never re-animates recycled rows.
+function fadeInRow(element: HTMLElement | undefined, key: string) {
+  if (element === undefined || appearedRows.has(key)) return
+  if (appearedRows.size >= APPEARED_ROWS_LIMIT) appearedRows.clear()
+  appearedRows.add(key)
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return
+  animate(element, {
+    opacity: [0, 1],
+    translateY: [10, 0],
+    scale: [0.985, 1],
+    duration: 420,
+    ease: "outBack(1.4)",
+  })
+}
+
+function VirtualTimelineRow(props: { rowKey: string }) {
     let element: HTMLDivElement
     const initialItem = virtualItemByKey().get(props.rowKey)!
     const initialRow = timelineRowByKey().get(props.rowKey)!
@@ -1264,6 +1333,7 @@ export function MessageTimeline(props: {
 
     return (
       <div
+        ref={(element) => fadeInRow(element, props.rowKey)}
         data-timeline-key={props.rowKey}
         style={{
           position: "absolute",

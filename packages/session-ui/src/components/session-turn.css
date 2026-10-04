@@ -121,6 +121,7 @@
     font-size: var(--font-size-base);
     font-weight: var(--font-weight-regular);
     line-height: var(--line-height-large);
+    text-align: inherit;
     cursor: pointer;
     opacity: 0;
     transition: opacity 0.15s ease;
@@ -135,18 +136,31 @@
     opacity: 1;
   }
 
+  [data-slot="session-turn-diffs-toggle"]:focus-visible {
+    opacity: 1;
+    outline: none;
+    box-shadow: var(--shadow-xs-border-focus);
+  }
+
   [data-slot="session-turn-diffs-more"] {
     color: var(--text-weak);
     font-family: var(--font-family-sans);
     font-size: var(--font-size-small);
     line-height: var(--line-height-large);
+    text-align: inherit;
     margin-top: 12px;
     padding: 0 0 6px;
     cursor: pointer;
     transition: color 0.15s ease;
 
-    &:hover {
+    &:hover,
+    &:focus-visible {
       color: var(--text-link-base);
+    }
+
+    &:focus-visible {
+      outline: none;
+      box-shadow: var(--shadow-xs-border-focus);
     }
   }
 

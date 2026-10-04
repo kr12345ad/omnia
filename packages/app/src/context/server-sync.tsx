@@ -158,11 +158,13 @@ export const loadActiveSessionsQuery = (
     queryKey: [scope, "activeSessions"] as const,
     queryFn: () => api.active(),
     enabled: true,
-    staleTime: Number.POSITIVE_INFINITY,
-    gcTime: Number.POSITIVE_INFINITY,
-    refetchOnMount: false,
-    refetchOnReconnect: false,
-    refetchOnWindowFocus: false,
+    // This seeds session_status with a snapshot, it is not live state. Pinning it
+    // stale (staleTime/gcTime Infinity plus every refetch trigger disabled) meant a
+    // reconnect never re-read it and sessions resumed elsewhere rendered idle
+    // forever, so keep the standard triggers on a bounded staleTime.
+    staleTime: 30_000,
+    refetchOnReconnect: true,
+    refetchOnWindowFocus: true,
   })
 
 export function seedActiveSessionStatuses(
@@ -320,19 +322,26 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
   const bootstrap = useQuery(() => ({
     queryKey: [serverSDK.scope, "bootstrap"],
     queryFn: async () => {
-      await bootstrapGlobal({
-        serverSDK: serverSDK.client,
-        serverAPI: serverSDK.api,
-        protocol: serverSDK.protocol,
-        scope: serverSDK.scope,
-        requestFailedTitle: language.t("common.requestFailed"),
-        translate: language.t,
-        formatMoreCount: (count) => language.t("common.moreCountSuffix", { count }),
-        setGlobalStore: setBootStore,
-        queryClient,
-      })
-      bootedAt = Date.now()
-      return bootedAt
+      // Until bootedAt is stamped every global event looks "old", which sends
+      // pre-bootstrap reconnects down the unguarded refresh paths.
+      bootingRoot = true
+      try {
+        await bootstrapGlobal({
+          serverSDK: serverSDK.client,
+          serverAPI: serverSDK.api,
+          protocol: serverSDK.protocol,
+          scope: serverSDK.scope,
+          requestFailedTitle: language.t("common.requestFailed"),
+          translate: language.t,
+          formatMoreCount: (count) => language.t("common.moreCountSuffix", { count }),
+          setGlobalStore: setBootStore,
+          queryClient,
+        })
+        bootedAt = Date.now()
+        return bootedAt
+      } finally {
+        bootingRoot = false
+      }
     },
   }))
 
@@ -544,8 +553,9 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
     if (eventType === "integration.connection.updated") void refreshProviders()
 
     if (directory === "global") {
-      if (eventType === "server.connected" && activeSessionsQuery.data === undefined && !activeSessionsQuery.isFetching)
-        void activeSessionsQuery.refetch()
+      // Every reconnect re-reads active sessions: sessions resumed (or finished)
+      // while this client was away only show up in this snapshot.
+      if (eventType === "server.connected" && !activeSessionsQuery.isFetching) void activeSessionsQuery.refetch()
       applyGlobalEvent({
         event,
         project: globalStore.project,

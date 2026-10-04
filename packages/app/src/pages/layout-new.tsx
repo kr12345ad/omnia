@@ -1,5 +1,6 @@
 import { createEffect, Suspense, type ParentProps } from "solid-js"
 import { createStore } from "solid-js/store"
+import { BrowserPanel } from "@/components/browser-panel"
 import { DebugBar } from "@/components/debug-bar"
 import { TabsInfoPopup } from "@/components/help-button"
 import { Titlebar, type TitlebarUpdate } from "@/components/titlebar"
@@ -38,9 +39,12 @@ export default function NewLayout(props: ParentProps) {
             : undefined
         }
       />
-      <main class="flex-1 min-h-0 min-w-0 overflow-x-hidden flex flex-col items-start contain-strict">
-        <Suspense>{props.children}</Suspense>
-      </main>
+      <div class="flex-1 min-h-0 min-w-0 flex flex-row">
+        <main class="flex-1 min-h-0 min-w-0 overflow-x-hidden overflow-y-auto flex flex-col items-stretch contain-strict">
+          <Suspense>{props.children}</Suspense>
+        </main>
+        <BrowserPanel />
+      </div>
       {import.meta.env.DEV && state.debugTools && <DebugBar inline />}
       <TabsInfoPopup />
       <ToastRegion v2 />

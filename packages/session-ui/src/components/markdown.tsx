@@ -17,6 +17,7 @@ import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
 import { IconButtonV2 } from "@opencode-ai/ui/v2/icon-button-v2"
 import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
 import { canReusePendingBlock, completedProjection } from "./markdown-projection"
+import { observeMarkdownFade } from "./markdown-fade"
 import type { Block, Projection } from "./markdown-stream"
 import {
   disposeMarkdownProjection,
@@ -532,7 +533,17 @@ export function Markdown(
       }))
   })
 
+  let fadeCleanup: (() => void) | undefined
+  createEffect(() => {
+    const container = root()
+    if (container === undefined || isServer) return
+    fadeCleanup?.()
+    fadeCleanup = observeMarkdownFade(container)
+  })
+
   onCleanup(() => {
+    fadeCleanup?.()
+    fadeCleanup = undefined
     if (copyCleanup) copyCleanup()
     disposeMarkdownProjection(owner)
     activeCodeKeys.forEach(disposeCode)

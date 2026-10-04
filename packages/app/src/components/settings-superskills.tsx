@@ -11,6 +11,7 @@ import { useLayout } from "@/context/layout"
 import { usePlatform } from "@/context/platform"
 import { useServer } from "@/context/server"
 import { useTabs } from "@/context/tabs"
+import { SelectField } from "./select-field"
 import { emptySuperskill, type Superskill, type SuperskillSummary } from "@/superskills"
 
 export const SettingsSuperskills = () => {
@@ -152,34 +153,37 @@ export const SettingsSuperskills = () => {
       return
     }
     void tabs.newDraft(
-      { server: server.key, directory },
+      { server: server.key, directory, mode: "work" },
       language.t("settings.superskills.aiPrompt", { request }),
     )
     dialog.close()
   }
 
   return (
-    <div class="flex flex-col gap-6 p-6">
+    <>
+      <div class="settings-v2-tab-header">
       <div class="flex items-start justify-between gap-4">
         <div class="flex flex-col gap-1">
-          <h2 class="text-16-medium text-text-strong">{language.t("settings.superskills.title")}</h2>
-          <p class="text-12-regular text-text-weak">{language.t("settings.superskills.description")}</p>
+          <h2 class="settings-v2-tab-title">{language.t("settings.superskills.title")}</h2>
+          <p class="text-[13px] font-[440] text-v2-text-text-muted">{language.t("settings.superskills.description")}</p>
         </div>
         <Button variant="secondary" size="small" icon="plus-small" onClick={startNew} disabled={!api}>
           {language.t("settings.superskills.new")}
         </Button>
       </div>
+      </div>
+      <div class="settings-v2-tab-body">
 
       <Show when={!api}>
-        <div class="text-12-regular text-text-weak">{language.t("settings.superskills.unavailable")}</div>
+        <div class="text-[13px] font-[440] text-v2-text-text-muted">{language.t("settings.superskills.unavailable")}</div>
       </Show>
 
       <Show when={api}>
-        <div class="flex flex-col gap-2 rounded-md border border-border-weak-base p-3">
-          <span class="text-12-medium text-text-strong">{language.t("settings.superskills.aiTitle")}</span>
-          <span class="text-11-regular text-text-weak">{language.t("settings.superskills.aiDescription")}</span>
+        <div class="flex flex-col gap-2 rounded-md border border-v2-border-border-muted p-3">
+          <span class="text-[13px] font-[530] text-v2-text-text-base">{language.t("settings.superskills.aiTitle")}</span>
+          <span class="text-[11px] font-[440] text-v2-text-text-muted">{language.t("settings.superskills.aiDescription")}</span>
           <textarea
-            class="min-h-20 w-full rounded-md border border-border-weak-base bg-background-base p-2 text-12-regular text-text-strong outline-none focus:border-border-strong-base"
+            class="min-h-20 w-full rounded-md border border-v2-border-border-muted bg-v2-background-bg-base p-2 text-[13px] font-[440] text-v2-text-text-base outline-none focus:border-v2-border-border-base"
             placeholder={language.t("settings.superskills.aiPlaceholder")}
             value={store.aiPrompt}
             onInput={(event) => setStore("aiPrompt", event.currentTarget.value)}
@@ -200,21 +204,21 @@ export const SettingsSuperskills = () => {
         <div class="flex gap-6">
           <div class="flex w-64 shrink-0 flex-col gap-1">
             <Show when={store.skills.length === 0 && !store.loading}>
-              <div class="px-2 py-3 text-12-regular text-text-weak">{language.t("settings.superskills.empty")}</div>
+              <div class="px-2 py-3 text-[13px] font-[440] text-v2-text-text-muted">{language.t("settings.superskills.empty")}</div>
             </Show>
             <For each={store.skills}>
               {(skill) => (
                 <div
-                  class="group flex items-center gap-2 rounded-md px-2 py-1.5 cursor-pointer hover:bg-surface-raised-base-hover"
-                  classList={{ "bg-surface-raised-base": selected() === skill.id }}
+                  class="group flex items-center gap-2 rounded-md px-2 py-1.5 cursor-pointer hover:bg-v2-overlay-simple-overlay-hover"
+                  classList={{ "bg-v2-background-bg-layer-01": selected() === skill.id }}
                   onClick={() => void edit(skill.id)}
                 >
-                  <Icon name="dot-grid" size="small" class="shrink-0 text-icon-weak-base" />
+                  <Icon name="dot-grid" size="small" class="shrink-0 text-v2-icon-icon-muted" />
                   <div class="flex min-w-0 flex-1 flex-col">
-                    <span class="truncate text-12-medium text-text-strong">{skill.name}</span>
-                    <span class="truncate text-11-regular text-text-weak">{skill.methods.length} methods</span>
+                    <span class="truncate text-[13px] font-[530] text-v2-text-text-base">{skill.name}</span>
+                    <span class="truncate text-[11px] font-[440] text-v2-text-text-muted">{skill.methods.length} methods</span>
                   </div>
-                  <Switch checked={skill.enabled} onChange={(value) => void toggle(skill, value)} />
+                  <span onClick={(event) => event.stopPropagation()}><Switch checked={skill.enabled} onChange={(value) => void toggle(skill, value)} /></span>
                 </div>
               )}
             </For>
@@ -241,30 +245,28 @@ export const SettingsSuperskills = () => {
                   onChange={(value) => setStore("draft", "description", value)}
                 />
                 <label class="flex flex-col gap-1.5">
-                  <span class="text-12-medium text-text-strong">{language.t("settings.superskills.instructions")}</span>
+                  <span class="text-[13px] font-[530] text-v2-text-text-muted">{language.t("settings.superskills.instructions")}</span>
                   <textarea
-                    class="min-h-40 w-full rounded-md border border-border-weak-base bg-background-base p-2 text-12-regular text-text-strong outline-none focus:border-border-strong-base"
+                    class="min-h-40 w-full rounded-md border border-v2-border-border-muted bg-v2-background-bg-base p-2 text-[13px] font-[440] text-v2-text-text-base outline-none focus:border-v2-border-border-base"
                     value={skill().instructions}
                     onInput={(event) => setStore("draft", "instructions", event.currentTarget.value)}
                   />
                 </label>
                 <div class="grid grid-cols-2 gap-3">
-                  <label class="flex flex-col gap-1.5">
-                    <span class="text-12-medium text-text-strong">{language.t("settings.superskills.bridge")}</span>
-                    <select
-                      class="rounded-md border border-border-weak-base bg-background-base px-2 py-1.5 text-12-regular text-text-strong outline-none"
-                      value={skill().bridge.type}
-                      onChange={(event) =>
-                        setStore("draft", "bridge", {
-                          ...skill().bridge,
-                          type: event.currentTarget.value === "http" ? "http" : "stdio",
-                        })
-                      }
-                    >
-                      <option value="stdio">{language.t("settings.superskills.bridge.stdio")}</option>
-                      <option value="http">{language.t("settings.superskills.bridge.http")}</option>
-                    </select>
-                  </label>
+                  <SelectField
+                    label={language.t("settings.superskills.bridge")}
+                    value={skill().bridge.type}
+                    options={[
+                      { value: "stdio", label: language.t("settings.superskills.bridge.stdio") },
+                      { value: "http", label: language.t("settings.superskills.bridge.http") },
+                    ]}
+                    onChange={(value) =>
+                      setStore("draft", "bridge", {
+                        ...skill().bridge,
+                        type: value === "http" ? "http" : "stdio",
+                      })
+                    }
+                  />
                   <Show
                     when={skill().bridge.type === "http"}
                     fallback={
@@ -283,9 +285,9 @@ export const SettingsSuperskills = () => {
                   </Show>
                 </div>
                 <label class="flex flex-col gap-1.5">
-                  <span class="text-12-medium text-text-strong">{language.t("settings.superskills.methods")}</span>
+                  <span class="text-[13px] font-[530] text-v2-text-text-muted">{language.t("settings.superskills.methods")}</span>
                   <textarea
-                    class="min-h-32 w-full rounded-md border border-border-weak-base bg-background-base p-2 font-mono text-11-regular text-text-strong outline-none focus:border-border-strong-base"
+                    class="min-h-32 w-full rounded-md border border-v2-border-border-muted bg-v2-background-bg-base p-2 font-mono text-[11px] font-[440] text-v2-text-text-base outline-none focus:border-v2-border-border-base"
                     value={store.methodsText}
                     onInput={(event) => setStore("methodsText", event.currentTarget.value)}
                   />
@@ -295,7 +297,7 @@ export const SettingsSuperskills = () => {
                     checked={skill().enabled}
                     onChange={(value) => setStore("draft", "enabled", value)}
                   />
-                  <span class="text-12-regular text-text-strong">{language.t("settings.superskills.enabled")}</span>
+                  <span class="text-[13px] font-[440] text-v2-text-text-base">{language.t("settings.superskills.enabled")}</span>
                 </div>
                 <div class="flex items-center gap-2">
                   <Button variant="primary" size="small" onClick={() => void save()} disabled={store.saving}>
@@ -314,10 +316,10 @@ export const SettingsSuperskills = () => {
                   </Show>
                 </div>
                 <Show when={store.status}>
-                  <div class="rounded-md bg-surface-raised-base p-2 text-11-regular text-text-weak">{store.status}</div>
+                  <div class="rounded-md bg-v2-background-bg-layer-01 p-2 text-[11px] font-[440] text-v2-text-text-muted">{store.status}</div>
                 </Show>
                 <Show when={store.error}>
-                  <div class="rounded-md bg-surface-raised-base p-2 text-11-regular text-icon-critical-base">
+                  <div class="rounded-md bg-v2-background-bg-layer-01 p-2 text-[11px] font-[440] text-v2-state-fg-danger">
                     {store.error}
                   </div>
                 </Show>
@@ -326,6 +328,7 @@ export const SettingsSuperskills = () => {
           </Show>
         </div>
       </Show>
-    </div>
+      </div>
+    </>
   )
 }

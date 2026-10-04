@@ -27,6 +27,15 @@ describe("tab migration", () => {
     expect(migrateTabs(null, server)).toEqual([])
     expect(migrateTabs({}, server)).toEqual([])
   })
+
+  test("defaults the mode of legacy drafts and preserves recorded modes", () => {
+    expect(migrateTabs([{ type: "draft", draftID: "d1", server, directory: "/tmp" }], server)).toEqual([
+      { type: "draft", draftID: "d1", server, directory: "/tmp", mode: "work" },
+    ])
+    expect(migrateTabs([{ type: "draft", draftID: "d2", server, directory: "/tmp", mode: "code" }], server)).toEqual([
+      { type: "draft", draftID: "d2", server, directory: "/tmp", mode: "code" },
+    ])
+  })
 })
 
 describe("tab memory", () => {
@@ -60,7 +69,7 @@ describe("closed tab stack", () => {
   })
 
   test("ignores draft tabs", () => {
-    const draft: Tab = { type: "draft", draftID: "d1", server, directory: "/tmp" }
+    const draft: Tab = { type: "draft", draftID: "d1", server, directory: "/tmp", mode: "work" }
 
     expect(pushClosedTab([], draft, 0)).toEqual([])
   })

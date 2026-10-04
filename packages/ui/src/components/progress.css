@@ -61,3 +61,9 @@
     transform: translateX(300%);
   }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  [data-component="progress"][data-indeterminate] [data-slot="progress-fill"] {
+    animation: none;
+  }
+}

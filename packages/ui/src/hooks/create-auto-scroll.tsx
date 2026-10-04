@@ -10,11 +10,19 @@ export interface AutoScrollOptions {
   bottomThreshold?: number
 }
 
+function reducedMotion(): boolean {
+  if (typeof window === "undefined") return true
+  if (typeof window.matchMedia !== "function") return true
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+}
+
 export function createAutoScroll(options: AutoScrollOptions) {
   let settling = false
   let settleTimer: ReturnType<typeof setTimeout> | undefined
   let autoTimer: ReturnType<typeof setTimeout> | undefined
   let auto: { top: number; time: number } | undefined
+  let followFrame: number | undefined
+  let followLast = 0
 
   const threshold = () => options.bottomThreshold ?? 10
 
@@ -63,17 +71,50 @@ export function createAutoScroll(options: AutoScrollOptions) {
     return Math.abs(el.scrollTop - a.top) < 2
   }
 
-  const scrollToBottomNow = (behavior: ScrollBehavior) => {
+  const cancelFollow = () => {
+    if (followFrame !== undefined) cancelAnimationFrame(followFrame)
+    followFrame = undefined
+  }
+
+  // Follow the bottom with exponential smoothing instead of assigning the
+  // position or restarting an animation per resize: each frame eases a fixed
+  // fraction of the remaining distance, so streaming content produces one
+  // continuous, genuinely fluid glide that never steps or snaps.
+  const stepFollow = (now: number) => {
+    const el = store.scrollRef
+    if (!el) {
+      cancelFollow()
+      return
+    }
+    const dt = Math.min(64, Math.max(1, now - followLast))
+    followLast = now
+    const target = Math.max(0, el.scrollHeight - el.clientHeight)
+    const distance = target - el.scrollTop
+    if (Math.abs(distance) < 0.5) {
+      el.scrollTop = target
+      cancelFollow()
+      return
+    }
+    el.scrollTop += distance * (1 - Math.exp(-dt / 90))
+    followFrame = requestAnimationFrame(stepFollow)
+  }
+
+  const startFollow = () => {
+    if (followFrame !== undefined) return
+    followLast = performance.now()
+    followFrame = requestAnimationFrame(stepFollow)
+  }
+
+  const scrollToBottomNow = (_behavior: ScrollBehavior) => {
     const el = store.scrollRef
     if (!el) return
     markAuto(el)
-    if (behavior === "smooth") {
-      el.scrollTo({ top: el.scrollHeight, behavior })
+    if (reducedMotion()) {
+      cancelFollow()
+      el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight)
       return
     }
-
-    // `scrollTop` assignment bypasses any CSS `scroll-behavior: smooth`.
-    el.scrollTop = el.scrollHeight
+    startFollow()
   }
 
   const scrollToBottom = (force: boolean) => {
@@ -98,6 +139,7 @@ export function createAutoScroll(options: AutoScrollOptions) {
   }
 
   const stop = () => {
+    cancelFollow()
     const el = store.scrollRef
     if (!el) return
     if (!canScroll(el)) {
@@ -125,6 +167,9 @@ export function createAutoScroll(options: AutoScrollOptions) {
   const handleScroll = () => {
     const el = store.scrollRef
     if (!el) return
+
+    // Ignore scroll events produced by our own follow loop.
+    if (followFrame !== undefined) return
 
     if (!canScroll(el)) {
       if (store.userScrolled) setStore("userScrolled", false)
@@ -185,6 +230,8 @@ export function createAutoScroll(options: AutoScrollOptions) {
       scrollToBottom(false)
     },
   )
+
+  onCleanup(cancelFollow)
 
   createEffect(
     on(options.working, (working: boolean) => {

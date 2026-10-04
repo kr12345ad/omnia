@@ -1,0 +1,26 @@
+[data-component="thinking-animation"] {
+  display: block;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  overflow: visible;
+  color: var(--v2-icon-icon-accent, #c98a5e);
+
+  [data-orb],
+  [data-halo] {
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+
+  [data-orbit-a],
+  [data-orbit-b] {
+    transform-box: view-box;
+    transform-origin: 8px 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-component="thinking-animation"] [data-halo] {
+    opacity: 0.25;
+  }
+}

@@ -18,9 +18,10 @@
 }
 
 @media (display-mode: standalone) {
-  /* WebKit excludes safe-area insets from dvh in installed apps. */
+  /* Keep dynamic viewport height so installed apps track display scaling
+     instead of jumping to a fixed 100vh and letterboxing. */
   #root {
-    height: 100vh;
+    height: 100dvh;
   }
 }
 
@@ -28,6 +29,89 @@
   [data-component="getting-started"] {
     container-type: inline-size;
     container-name: getting-started;
+  }
+
+  .group\/prompt-input {
+    transition: box-shadow .22s, border-color .22s;
+  }
+
+  .group\/prompt-input:focus-within {
+    box-shadow: 0 0 0 1px #7dd3fc73, 0 8px 32px #0ea5e91f;
+  }
+
+  .home-qa-card {
+    transition: transform .22s var(--spring-gentle, cubic-bezier(.25, 1.1, .35, 1)), box-shadow .22s ease, background-color .15s ease;
+  }
+
+  .home-qa-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 28px #02061273;
+  }
+
+  .home-qa-card:active {
+    transform: translateY(0) scale(.97);
+  }
+
+  .home-slide-in-right {
+    animation: home-slide-in-right .38s var(--spring-bouncy, cubic-bezier(.34, 1.56, .64, 1)) backwards;
+    will-change: transform, opacity;
+    max-width: 100%;
+    overflow: clip;
+  }
+
+  .home-slide-in-left {
+    animation: home-slide-in-left .38s var(--spring-bouncy, cubic-bezier(.34, 1.56, .64, 1)) backwards;
+    will-change: transform, opacity;
+    max-width: 100%;
+    overflow: clip;
+  }
+
+  @keyframes home-slide-in-right {
+    0% {
+      opacity: 0;
+      transform: translateX(56px) scale(.995);
+    }
+
+    60% {
+      opacity: 1;
+      transform: translateX(-6px) scale(1);
+    }
+
+    100% {
+      opacity: 1;
+      transform: translateX(0) scale(1);
+    }
+  }
+
+  @keyframes home-slide-in-left {
+    0% {
+      opacity: 0;
+      transform: translateX(-56px) scale(.995);
+    }
+
+    60% {
+      opacity: 1;
+      transform: translateX(6px) scale(1);
+    }
+
+    100% {
+      opacity: 1;
+      transform: translateX(0) scale(1);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .home-qa-card:hover, .home-qa-card:active {
+      transform: none;
+    }
+
+    .home-slide-in-right, .home-slide-in-left {
+      animation: none;
+    }
+
+    .group\/prompt-input:focus-within {
+      box-shadow: none;
+    }
   }
 
   [data-component="dropdown-menu-content"].desktop-app-menu,
@@ -292,9 +376,12 @@
     }
 
     [data-slot="home-projects-scroll"]::after {
-      animation: home-projects-fade-bottom linear both;
+      /* `forwards` from the first scroll pixel: with no scroll range the timeline
+         stays at progress 0 (before phase), and a `both` fill would hold the
+         visible `from` keyframe, permanently masking the last 16px of the list. */
+      animation: home-projects-fade-bottom linear forwards;
       animation-timeline: --home-projects-scroll;
-      animation-range: calc(100% - 1.1px) calc(100% - 1px);
+      animation-range: 1px calc(100% - 1px);
     }
   }
 
@@ -310,9 +397,11 @@
     }
 
     [data-slot="model-selector-scroll"]::after {
-      animation: home-projects-fade-bottom linear both;
+      /* Same as the project list: a non-scrollable list must keep the overlay
+         hidden instead of filling the visible `from` keyframe. */
+      animation: home-projects-fade-bottom linear forwards;
       animation-timeline: --model-selector-scroll;
-      animation-range: calc(100% - 1.1px) calc(100% - 1px);
+      animation-range: 1px calc(100% - 1px);
     }
   }
 

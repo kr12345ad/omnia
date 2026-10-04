@@ -1,0 +1,75 @@
+[data-component="tool-checkmark"] {
+  color: var(--icon-success-base, #4cc38a);
+  flex-shrink: 0;
+
+  circle {
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+}
+
+[data-component="tool-working-animation"] {
+  display: block;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--icon-interactive-base, currentColor);
+  overflow: visible;
+
+  [data-spin] {
+    transform-box: view-box;
+    transform-origin: 8px 8px;
+  }
+
+  [data-core] {
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+}
+
+[data-component="searching-web-animation"],
+[data-component="computer-plan-animation"] {
+  display: block;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  color: var(--icon-interactive-base, currentColor);
+  overflow: visible;
+
+  [data-globe],
+  [data-screen],
+  [data-stand] {
+    opacity: 0.4;
+  }
+
+  [data-orbit] {
+    transform-box: view-box;
+    transform-origin: 8px 8px;
+  }
+
+  [data-ring],
+  [data-blip],
+  [data-check] {
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+}
+
+[data-component="computer-plan-animation"] [data-caret] {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-component="searching-web-animation"] [data-orbit],
+  [data-component="computer-plan-animation"] [data-caret] {
+    display: none;
+  }
+
+  [data-component="searching-web-animation"] [data-blip],
+  [data-component="computer-plan-animation"] [data-tick],
+  [data-component="computer-plan-animation"] [data-line] {
+    opacity: 0.8;
+    stroke-dashoffset: 0;
+  }
+}

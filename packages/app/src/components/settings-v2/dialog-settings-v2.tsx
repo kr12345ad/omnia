@@ -12,6 +12,8 @@ import "./settings-v2.css"
 import { SettingsServersV2 } from "./servers"
 import { SettingsSuperskills } from "../settings-superskills"
 import { SettingsMemory } from "../settings-memory"
+import { SettingsComputers } from "../settings-computers"
+import { SettingsComputerUse } from "../settings-computer-use"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { useLayout } from "@/context/layout"
 import { useTabs } from "@/context/tabs"
@@ -74,12 +76,20 @@ export const DialogSettings: Component<{
                   <TabsV2.SectionTitle>{language.t("settings.section.computer")}</TabsV2.SectionTitle>
                   <div class="flex flex-col gap-1.5 w-full">
                     <TabsV2.Trigger value="superskills">
-                      <Icon name="dot-grid" />
+                      <Icon name="mcp" />
                       {language.t("settings.superskills.title")}
                     </TabsV2.Trigger>
                     <TabsV2.Trigger value="memory">
-                      <Icon name="dot-grid" />
+                      <Icon name="brain" />
                       {language.t("settings.memory.title")}
+                    </TabsV2.Trigger>
+                    <TabsV2.Trigger value="computer-use">
+                      <Icon name="glasses" />
+                      {language.t("settings.computerUse.title")}
+                    </TabsV2.Trigger>
+                    <TabsV2.Trigger value="computers">
+                      <Icon name="window-cursor" />
+                      {language.t("settings.computers.title")}
                     </TabsV2.Trigger>
                   </div>
                 </div>
@@ -105,7 +115,7 @@ export const DialogSettings: Component<{
             </div>
             <div class="settings-v2-nav-footer">
               <span>{language.t("app.name.desktop")}</span>
-              <span>v{platform.version}</span>
+              <span>v{platform.version?.replace(/\.0(?=-|$)/, "")}</span>
             </div>
           </div>
         </TabsV2.List>
@@ -129,6 +139,12 @@ export const DialogSettings: Component<{
         </TabsV2.Content>
         <TabsV2.Content value="memory" class="settings-v2-panel">
           <SettingsMemory />
+        </TabsV2.Content>
+        <TabsV2.Content value="computer-use" class="settings-v2-panel">
+          <SettingsComputerUse />
+        </TabsV2.Content>
+        <TabsV2.Content value="computers" class="settings-v2-panel">
+          <SettingsComputers />
         </TabsV2.Content>
       </TabsV2>
     </Dialog>

@@ -7,6 +7,9 @@ import { TextInputV2 } from "@opencode-ai/ui/v2/text-input-v2"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { useLanguage } from "@/context/language"
 import { usePlatform } from "@/context/platform"
+import { useLayout } from "@/context/layout"
+import { useServer } from "@/context/server"
+import { useTabs } from "@/context/tabs"
 import { useUpdaterAction } from "../updater-action"
 import { useSettings } from "@/context/settings"
 import { ExternalLink } from "../external-link"
@@ -515,6 +518,39 @@ export const SettingsGeneralV2: Component<{
     </div>
   )
 
+  const tabs = useTabs()
+  const server = useServer()
+  const layout = useLayout()
+  const [calibration] = createResource(() => platform.computerUse?.calibration?.().catch(() => undefined))
+
+  const calibrationSummary = () => {
+    const status = calibration()
+    if (status === undefined) return undefined
+    if (status.profile === undefined) return language.t("settings.general.row.displayCalibration.notCalibrated")
+    if (status.stale) {
+      return language.t("settings.general.row.displayCalibration.stale", {
+        width: status.screen?.width ?? 0,
+        height: status.screen?.height ?? 0,
+      })
+    }
+    return language.t("settings.general.row.displayCalibration.calibrated", {
+      scaleX: status.profile.scaleX.toFixed(3),
+      scaleY: status.profile.scaleY.toFixed(3),
+      offsetX: status.profile.offsetX.toFixed(0),
+      offsetY: status.profile.offsetY.toFixed(0),
+    })
+  }
+
+  const calibrateWithAgent = () => {
+    const directory = layout.projects.list()[0]?.worktree
+    if (directory === undefined) return
+    void tabs.newDraft(
+      { server: server.key, directory, mode: "work" },
+      language.t("settings.general.displayCalibration.prompt"),
+    )
+    dialog.close()
+  }
+
   // We can probably remove this, right?
   const DisplaySection = () => (
     <Show when={desktop()}>
@@ -528,6 +564,16 @@ export const SettingsGeneralV2: Component<{
           >
             <div data-action="settings-pinch-zoom">
               <Switch checked={pinchZoom.latest} onChange={onPinchZoomChange} />
+            </div>
+          </SettingsRowV2>
+          <SettingsRowV2
+            title={language.t("settings.general.row.displayCalibration.title")}
+            description={calibrationSummary() ?? language.t("settings.general.row.displayCalibration.description")}
+          >
+            <div data-action="settings-display-calibration">
+              <ButtonV2 variant="outline" size="small" onClick={calibrateWithAgent}>
+                {language.t("settings.general.row.displayCalibration.action")}
+              </ButtonV2>
             </div>
           </SettingsRowV2>
         </SettingsListV2>

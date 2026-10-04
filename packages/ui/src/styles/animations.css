@@ -139,3 +139,177 @@
     animation-delay: 3s;
   }
 }
+
+:root {
+  --spring-bouncy: cubic-bezier(.34, 1.56, .64, 1);
+  --spring-smooth: cubic-bezier(.22, 1, .36, 1);
+  --spring-snappy: cubic-bezier(.3, 1.3, .4, 1);
+  --spring-gentle: cubic-bezier(.25, 1.1, .35, 1);
+}
+
+@keyframes spring-pop {
+  0% {
+    opacity: 0;
+    transform: scale(.6);
+  }
+
+  60% {
+    opacity: 1;
+    transform: scale(1.07);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes spring-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(12px) scale(.99);
+  }
+
+  60% {
+    opacity: 1;
+    transform: translateY(-2px) scale(1.002);
+  }
+
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes spring-fade-scale {
+  0% {
+    opacity: 0;
+    transform: scale(.92) translateY(8px);
+  }
+
+  60% {
+    opacity: 1;
+    transform: scale(1.015) translateY(-1px);
+  }
+
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes spring-press {
+  0% {
+    transform: scale(1);
+  }
+
+  40% {
+    transform: scale(.93);
+  }
+
+  70% {
+    transform: scale(1.02);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes typing-bounce {
+  0%, 60%, 100% {
+    opacity: .45;
+    transform: translateY(0);
+  }
+
+  30% {
+    opacity: 1;
+    transform: translateY(-4px);
+  }
+}
+
+@keyframes soft-breathe {
+  0%, 100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.04);
+  }
+}
+
+@keyframes shimmer-slide {
+  from {
+    background-position: 200% 0;
+  }
+
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.anim-pop {
+  animation: spring-pop .42s var(--spring-bouncy) backwards;
+}
+
+.anim-rise {
+  animation: spring-rise .45s var(--spring-smooth) backwards;
+}
+
+.anim-fade-scale {
+  animation: spring-fade-scale .38s var(--spring-bouncy) backwards;
+}
+
+.anim-lift {
+  transition: transform .22s var(--spring-gentle), box-shadow .22s ease, background-color .15s ease;
+}
+
+.anim-lift:hover {
+  transform: translateY(-2px);
+}
+
+.anim-press {
+  transition: transform .16s var(--spring-bouncy);
+}
+
+.anim-press:active {
+  transform: scale(.94);
+}
+
+.typing-dots {
+  align-items: center;
+  gap: 4px;
+  display: inline-flex;
+}
+
+.typing-dots > span {
+  opacity: .45;
+  background: currentColor;
+  border-radius: 999px;
+  width: 6px;
+  height: 6px;
+  animation: 1.2s ease-in-out infinite typing-bounce;
+}
+
+.typing-dots > span:nth-child(2) {
+  animation-delay: .15s;
+}
+
+.typing-dots > span:nth-child(3) {
+  animation-delay: .3s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-pop, .anim-rise, .anim-fade-scale {
+    animation: none;
+  }
+
+  .anim-lift:hover, .anim-press:active {
+    transform: none;
+  }
+
+  .typing-dots > span {
+    opacity: .7;
+    animation: none;
+  }
+}

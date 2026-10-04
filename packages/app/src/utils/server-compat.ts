@@ -1,5 +1,6 @@
 import type { ServerApi } from "./server"
 import type { ServerProtocol } from "./server-protocol"
+import { sessionModeMetadata, type SessionMode } from "./session-mode"
 import type { AgentPartInput, FilePartInput, OpencodeClient, Session, TextPartInput } from "@opencode-ai/sdk/v2/client"
 import type {
   Project,
@@ -20,8 +21,12 @@ type LegacyClient = OpencodeClient
 type LegacyFor = (directory?: string) => LegacyClient
 type CompatibleSessionApi = Omit<
   SessionApi,
-  "prompt" | "command" | "shell" | "compact" | "rename" | "archive" | "remove"
+  "create" | "prompt" | "command" | "shell" | "compact" | "rename" | "archive" | "remove"
 > & {
+  // `mode` is app-level session metadata, not part of the v2 wire contract.
+  create: (
+    input?: Parameters<SessionApi["create"]>[0] & { mode?: SessionMode },
+  ) => ReturnType<SessionApi["create"]>
   prompt: (input: SessionPromptInput & LegacyPrompt) => Promise<SessionPromptOutput>
   command: (input: SessionCommandInput) => Promise<SessionCommandOutput>
   shell: (input: SessionShellInput & LegacyPrompt) => Promise<SessionShellOutput>
@@ -85,10 +90,34 @@ function sessionInfo(session: Session): SessionInfo {
 
 export function createCompatibleApi(input: CompatibleInput): CompatibleApi {
   const v1 = createV1Api(input)
+  const v2 = createV2Api(input)
   return lazyApi(
-    input.protocol.then((protocol) => (protocol === "v1" ? v1 : input.current)),
+    input.protocol.then((protocol) => (protocol === "v1" ? v1 : v2)),
     input.current,
   )
+}
+
+// The current session API has no metadata field on create, so stamp the mode
+// through the compatibility route that does. Sessions created before the first
+// prompt must already carry it for the tool surface to filter.
+function createV2Api(input: CompatibleInput): CompatibleApi {
+  return {
+    ...input.current,
+    session: {
+      ...input.current.session,
+      async create(value?: Parameters<ServerApi["session"]["create"]>[0] & { mode?: SessionMode }) {
+        const created = await input.current.session.create(value)
+        if (value?.mode) {
+          // The session already exists; a failed stamp must not fail creation.
+          await input
+            .legacy(created.location?.directory ?? value.location?.directory)
+            .session.update({ sessionID: created.id, metadata: sessionModeMetadata(value.mode) })
+            .catch(() => undefined)
+        }
+        return created
+      },
+    },
+  }
 }
 
 function lazyApi<T extends object>(implementation: Promise<T>, shape: T): T {
@@ -160,9 +189,10 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
         })
         return { data: (result.data ?? []).map(sessionInfo), cursor: {} }
       },
-      async create(value?: Parameters<ServerApi["session"]["create"]>[0]) {
+      async create(value?: Parameters<ServerApi["session"]["create"]>[0] & { mode?: SessionMode }) {
         const result = await legacy(value?.location ?? undefined).session.create({
           directory: directory(value?.location ?? undefined),
+          metadata: value?.mode ? sessionModeMetadata(value.mode) : undefined,
         })
         if (!result.data) throw new Error("Failed to create session")
         return sessionInfo(result.data)

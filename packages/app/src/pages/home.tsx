@@ -1,4 +1,5 @@
-import { Show } from "solid-js"
+import { createEffect, createMemo, on, Show } from "solid-js"
+import { createStore } from "solid-js/store"
 import { ScrollView } from "@opencode-ai/ui/scroll-view"
 import { useSettings } from "@/context/settings"
 import { WorkHome } from "./home/work-home"
@@ -11,12 +12,60 @@ import { createHomeSessionSearchController } from "./home/home-session-search-co
 import { createHomeSessionsController } from "./home/home-sessions-controller"
 import { HomeSessions } from "./home/home-sessions"
 
+type HomeMode = "work" | "code"
+
 export function NewHome() {
   const settings = useSettings()
+  const mode = createMemo<HomeMode>(() => (settings.general.mode() === "work" ? "work" : "code"))
+  const isCode = () => mode() === "code"
+  // Entering direction for the slide: code arrives from the right, work from the
+  // left. A plain memo of the mode, so the class the active home renders with is
+  // correct on the very first paint (an effect would paint the previous
+  // direction once). CSS drops the animation for prefers-reduced-motion.
+  const slideClass = () => (isCode() ? "home-slide-in-right" : "home-slide-in-left")
+  // A home is constructed the first time its mode becomes active and stays
+  // mounted after that. Mounting both on first paint would build two sets of
+  // controllers (scroll, search, projects) that race on the same shared state
+  // while one of them is `display:none`; remounting an already-visited home would
+  // throw away its controllers, refetch its data and make the switch feel like
+  // it never opened. The active mode always mounts, so a mode that hydrates from
+  // persisted settings after the first paint still renders.
+  const [visited, setVisited] = createStore<Record<HomeMode, boolean>>({ work: false, code: false })
+  const mounted = (next: HomeMode) => next === mode() || visited[next]
+  createEffect(on(mode, (next) => setVisited(next, true)))
+
+  // NOTE: `hidden` (display:none) must never compete with `flex` (display:flex) in
+  // the same class list — drive display solely through classList or both show at
+  // once. Only the active wrapper carries the slide class, so re-showing a kept
+  // alive home replays the entrance animation.
+  // The outer wrapper is flex-1 so children stretch full width/height.
   return (
-    <Show when={settings.general.mode() === "work"} fallback={<CodeHome />}>
-      <WorkHome />
-    </Show>
+    <div class="flex min-h-0 w-full min-w-0 flex-1 flex-col overflow-clip contain-strict">
+      <Show when={mounted("work")}>
+        <div
+          class="min-h-0 w-full min-w-0 flex-1 flex-col overflow-clip"
+          classList={{
+            hidden: isCode(),
+            flex: !isCode(),
+            [slideClass()]: !isCode(),
+          }}
+        >
+          <WorkHome />
+        </div>
+      </Show>
+      <Show when={mounted("code")}>
+        <div
+          class="min-h-0 w-full min-w-0 flex-1 flex-col overflow-clip"
+          classList={{
+            hidden: !isCode(),
+            flex: isCode(),
+            [slideClass()]: isCode(),
+          }}
+        >
+          <CodeHome />
+        </div>
+      </Show>
+    </div>
   )
 }
 

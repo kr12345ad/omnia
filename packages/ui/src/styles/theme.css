@@ -629,3 +629,13 @@
     --text-stronger: rgba(255, 255, 255, 0.936);
   }
 }
+
+/* Native form controls (select popups, scrollbars, calendars) must follow the
+   app color scheme, not the OS preference. Without this, dark-mode app windows
+   on light-mode systems render white <select> dropdowns. */
+:root[data-color-scheme="dark"] {
+  color-scheme: dark;
+}
+:root[data-color-scheme="light"] {
+  color-scheme: light;
+}

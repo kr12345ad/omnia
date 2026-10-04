@@ -99,11 +99,12 @@ export const SettingsMemory = () => {
   const statEntries = createMemo(() => Object.entries(store.stats))
 
   return (
-    <div class="flex flex-col gap-6 p-6">
+    <>
+      <div class="settings-v2-tab-header">
       <div class="flex items-start justify-between gap-4">
         <div class="flex flex-col gap-1">
-          <h2 class="text-16-medium text-text-strong">{language.t("settings.memory.title")}</h2>
-          <p class="text-12-regular text-text-weak">{language.t("settings.memory.description")}</p>
+          <h2 class="settings-v2-tab-title">{language.t("settings.memory.title")}</h2>
+          <p class="text-[13px] font-[440] text-v2-text-text-muted">{language.t("settings.memory.description")}</p>
         </div>
         <Button
           variant="secondary"
@@ -115,15 +116,17 @@ export const SettingsMemory = () => {
           {language.t("settings.memory.forget")}
         </Button>
       </div>
+      </div>
+      <div class="settings-v2-tab-body">
 
       <Show when={!api}>
-        <div class="text-12-regular text-text-weak">{language.t("settings.memory.unavailable")}</div>
+        <div class="text-[13px] font-[440] text-v2-text-text-muted">{language.t("settings.memory.unavailable")}</div>
       </Show>
 
       <Show when={api}>
         <div class="flex flex-col gap-4">
-          <div class="flex items-center gap-2 px-3 h-9 rounded-lg bg-surface-base">
-            <Icon name="magnifying-glass" class="text-icon-weak-base shrink-0" />
+          <div class="flex items-center gap-2 px-3 h-9 rounded-lg bg-v2-background-bg-layer-01">
+            <Icon name="magnifying-glass" class="text-v2-icon-icon-muted shrink-0" />
             <TextField
               variant="ghost"
               type="text"
@@ -161,25 +164,25 @@ export const SettingsMemory = () => {
           </div>
 
           <Show when={store.loading}>
-            <div class="text-12-regular text-text-weak">{language.t("common.loading")}</div>
+            <div class="text-[13px] font-[440] text-v2-text-text-muted">{language.t("common.loading")}</div>
           </Show>
 
           <Show when={!store.loading && store.memories.length === 0}>
-            <div class="text-12-regular text-text-weak">{language.t("settings.memory.empty")}</div>
+            <div class="text-[13px] font-[440] text-v2-text-text-muted">{language.t("settings.memory.empty")}</div>
           </Show>
 
           <div class="flex flex-col gap-2">
             <For each={store.memories}>
               {(memory) => (
-                <div class="flex items-start gap-3 rounded-md border border-border-weak-base p-3">
-                  <span class="shrink-0 rounded bg-surface-raised-base px-1.5 py-0.5 text-11-medium text-text-strong">
+                <div class="flex items-start gap-3 rounded-md border border-v2-border-border-muted p-3">
+                  <span class="shrink-0 rounded bg-v2-background-bg-layer-01 px-1.5 py-0.5 text-[11px] font-[530] text-v2-text-text-base">
                     {scopeLabel(memory.scope)}
                   </span>
                   <div class="flex min-w-0 flex-1 flex-col gap-1">
-                    <span class="line-clamp-3 whitespace-pre-wrap break-words text-12-regular text-text-strong">
+                    <span class="line-clamp-3 whitespace-pre-wrap break-words text-[13px] font-[440] text-v2-text-text-base">
                       {memory.text}
                     </span>
-                    <div class="flex flex-wrap items-center gap-2 text-11-regular text-text-weak">
+                    <div class="flex flex-wrap items-center gap-2 text-[11px] font-[440] text-v2-text-text-muted">
                       <Show when={memory.application}>{(application) => <span>{application()}</span>}</Show>
                       <For each={memory.tags ?? []}>{(tag) => <span>#{tag}</span>}</For>
                       <span>{age(memory)}</span>
@@ -200,15 +203,15 @@ export const SettingsMemory = () => {
           </div>
 
           <Show when={store.error}>
-            <div class="rounded-md bg-surface-raised-base p-2 text-11-regular text-icon-critical-base">{store.error}</div>
+            <div class="rounded-md bg-v2-background-bg-layer-01 p-2 text-[11px] font-[440] text-v2-state-fg-danger">{store.error}</div>
           </Show>
 
           <Show when={statEntries().length > 0}>
-            <div class="flex flex-wrap items-center gap-2 text-11-regular text-text-weak">
+            <div class="flex flex-wrap items-center gap-2 text-[11px] font-[440] text-v2-text-text-muted">
               <span>{language.t("settings.memory.stats")}</span>
               <For each={statEntries()}>
                 {([scope, count]) => (
-                  <span class="rounded bg-surface-raised-base px-1.5 py-0.5">
+                  <span class="rounded bg-v2-background-bg-layer-01 px-1.5 py-0.5">
                     {scopeLabel(scope)}: {count}
                   </span>
                 )}
@@ -217,6 +220,7 @@ export const SettingsMemory = () => {
           </Show>
         </div>
       </Show>
-    </div>
+      </div>
+    </>
   )
 }

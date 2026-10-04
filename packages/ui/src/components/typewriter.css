@@ -12,3 +12,9 @@
 .blinking-cursor {
   animation: blink 1s step-end infinite;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .blinking-cursor {
+    animation: none;
+  }
+}

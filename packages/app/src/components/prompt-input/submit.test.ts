@@ -11,7 +11,10 @@ const sessionCreateInputs: Array<{
   agent?: string
   model?: { id: string; providerID: string; variant?: string }
   location?: { directory: string }
+  mode?: "work" | "code"
 }> = []
+const draftTabs: Array<{ type: "draft"; draftID: string; mode: "work" | "code"; server: string }> = []
+const rememberedSessionModes: Array<{ sessionID: string; mode: "work" | "code" }> = []
 const enabledAutoAccept: Array<{ server: string; sessionID: string; directory: string }> = []
 const optimistic: Array<{
   directory?: string
@@ -135,6 +138,7 @@ beforeAll(async () => {
   mock.module("@opencode-ai/ui/toast", () => ({
     Toast: { Region: () => null },
     showToast: () => 0,
+    toaster: { dismiss: () => undefined },
   }))
 
   mock.module("@opencode-ai/core/util/encode", () => ({
@@ -173,9 +177,24 @@ beforeAll(async () => {
 
   mock.module("@/context/tabs", () => ({
     useTabs: () => ({
-      draft: () => ({ server: "project-server" }),
+      store: draftTabs,
+      draft: (draftID: string) => draftTabs.find((draft) => draft.draftID === draftID) ?? { server: "project-server" },
       promoteDraft: (draftID: string, session: { server: string; sessionId: string }) => {
         promotedDrafts.push({ draftID, ...session })
+      },
+    }),
+  }))
+
+  mock.module("@/context/settings", () => ({
+    useSettings: () => ({
+      general: {
+        mode: () => "work",
+        sessionModes: {
+          get: () => undefined,
+          remember: (sessionID: string, mode: "work" | "code") => {
+            rememberedSessionModes.push({ sessionID, mode })
+          },
+        },
       },
     }),
   }))
@@ -282,6 +301,8 @@ beforeEach(() => {
   createdClients.length = 0
   createdSessions.length = 0
   sessionCreateInputs.length = 0
+  draftTabs.length = 0
+  rememberedSessionModes.length = 0
   enabledAutoAccept.length = 0
   optimistic.length = 0
   optimisticSeeded.length = 0
@@ -339,12 +360,18 @@ describe("prompt submit worktree selection", () => {
         agent: "agent",
         model: { id: "model", providerID: "provider", variant: undefined },
         location: { directory: "/repo/worktree-a" },
+        mode: "work",
       },
       {
         agent: "agent",
         model: { id: "model", providerID: "provider", variant: undefined },
         location: { directory: "/repo/worktree-b" },
+        mode: "work",
       },
+    ])
+    expect(rememberedSessionModes).toEqual([
+      { sessionID: "session-1", mode: "work" },
+      { sessionID: "session-2", mode: "work" },
     ])
     expect(sentShell).toEqual([
       expect.objectContaining({ sessionID: "session-1", id: expect.stringMatching(/^evt_/), command: "ls" }),
@@ -445,6 +472,36 @@ describe("prompt submit worktree selection", () => {
     await submit.handleSubmit({ preventDefault: () => undefined } as unknown as Event)
 
     expect(promotedDrafts).toEqual([{ draftID: "draft-1", server: "project-server", sessionId: "session-1" }])
+  })
+
+  test("stamps the draft's fixed mode on the created session", async () => {
+    search = { draftId: "draft-1" }
+    draftTabs.push({ type: "draft", draftID: "draft-1", mode: "code", server: "project-server" })
+    const submit = createPromptSubmit({
+      prompt,
+      info: () => undefined,
+      imageAttachments: () => [],
+      commentCount: () => 0,
+      autoAccept: () => false,
+      mode: () => "normal",
+      working: () => false,
+      editor: () => undefined,
+      queueScroll: () => undefined,
+      promptLength: (value) => value.reduce((sum, part) => sum + ("content" in part ? part.content.length : 0), 0),
+      addToHistory: () => undefined,
+      resetHistoryNavigation: () => undefined,
+      setMode: () => undefined,
+      setPopover: () => undefined,
+      newSessionWorktree: () => selected,
+      onNewSessionWorktreeReset: () => undefined,
+      onSubmit: () => undefined,
+    })
+
+    await submit.handleSubmit({ preventDefault: () => undefined } as unknown as Event)
+
+    // The draft's mode wins over the toggle's "work" selection.
+    expect(sessionCreateInputs[0]?.mode).toBe("code")
+    expect(rememberedSessionModes).toEqual([{ sessionID: "session-1", mode: "code" }])
   })
 
   test("includes the selected variant on optimistic prompts", async () => {

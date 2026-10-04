@@ -79,6 +79,7 @@ import { PromptImageAttachments } from "./prompt-input/image-attachments"
 import { PromptDragOverlay } from "./prompt-input/drag-overlay"
 import { promptPlaceholder } from "./prompt-input/placeholder"
 import { useSettings } from "@/context/settings"
+import { resolveSessionMode } from "@/utils/session-mode"
 import { createPromptInputTransientState } from "./prompt-input/transient-state"
 import { showToast } from "@/utils/toast"
 import { ImagePreview } from "@opencode-ai/ui/image-preview"
@@ -285,6 +286,27 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     return text.trim().length === 0 && imageAttachments().length === 0 && commentCount() === 0
   })
   const stopping = createMemo(() => working() && blank())
+  let sendRef: HTMLButtonElement | undefined
+  const sendReady = createMemo(() => !working() && !blank())
+  createEffect((wasReady: boolean | undefined) => {
+    const ready = sendReady()
+    if (
+      ready &&
+      wasReady === false &&
+      sendRef !== undefined &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      sendRef.animate(
+        [
+          { transform: "scale(0.65)", opacity: "0.3" },
+          { transform: "scale(1.12)", opacity: "1", offset: 0.6 },
+          { transform: "scale(1)", opacity: "1" },
+        ],
+        { duration: 380, easing: "cubic-bezier(0.34, 1.56, 0.64, 1)" },
+      )
+    }
+    return ready
+  })
   const tip = () => {
     if (stopping()) {
       return (
@@ -322,10 +344,18 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
 
   const suggest = createMemo(() => !hasUserPrompt())
 
+  const appMode = createMemo(() =>
+    resolveSessionMode({
+      stored: props.controls.session.id ? settings.general.sessionModes.get(props.controls.session.id) : undefined,
+      metadata: info()?.metadata,
+      fallback: settings.general.mode(),
+    }),
+  )
+
   const placeholder = createMemo(() =>
     promptPlaceholder({
       mode: store.mode,
-      appMode: settings.general.mode(),
+      appMode: appMode(),
       commentCount: commentCount(),
       example: suggest() ? (store.mode === "shell" ? "git status" : language.t(EXAMPLES[store.placeholder])) : "",
       suggest: suggest(),
@@ -1582,6 +1612,9 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                 <IconButton
                   data-action="prompt-submit"
                   type="submit"
+                  ref={(el) => {
+                    sendRef = el
+                  }}
                   disabled={!working() && blank()}
                   tabIndex={store.mode === "normal" ? undefined : -1}
                   icon={stopping() ? "stop" : store.mode === "shell" ? "arrow-undo-down" : "arrow-up"}

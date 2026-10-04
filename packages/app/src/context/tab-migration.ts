@@ -1,5 +1,6 @@
 import type { ServerConnection } from "./server"
 import type { Tab } from "./tabs"
+import { DEFAULT_SESSION_MODE, type SessionMode } from "@/utils/session-mode"
 
 export function migrateTabs(value: unknown, fallback: ServerConnection.Key): Tab[] {
   if (!Array.isArray(value)) return []
@@ -16,7 +17,8 @@ export function migrateTabs(value: unknown, fallback: ServerConnection.Key): Tab
       typeof tab.directory === "string" &&
       (tab.worktree === undefined || typeof tab.worktree === "string")
     ) {
-      return [{ type: tab.type, server, draftID: tab.draftID, directory: tab.directory, worktree: tab.worktree }]
+      const mode: SessionMode = tab.mode === "work" || tab.mode === "code" ? tab.mode : DEFAULT_SESSION_MODE
+      return [{ type: tab.type, server, draftID: tab.draftID, directory: tab.directory, worktree: tab.worktree, mode }]
     }
     return []
   })

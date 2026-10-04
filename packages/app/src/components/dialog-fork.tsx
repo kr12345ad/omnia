@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "@solidjs/router"
 import { useSync } from "@/context/sync"
 import { useSDK } from "@/context/sdk"
 import { usePrompt } from "@/context/prompt"
+import { useSettings } from "@/context/settings"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { Dialog } from "@opencode-ai/ui/dialog"
 import { List } from "@opencode-ai/ui/list"
@@ -28,6 +29,7 @@ export const DialogFork: Component = () => {
   const sync = useSync()
   const sdk = useSDK()
   const prompt = usePrompt()
+  const settings = useSettings()
   const dialog = useDialog()
   const language = useLanguage()
 
@@ -71,6 +73,8 @@ export const DialogFork: Component = () => {
     sdk()
       .api.session.fork({ sessionID, messageID: item.id })
       .then((forked) => {
+        const mode = settings.general.sessionModes.get(sessionID)
+        if (mode) settings.general.sessionModes.remember(forked.id, mode)
         dialog.close()
         prompt.set(restored, undefined, { dir, id: forked.id })
         navigate(`/${dir}/session/${forked.id}`)

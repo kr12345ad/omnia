@@ -4,7 +4,8 @@ import { base64Encode } from "@opencode-ai/core/util/encode"
 import { Binary } from "@opencode-ai/core/util/binary"
 import { useNavigate, useParams, useSearchParams } from "@solidjs/router"
 import { batch, startTransition, type Accessor } from "solid-js"
-import { useTabs } from "@/context/tabs"
+import { useTabs, type DraftTab } from "@/context/tabs"
+import { useSettings } from "@/context/settings"
 import { useServerSync, type ServerSync } from "@/context/server-sync"
 import { useLanguage } from "@/context/language"
 import { useLayout } from "@/context/layout"
@@ -244,6 +245,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
   const params = useParams()
   const [search] = useSearchParams<{ draftId?: string }>()
   const tabs = useTabs()
+  const settings = useSettings()
   const pendingKey = (sessionID: string) => ScopedKey.from(sdk().scope, sessionID)
 
   const errorMessage = (err: unknown) => {
@@ -355,6 +357,13 @@ export function createPromptSubmit(input: PromptSubmitInput) {
     const isNewSession = !params.id
     const shouldAutoAccept = isNewSession && input.autoAccept()
     const worktreeSelection = input.newSessionWorktree?.() || "main"
+    const draftID = search.draftId
+    const draftTab = draftID
+      ? tabs.store.find((tab): tab is DraftTab => tab.type === "draft" && tab.draftID === draftID)
+      : undefined
+    // Fixed at creation: a draft keeps the mode it was created with, and a new
+    // session without a draft uses the toggle's current selection.
+    const sessionMode = draftTab?.mode ?? settings.general.mode()
 
     let sessionDirectory = projectDirectory
     let client = sdk().client
@@ -405,6 +414,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
           agent: currentAgent.name,
           model: { id: currentModel.id, providerID: currentModel.provider.id, variant },
           location: { directory: sessionDirectory },
+          mode: sessionMode,
         })
         .then(normalizeSessionInfo)
         .catch((err) => {
@@ -416,6 +426,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
         })
       if (created) {
         seed(sessionDirectory, created)
+        settings.general.sessionModes.remember(created.id, sessionMode)
         session = created
         await startTransition(() => {
           if (!session) return
@@ -426,7 +437,6 @@ export function createPromptSubmit(input: PromptSubmitInput) {
             variant: variant ?? null,
           })
           layout.handoff.setTabs(base64Encode(sessionDirectory), session.id)
-          const draftID = search.draftId
           if (draftID) tabs.promoteDraft(draftID, { server: tabs.draft(draftID).server, sessionId: session.id })
           else navigate(`/${base64Encode(sessionDirectory)}/session/${session.id}`)
           submission.retarget(prompt.capture({ dir: base64Encode(sessionDirectory), id: session.id }))

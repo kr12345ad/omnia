@@ -12,6 +12,8 @@ import { SettingsModels } from "./settings-models"
 import { SettingsServers } from "./settings-servers"
 import { SettingsSuperskills } from "./settings-superskills"
 import { SettingsMemory } from "./settings-memory"
+import { SettingsComputers } from "./settings-computers"
+import { SettingsComputerUse } from "./settings-computer-use"
 
 export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
   const language = useLanguage()
@@ -58,12 +60,20 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
                   <Tabs.SectionTitle>{language.t("settings.section.computer")}</Tabs.SectionTitle>
                   <div class="flex flex-col gap-1.5 w-full">
                     <Tabs.Trigger value="superskills">
-                      <Icon name="dot-grid" />
+                      <Icon name="mcp" />
                       {language.t("settings.superskills.title")}
                     </Tabs.Trigger>
                     <Tabs.Trigger value="memory">
-                      <Icon name="dot-grid" />
+                      <Icon name="brain" />
                       {language.t("settings.memory.title")}
+                    </Tabs.Trigger>
+                    <Tabs.Trigger value="computer-use">
+                      <Icon name="glasses" />
+                      {language.t("settings.computerUse.title")}
+                    </Tabs.Trigger>
+                    <Tabs.Trigger value="computers">
+                      <Icon name="window-cursor" />
+                      {language.t("settings.computers.title")}
                     </Tabs.Trigger>
                   </div>
                 </div>
@@ -85,7 +95,7 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
             </div>
             <div class="flex flex-col gap-1 pl-1 py-1 text-12-medium text-text-weak">
               <span>{language.t("app.name.desktop")}</span>
-              <span class="text-11-regular">v{platform.version}</span>
+              <span class="text-11-regular">v{platform.version?.replace(/\.0(?=-|$)/, "")}</span>
             </div>
           </div>
         </Tabs.List>
@@ -109,6 +119,12 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
         </Tabs.Content>
         <Tabs.Content value="memory" class="no-scrollbar">
           <SettingsMemory />
+        </Tabs.Content>
+        <Tabs.Content value="computer-use" class="no-scrollbar">
+          <SettingsComputerUse />
+        </Tabs.Content>
+        <Tabs.Content value="computers" class="no-scrollbar">
+          <SettingsComputers />
         </Tabs.Content>
       </Tabs>
     </Dialog>

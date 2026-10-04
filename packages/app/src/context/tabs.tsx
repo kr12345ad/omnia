@@ -13,6 +13,8 @@ import { createTabMemory } from "./tab-memory"
 import { nextTabAfterClose, pushClosedTab, removeClosedTabs, takeClosedTab, type ClosedTab } from "./closed-tabs"
 import { createDraftPromptSession, type PromptModel } from "./prompt-state"
 import { migrateTabs } from "./tab-migration"
+import { useSettings } from "./settings"
+import type { SessionMode } from "@/utils/session-mode"
 
 export type SessionTab = {
   type: "session"
@@ -26,6 +28,8 @@ export type DraftTab = {
   server: ServerConnection.Key
   directory: string
   worktree?: string
+  // Editable until the first message is sent; carried into the session on submit.
+  mode: SessionMode
 }
 
 export type Tab = SessionTab | DraftTab
@@ -56,6 +60,7 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
   init: () => {
     const server = useServer()
     const platform = usePlatform()
+    const settings = useSettings()
     const fallback = server.key
     const [store, setStore, _, ready] = persisted(
       {
@@ -156,13 +161,22 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
       const tab = store[index]
       if (!tab) return
       const key = tabKey(tab)
+      // A close already queued for this key resolves first and removes the tab,
+      // so a second close (double click, close plus a cleanup path) must not
+      // queue another splice and navigation.
+      if (closing.has(key)) return
       const draftID = tab.type === "draft" ? tab.draftID : undefined
-      const nextTab = nextTabAfterClose(store, index, recentKey() === key && location.pathname !== "/")
       closing.add(key)
       void startTransition(() => {
+        // startTransition defers this body to a microtask, so the index captured
+        // above can already belong to a different tab when two closes are
+        // queued back to back: resolve by key against the live store instead.
+        const current = store.findIndex((item) => tabKey(item) === key)
+        if (current === -1) return
+        const nextTab = nextTabAfterClose(store, current, recentKey() === key && location.pathname !== "/")
         setStore(
           produce((tabs) => {
-            tabs.splice(index, 1)
+            tabs.splice(current, 1)
           }),
         )
         if (nextTab === null) {
@@ -206,9 +220,13 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
         if (!tab || tab.type !== "draft") throw new Error(`Draft not found: ${draftID}`)
         return tab
       },
-      async newDraft(draft: Omit<DraftTab, "type" | "draftID">, prompt?: string, model?: PromptModel) {
+      async newDraft(
+        draft: Omit<DraftTab, "type" | "draftID" | "mode"> & { mode?: SessionMode },
+        prompt?: string,
+        model?: PromptModel,
+      ) {
         const draftID = uuid()
-        const tab = { type: "draft" as const, draftID, ...draft }
+        const tab = { type: "draft" as const, draftID, ...draft, mode: draft.mode ?? settings.general.mode() }
         memory.ensure(tabKey(tab), "prompt", () => createDraftPromptSession(draftID, { prompt, model }))
         await startTransition(() => {
           setStore(
@@ -253,6 +271,9 @@ export const { use: useTabs, provider: TabsProvider } = createSimpleContext({
       closeTab(index: number) {
         const tab = store[index]
         if (!tab) return
+        // removeTab refuses a key that is already closing: record it for reopen
+        // once, so a double click cannot stack duplicate closed entries.
+        if (closing.has(tabKey(tab))) return
         if (tab.type === "session") updateClosed((stack) => pushClosedTab(stack, tab, index))
         removeTab(index)
       },
