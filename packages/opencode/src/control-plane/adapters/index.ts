@@ -2,9 +2,10 @@ import type { ProjectV2 } from "@opencode-ai/core/project"
 import type { WorkspaceAdapter, WorkspaceAdapterEntry } from "../types"
 import { WorktreeAdapter } from "./worktree"
 
-const BUILTIN: Record<string, WorkspaceAdapter> = {
-  worktree: WorktreeAdapter,
-}
+// A Map (not an object literal) so adapter types coming from user input —
+// `constructor`, `toString`, `__proto__`, ... — cannot resolve to inherited
+// `Object.prototype` members and be handed back as if they were adapters.
+const BUILTIN = new Map<string, WorkspaceAdapter>([["worktree", WorktreeAdapter]])
 
 const state = new Map<ProjectV2.ID, Map<string, WorkspaceAdapter>>()
 
@@ -12,7 +13,7 @@ export function getAdapter(projectID: ProjectV2.ID, type: string): WorkspaceAdap
   const custom = state.get(projectID)?.get(type)
   if (custom) return custom
 
-  const builtin = BUILTIN[type]
+  const builtin = BUILTIN.get(type)
   if (builtin) return builtin
 
   throw new Error(`Unknown workspace adapter: ${type}`)
@@ -27,7 +28,7 @@ export function listAdapters(projectID: ProjectV2.ID): WorkspaceAdapterEntry[] {
 }
 
 export function registeredAdapters(projectID: ProjectV2.ID): [string, WorkspaceAdapter][] {
-  const adapters = new Map(Object.entries(BUILTIN))
+  const adapters = new Map(BUILTIN)
   for (const [type, adapter] of state.get(projectID)?.entries() ?? []) adapters.set(type, adapter)
   return [...adapters.entries()]
 }

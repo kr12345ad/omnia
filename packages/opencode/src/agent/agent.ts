@@ -366,11 +366,17 @@ const layer = Layer.effect(
         }
 
         for (const [key, value] of Object.entries(cfg.agent ?? {})) {
+          // Agent keys come from untrusted project/remote config. Resolving them
+          // through the prototype chain would hand back Object.prototype members
+          // ("constructor", "toString", ...) and write agent fields onto those
+          // shared builtins instead of registering the configured agent, and
+          // "__proto__" would rewrite this record's prototype.
+          if (key === "__proto__") continue
           if (value.disable) {
             delete agents[key]
             continue
           }
-          let item = agents[key]
+          let item = Object.hasOwn(agents, key) ? agents[key] : undefined
           if (!item)
             item = agents[key] = {
               name: key,

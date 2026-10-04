@@ -4,7 +4,7 @@ import { LLM } from "@/session/llm"
 import { MessageID, SessionID } from "@/session/schema"
 import { Slug } from "@opencode-ai/core/util/slug"
 import { LLMEvent } from "@opencode-ai/llm"
-import { Effect, Stream } from "effect"
+import { Cause, Effect, Stream } from "effect"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { InstanceHttpApi } from "../api"
 
@@ -56,16 +56,24 @@ export const projectCopyHandlers = HttpApiBuilder.group(InstanceHttpApi, "projec
           Stream.mkString,
         )
       const output = result.trim()
-      return output ? slugify(output.split(/\s+/).slice(0, 3).join(" ")) : Slug.create()
+      // slugify() drops every character the model emitted when the answer is not ASCII
+      // (e.g. a CJK or emoji-only reply), which would hand the caller an empty name.
+      const slug = output ? slugify(output.split(/\s+/).slice(0, 3).join(" ")) : ""
+      return slug || Slug.create()
     })
 
     return handlers.handle("generateName", (ctx) =>
       generateName(ctx.payload.context).pipe(
         Effect.catchCause((cause) =>
-          Effect.logWarning("project copy name generation failed", {
-            projectID: ctx.params.projectID,
-            cause,
-          }).pipe(Effect.as(Slug.create())),
+          Effect.gen(function* () {
+            // A client disconnect or shutdown is not a naming failure: re-interrupt so the
+            // model stream is cancelled instead of being reported as a fallback name.
+            if (Cause.hasInterrupts(cause)) return yield* Effect.interrupt
+            return yield* Effect.logWarning("project copy name generation failed", {
+              projectID: ctx.params.projectID,
+              cause,
+            }).pipe(Effect.as(Slug.create()))
+          }),
         ),
         Effect.map((name) => ({ name })),
       ),

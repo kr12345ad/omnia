@@ -164,7 +164,17 @@ const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> = Layer.
       input: { providerID: ProviderV2.ID } & AuthorizeInput,
     ) {
       const { hooks, pending } = yield* InstanceState.get(state)
-      const method = hooks[input.providerID].methods[input.method]
+      // providerID comes from the request path, so only accept own keys: an
+      // inherited name like "toString" would otherwise be treated as a hook.
+      const hook = Object.hasOwn(hooks, input.providerID) ? hooks[input.providerID] : undefined
+      if (!hook) return yield* new OauthMissing({ providerID: input.providerID })
+      const method = hook.methods[input.method]
+      if (!method) {
+        return yield* new ValidationFailed({
+          field: "method",
+          message: `Unknown auth method index ${input.method} for provider ${input.providerID}`,
+        })
+      }
       if (method.type !== "oauth") return
 
       if (method.prompts && input.inputs) {

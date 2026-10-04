@@ -26,7 +26,7 @@ export async function load(dir: string) {
       ...md.data,
       prompt: md.content.trim(),
     }
-    result[config.name] = ConfigParse.schema(ConfigAgentV1.Info, config, item)
+    define(result, config.name, ConfigParse.schema(ConfigAgentV1.Info, config, item))
   }
   return result
 }
@@ -49,11 +49,17 @@ export async function loadMode(dir: string) {
     }
     const parsed = Schema.decodeUnknownExit(ConfigAgentV1.Info)(config, { errors: "all", propertyOrder: "original" })
     if (Exit.isSuccess(parsed)) {
-      result[config.name] = {
+      define(result, config.name, {
         ...parsed.value,
         mode: "primary" as const,
-      }
+      })
     }
   }
   return result
+}
+
+// Entry names come from file paths, so `agent/__proto__.md` yields the key `__proto__`. Plain assignment would
+// invoke the inherited setter and pollute the registry's prototype instead of registering the entry.
+function define(target: Record<string, ConfigAgentV1.Info>, key: string, value: ConfigAgentV1.Info) {
+  Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: true })
 }

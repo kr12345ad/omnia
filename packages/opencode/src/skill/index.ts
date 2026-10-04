@@ -273,7 +273,10 @@ const layer = Layer.effect(
     )
     const state = yield* InstanceState.make(
       Effect.fn("Skill.state")(function* () {
-        const s: State = { skills: {}, dirs: new Set() }
+        // Skill names come from untrusted SKILL.md frontmatter, so the lookup table must not
+        // inherit from Object.prototype: a skill named "constructor" would otherwise resolve
+        // through the prototype chain and a skill named "__proto__" would rewrite it.
+        const s: State = { skills: Object.create(null) as Record<string, Info>, dirs: new Set() }
         // Register the built-in skill BEFORE disk discovery so a user-disk
         // skill with the same name can override it.
         s.skills[CUSTOMIZE_OPENCODE_SKILL_NAME] = {

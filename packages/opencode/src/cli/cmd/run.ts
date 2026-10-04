@@ -533,8 +533,10 @@ export const RunCommand = effectCmd({
       }
 
       async function share(sdk: OpencodeClient, sessionID: string) {
-        const cfg = await sdk.config.get()
-        if (!cfg.data) return
+        // Sharing is best-effort side work: a failed config read must not abort
+        // the run, especially in --attach mode where the transport is remote.
+        const cfg = await sdk.config.get().catch(() => undefined)
+        if (!cfg?.data) return
         if (cfg.data.share !== "auto" && !flags.autoShare && !args.share) return
         const res = await sdk.session.share({ sessionID }).catch((error) => {
           if (error instanceof Error && error.message.includes("disabled")) {

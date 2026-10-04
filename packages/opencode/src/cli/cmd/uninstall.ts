@@ -256,7 +256,7 @@ async function getShellConfigFile(): Promise<string | null> {
     sh: [path.join(home, ".profile")],
   }
 
-  const candidates = configFiles[shell] || configFiles.bash
+  const candidates = Object.prototype.hasOwnProperty.call(configFiles, shell) ? configFiles[shell] : configFiles.bash
 
   for (const file of candidates) {
     const exists = await fs

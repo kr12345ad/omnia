@@ -22,13 +22,16 @@ export type ReleaseType = "patch" | "minor" | "major"
 export const Event = InstallationEvent
 
 export function getReleaseType(current: string, latest: string): ReleaseType {
-  const currMajor = semver.major(current)
-  const currMinor = semver.minor(current)
-  const newMajor = semver.major(latest)
-  const newMinor = semver.minor(latest)
+  // Versions come from package managers and release APIs, so they are not
+  // guaranteed to be strict semver (homebrew revisions, prefixed tags, ...).
+  // Fall back to a major release so we only ever notify instead of crashing or
+  // silently auto-installing.
+  const curr = semver.parse(current, { loose: true }) ?? semver.coerce(current)
+  const next = semver.parse(latest, { loose: true }) ?? semver.coerce(latest)
+  if (!curr || !next) return "major"
 
-  if (newMajor > currMajor) return "major"
-  if (newMinor > currMinor) return "minor"
+  if (next.major > curr.major) return "major"
+  if (next.minor > curr.minor) return "minor"
   return "patch"
 }
 
@@ -142,11 +145,35 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
       return "sh"
     })
 
+    const INSTALL_SCRIPT_MAX_BYTES = 2 * 1024 * 1024
+
+    // The install script is piped straight into a shell, so never buffer an
+    // unbounded amount of network response in memory before executing it.
+    const readInstallScript = Effect.fnUntraced(function* () {
+      const chunks: Uint8Array[] = []
+      let size = 0
+      yield* Stream.runForEach(
+        HttpClientResponse.stream(httpOk.execute(HttpClientRequest.get("https://opencode.ai/install"))),
+        (chunk) => {
+          if (size + chunk.length > INSTALL_SCRIPT_MAX_BYTES)
+            return Effect.fail(`Install script exceeded ${INSTALL_SCRIPT_MAX_BYTES} bytes`)
+          size += chunk.length
+          chunks.push(chunk)
+          return Effect.void
+        },
+      )
+      const bytes = new Uint8Array(size)
+      let offset = 0
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset)
+        offset += chunk.length
+      }
+      return bytes
+    })
+
     const upgradeCurl = Effect.fnUntraced(
       function* (target: string) {
-        const response = yield* httpOk.execute(HttpClientRequest.get("https://opencode.ai/install"))
-        const body = yield* response.text
-        const bodyBytes = new TextEncoder().encode(body)
+        const bodyBytes = yield* readInstallScript()
         const shell = yield* upgradeScriptShell()
         const result = yield* appProcess.run(
           ChildProcess.make(shell, [], {
@@ -161,7 +188,9 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
           stderr: result.stderr.toString("utf8"),
         }
       },
-      Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })),
+      Effect.mapError((error) =>
+        new UpgradeFailedError({ stderr: typeof error === "string" ? error : upgradeFailure("curl") }),
+      ),
     )
 
     const result: Interface = {
@@ -213,7 +242,10 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
           if (formula.includes("/")) {
             const infoJson = yield* text(["brew", "info", "--json=v2", formula])
             const info = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(BrewInfoV2))(infoJson)
-            return info.formulae[0].versions.stable
+            const stable = info.formulae[0]?.versions.stable
+            if (!stable)
+              return yield* Effect.die(new Error(`Could not resolve a stable version for brew formula "${formula}"`))
+            return stable
           }
           const response = yield* httpOk.execute(
             HttpClientRequest.get("https://formulae.brew.sh/api/formula/opencode.json").pipe(
@@ -241,7 +273,9 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
             ).pipe(HttpClientRequest.setHeaders({ Accept: "application/json;odata=verbose" })),
           )
           const data = yield* HttpClientResponse.schemaBodyJson(ChocoPackage)(response)
-          return data.d.results[0].Version
+          const version = data.d.results[0]?.Version
+          if (!version) return yield* Effect.die(new Error("Chocolatey did not report a version for opencode"))
+          return version
         }
 
         if (detectedMethod === "scoop") {

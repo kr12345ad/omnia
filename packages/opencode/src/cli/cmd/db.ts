@@ -3,7 +3,7 @@ import { spawn } from "child_process"
 import { Database } from "@opencode-ai/core/database/database"
 import { Effect } from "effect"
 import { sql } from "drizzle-orm"
-import { effectCmd } from "../effect-cmd"
+import { CliError, effectCmd, fail } from "../effect-cmd"
 
 const QueryCommand = effectCmd({
   command: "$0 [query]",
@@ -35,10 +35,25 @@ const QueryCommand = effectCmd({
       }
       return
     }
-    const child = spawn("sqlite3", [Database.path()], {
-      stdio: "inherit",
+    // Bun throws ENOENT synchronously, Node reports it as an async "error" event that
+    // nobody listens for - handle both instead of dying with a raw spawn error.
+    const child = yield* Effect.try({
+      try: () => spawn("sqlite3", [Database.path()], { stdio: "inherit" }),
+      catch: (err) =>
+        new CliError({ message: `Failed to run sqlite3: ${err instanceof Error ? err.message : String(err)}` }),
     })
-    yield* Effect.promise(() => new Promise((resolve) => child.on("close", resolve)))
+    const code = yield* Effect.callback<number, CliError>((resume) => {
+      const onError = (err: Error) => resume(Effect.fail(new CliError({ message: `Failed to run sqlite3: ${err.message}` })))
+      const onClose = (code: number | null) => resume(Effect.succeed(code ?? 0))
+      child.once("error", onError)
+      child.once("close", onClose)
+      return Effect.sync(() => {
+        child.off("error", onError)
+        child.off("close", onClose)
+        if (child.exitCode === null && child.signalCode === null) child.kill()
+      })
+    })
+    if (code !== 0) return yield* fail(`sqlite3 exited with code ${code}`)
   }),
 })
 

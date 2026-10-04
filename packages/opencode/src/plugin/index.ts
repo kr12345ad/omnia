@@ -256,7 +256,13 @@ const layer = Layer.effect(
           if (event.location?.directory !== ctx.directory) return Effect.void
           return Effect.sync(() => {
             for (const hook of hooks) {
-              void hook["event"]?.({ event: { id: event.id, type: event.type, properties: event.data } as any })
+              const fn = hook["event"]
+              if (!fn) continue
+              // Dispatch stays detached, so a throwing or rejecting hook must not
+              // escape as an unhandled rejection that takes the process down.
+              void Promise.resolve()
+                .then(() => fn({ event: { id: event.id, type: event.type, properties: event.data } as any }))
+                .catch((error) => console.error("[plugin] event hook failed", error))
             }
           })
         })

@@ -11,7 +11,17 @@ const hop = new Set([
   "host",
 ])
 
+// Valid HTTP field name, so `Headers.delete` never sees a malformed token from
+// an untrusted `Connection` header (it throws on invalid names).
+const fieldName = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
 function sanitize(out: Headers) {
+  // RFC 9110 7.6.1: fields listed in `Connection` are connection-scoped and must
+  // not be forwarded, otherwise a client can smuggle them past the proxy.
+  for (const token of out.get("connection")?.split(",") ?? []) {
+    const name = token.trim()
+    if (fieldName.test(name)) out.delete(name)
+  }
   for (const key of hop) out.delete(key)
   out.delete("accept-encoding")
   out.delete("x-opencode-directory")

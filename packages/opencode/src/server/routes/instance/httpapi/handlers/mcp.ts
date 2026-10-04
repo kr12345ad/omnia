@@ -63,7 +63,10 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
 
     const authRemove = Effect.fn("McpHttpApi.authRemove")(function* (ctx: { params: { name: string } }) {
       const status = yield* mcp.status()
-      if (!(ctx.params.name in status))
+      // `name` is client-controlled and `status` is a plain object, so `in` would also match
+      // inherited keys ("toString", "constructor", ...) and report success for servers that
+      // do not exist.
+      if (!Object.hasOwn(status, ctx.params.name))
         return yield* new McpServerNotFoundError({
           name: ctx.params.name,
           message: `MCP server not found: ${ctx.params.name}`,

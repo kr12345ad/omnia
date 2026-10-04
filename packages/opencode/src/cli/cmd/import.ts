@@ -2,9 +2,10 @@ import type { Session as SDKSession, Message, Part } from "@opencode-ai/sdk/v2"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Session } from "@/session/session"
 import { MessageV2 } from "../../session/message-v2"
-import { CliError, effectCmd } from "../effect-cmd"
+import { CliError, effectCmd, fail } from "../effect-cmd"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
+import { eq } from "drizzle-orm"
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
 import { EOL } from "os"
@@ -196,6 +197,16 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
   for (const msg of exportData.messages) {
     const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
     const { id, sessionID: _, ...msgData } = msgInfo
+    // An id that already belongs to a different session would make the message insert a
+    // silent no-op while its parts still land on the foreign message — reject instead.
+    const existing = yield* db
+      .select()
+      .from(MessageTable)
+      .where(eq(MessageTable.id, id))
+      .get()
+      .pipe(Effect.orDie)
+    if (existing && existing.session_id !== row.id)
+      return yield* fail(`Message ${id} already belongs to another session, refusing to import`)
     yield* db
       .insert(MessageTable)
       .values({
@@ -210,6 +221,10 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
 
     for (const part of msg.parts) {
       const partInfo = decodePart(part) as SessionV1.Part
+      // Never trust the imported messageID: it would attach the part to an unrelated
+      // local message (and violate the part -> message foreign key when it is unknown).
+      if (partInfo.messageID !== id)
+        return yield* fail(`Part ${partInfo.id} does not belong to message ${id}`)
       const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
       yield* db
         .insert(PartTable)

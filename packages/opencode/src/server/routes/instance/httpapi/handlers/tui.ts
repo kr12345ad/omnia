@@ -49,7 +49,9 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
     })
 
     const openThemes = Effect.fn("TuiHttpApi.openThemes")(function* () {
-      yield* publishCommand("session.list")
+      // `theme.switch` is the TUI command that opens the theme dialog; `session.list`
+      // opened the session dialog instead.
+      yield* publishCommand("theme.switch")
       return true
     })
 

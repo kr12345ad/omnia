@@ -82,6 +82,9 @@ export function make(input: {
 }): Interface {
   const session = input.session ?? makeSessionService()
   const directoryService = input.directory ?? makeDirectoryService(input.sdk)
+  // Built once: the usage service caches context limits per model, so rebuilding
+  // it per prompt turn would refetch the provider list on every turn.
+  const usage = input.usage ?? makeUsageService(input.sdk)
   const registeredMcp = new Map<string, Set<string>>()
   const sessionSnapshots = new Map<string, Directory.Snapshot>()
   const events = input.connection
@@ -539,7 +542,7 @@ export function make(input: {
             ),
           "session",
         )
-        yield* sendUsageUpdate(input.usage, input.sdk, input.connection, current.id, current.cwd)
+        yield* sendUsageUpdate(usage, input.connection, current.id, current.cwd)
         return yield* promptResponse(response.info, params.messageId)
       }
 
@@ -563,7 +566,7 @@ export function make(input: {
             ),
           "session",
         )
-        yield* sendUsageUpdate(input.usage, input.sdk, input.connection, current.id, current.cwd)
+        yield* sendUsageUpdate(usage, input.connection, current.id, current.cwd)
         return yield* promptResponse(response.info, params.messageId)
       }
 
@@ -585,7 +588,7 @@ export function make(input: {
         )
       }
 
-      yield* sendUsageUpdate(input.usage, input.sdk, input.connection, current.id, current.cwd)
+      yield* sendUsageUpdate(usage, input.connection, current.id, current.cwd)
       return yield* promptResponse(undefined, params.messageId)
     }),
     cancel,
@@ -630,7 +633,13 @@ function makeUsageService(sdk: OpencodeClient) {
           ) as Record<ProviderV2.ID, Provider.Info>
           return UsageService.findContextLimit(providers, params.providerID, params.modelID)
         })
-        .catch(() => undefined)
+        .catch(() => {
+          // Evict instead of memoizing: a cached rejection would turn one transient
+          // provider-list failure into a permanent "unknown context size" for this
+          // model, silently disabling every later usage update.
+          if (limits.get(key) === next) limits.delete(key)
+          return undefined
+        })
       limits.set(key, next)
       return yield* Effect.promise(() => next)
     },
@@ -893,14 +902,13 @@ function promptErrorMessage(error: AssistantError) {
 }
 
 function sendUsageUpdate(
-  usage: UsageService.Interface | undefined,
-  sdk: OpencodeClient,
+  usage: UsageService.Interface,
   connection: ServiceConnection | undefined,
   sessionID: string,
   directory: string,
 ) {
   if (!connection) return Effect.void
-  return (usage ?? makeUsageService(sdk)).sendUpdate({
+  return usage.sendUpdate({
     connection,
     sessionID,
     directory,
@@ -993,16 +1001,20 @@ function sendAvailableCommands(
   if (!connection) return Effect.void
   return Effect.sync(() => {
     setTimeout(() => {
-      void connection.sessionUpdate({
-        sessionId,
-        update: {
-          sessionUpdate: "available_commands_update",
-          availableCommands: snapshot.availableCommands.map((command) => ({
-            name: command.name,
-            description: command.description ?? "",
-          })),
-        },
-      })
+      // Nothing awaits this notification, and sessionUpdate rejects once the
+      // client is gone, so the rejection has to be absorbed here.
+      void connection
+        .sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "available_commands_update",
+            availableCommands: snapshot.availableCommands.map((command) => ({
+              name: command.name,
+              description: command.description ?? "",
+            })),
+          },
+        })
+        .catch(() => {})
     }, 0)
   })
 }

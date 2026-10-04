@@ -266,22 +266,27 @@ const layer = Layer.effect(
 
           const inflight = s.spawning.get(root + server.id)
           if (inflight) {
-            const client = await inflight
+            const client = await inflight.catch(() => undefined)
             if (!client) continue
             result.push(client)
             continue
           }
 
-          const task = schedule(server, root, root + server.id)
-          s.spawning.set(root + server.id, task)
+          const key = root + server.id
+          const task = schedule(server, root, key)
+          s.spawning.set(key, task)
 
-          task.finally(() => {
-            if (s.spawning.get(root + server.id) === task) {
-              s.spawning.delete(root + server.id)
+          const clearSpawning = () => {
+            if (s.spawning.get(key) === task) {
+              s.spawning.delete(key)
             }
-          })
+          }
+          // task.then(cleanup, cleanup) instead of task.finally(cleanup): a
+          // rejected spawn would make the derived promise reject with nobody
+          // listening, crashing the process on an unhandled rejection.
+          task.then(clearSpawning, clearSpawning)
 
-          const client = await task
+          const client = await task.catch(() => undefined)
           if (!client) continue
 
           result.push(client)

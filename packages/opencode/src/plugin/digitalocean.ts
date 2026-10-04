@@ -13,6 +13,8 @@ const DO_INFERENCE_BASE = "https://inference.do-ai.run/v1"
 const OAUTH_PORT = 1456
 const OAUTH_REDIRECT_PATH = "/auth/callback"
 const OAUTH_TOKEN_PATH = "/auth/token"
+// Cap for the implicit-token POST; the callback payload is a few hundred bytes.
+const MAX_TOKEN_BODY_BYTES = 64 * 1024
 const ROUTER_REFRESH_INTERVAL_MS = 5 * 60 * 1000
 const OAUTH_SCOPES = "genai:read inference:query"
 
@@ -36,6 +38,7 @@ interface RouterEntry {
 
 let oauthServer: ReturnType<typeof createServer> | undefined
 let pendingOAuth: PendingOAuth | undefined
+let oauthFlow: symbol | undefined
 
 function generateState(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32))
@@ -61,7 +64,7 @@ function buildAuthorizeUrl(state: string): string {
 
 async function startOAuthServer(): Promise<void> {
   if (oauthServer) return
-  oauthServer = createServer((req, res) => {
+  const server = createServer((req, res) => {
     const url = new URL(req.url || "/", `http://localhost:${OAUTH_PORT}`)
 
     if (req.method === "GET" && url.pathname === OAUTH_REDIRECT_PATH) {
@@ -71,13 +74,35 @@ async function startOAuthServer(): Promise<void> {
     }
 
     if (req.method === "POST" && url.pathname === OAUTH_TOKEN_PATH) {
+      let size = 0
+      let aborted = false
       const chunks: Buffer[] = []
-      req.on("data", (chunk: Buffer) => chunks.push(chunk))
+      req.on("data", (chunk: Buffer) => {
+        // This listener is reachable by any local process and by cross-origin
+        // form posts, so cap the body instead of buffering it unbounded.
+        if (aborted) return
+        size += chunk.length
+        if (size > MAX_TOKEN_BODY_BYTES) {
+          aborted = true
+          chunks.length = 0
+          req.pause()
+          res.writeHead(413, { "Content-Type": "application/json" })
+          res.end(JSON.stringify({ error: "payload_too_large" }))
+          return
+        }
+        chunks.push(chunk)
+      })
       req.on("end", () => {
+        if (aborted) return
         const raw = Buffer.concat(chunks).toString("utf8")
         let body: Record<string, string> = {}
         try {
-          body = raw ? JSON.parse(raw) : {}
+          // Untrusted payload: JSON.parse can yield null/array/number, and
+          // property reads on those would throw inside the request handler.
+          const parsed = raw ? JSON.parse(raw) : undefined
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            body = parsed as Record<string, string>
+          }
         } catch {
           body = {}
         }
@@ -126,42 +151,72 @@ async function startOAuthServer(): Promise<void> {
   })
 
   await new Promise<void>((resolve, reject) => {
-    oauthServer!.listen(OAUTH_PORT, () => {
+    const onError = (error: Error) => {
+      server.off("listening", onListening)
+      // Never publish a server that failed to bind, otherwise the next attempt
+      // reuses it and waits for a callback nothing can receive.
+      if (oauthServer === server) oauthServer = undefined
+      server.close(() => {})
+      reject(error)
+    }
+    const onListening = () => {
+      server.off("error", onError)
       resolve()
-    })
-    oauthServer!.on("error", reject)
+    }
+    server.once("error", onError)
+    server.once("listening", onListening)
+    server.listen(OAUTH_PORT)
   })
+
+  oauthServer = server
 }
 
-function stopOAuthServer() {
+// Release the loopback listener, but only for the flow that still owns it: a
+// superseded attempt must not close the listener its replacement is waiting on.
+function stopOAuthServer(flow?: symbol) {
+  if (flow && oauthFlow !== flow) return
+  oauthFlow = undefined
   if (!oauthServer) return
   oauthServer.close()
   oauthServer = undefined
 }
 
-function waitForOAuthCallback(state: string): Promise<ImplicitTokenPayload> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(
-      () => {
-        if (pendingOAuth) {
-          pendingOAuth = undefined
-          reject(new Error("OAuth callback timeout - authorization took too long"))
-        }
-      },
-      5 * 60 * 1000,
-    )
-    pendingOAuth = {
+function waitForOAuthCallback(state: string): { flow: symbol; result: Promise<ImplicitTokenPayload> } {
+  // A second authorize while one is pending must not orphan the first caller:
+  // its promise would never settle and its timer would reject the newer one.
+  if (pendingOAuth) {
+    pendingOAuth.reject(new Error("Superseded by a newer DigitalOcean authorize request"))
+    pendingOAuth = undefined
+  }
+
+  const flow = Symbol("digitalocean-oauth")
+
+  const result = new Promise<ImplicitTokenPayload>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const current: PendingOAuth = {
       state,
       resolve: (tokens) => {
-        clearTimeout(timeout)
+        if (timer) clearTimeout(timer)
         resolve(tokens)
       },
       reject: (error) => {
-        clearTimeout(timeout)
+        if (timer) clearTimeout(timer)
         reject(error)
       },
     }
+
+    timer = setTimeout(() => {
+      if (pendingOAuth !== current) return
+      pendingOAuth = undefined
+      stopOAuthServer(flow)
+      reject(new Error("OAuth callback timeout - authorization took too long"))
+    }, 5 * 60 * 1000)
+
+    pendingOAuth = current
+    oauthFlow = flow
   })
+
+  return { flow, result }
 }
 
 async function listRouters(
@@ -277,7 +332,7 @@ export async function DigitalOceanAuthPlugin(input: PluginInput): Promise<Hooks>
           async authorize() {
             await startOAuthServer()
             const state = generateState()
-            const callbackPromise = waitForOAuthCallback(state)
+            const { flow, result: callbackPromise } = waitForOAuthCallback(state)
             const url = buildAuthorizeUrl(state)
             await open(url).catch(() => undefined)
             return {
@@ -309,7 +364,7 @@ export async function DigitalOceanAuthPlugin(input: PluginInput): Promise<Hooks>
                 } catch (err) {
                   return { type: "failed" as const }
                 } finally {
-                  stopOAuthServer()
+                  stopOAuthServer(flow)
                 }
               },
             }

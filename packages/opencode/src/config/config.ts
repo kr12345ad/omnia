@@ -307,7 +307,16 @@ const layer = Layer.effect(
     })
 
     const ensureGitignore = Effect.fn("Config.ensureGitignore")(function* (dir: string) {
-      yield* fs.ensureDir(dir)
+      // Config directories are best-effort: an uncreatable one (read-only parent, OPENCODE_CONFIG_DIR pointing
+      // somewhere unavailable) must not take down config loading — the .gitignore write below already tolerates
+      // PermissionDenied, and the following npm install only logs a warning when it fails.
+      const created = yield* fs.ensureDir(dir).pipe(
+        Effect.as(true),
+        Effect.catch((error) =>
+          Effect.logWarning("failed to create config directory", { dir, error: String(error) }).pipe(Effect.as(false)),
+        ),
+      )
+      if (!created) return
       const gitignore = path.join(dir, ".gitignore")
       const hasIgnore = yield* fs.existsSafe(gitignore)
       if (!hasIgnore) {

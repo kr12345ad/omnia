@@ -32,6 +32,9 @@ export const workspaceHandlers = HttpApiBuilder.group(InstanceHttpApi, "workspac
         })
         .pipe(
           Effect.catchCause((cause) => {
+            // Interruption is not a create failure: re-interrupt so client disconnects and
+            // shutdown still cancel the creation instead of being reported as an error.
+            if (Cause.hasInterrupts(cause)) return Effect.interrupt
             // Plugin throws surface as defects (because EffectBridge.fromPromise uses Effect.promise),
             // bypassing Effect.mapError. Walk the cause to surface the real error to the client.
             const die = cause.reasons.find(Cause.isDieReason)

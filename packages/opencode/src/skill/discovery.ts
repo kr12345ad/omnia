@@ -1,5 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient, path } from "@opencode-ai/core/effect/app-node-platform"
+import nodePath from "path"
 import { NodePath } from "@effect/platform-node"
 import { Effect, Layer, Path, Schema, Context } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http"
@@ -22,6 +23,18 @@ class Index extends Schema.Class<Index>("Index")({
 
 export interface Interface {
   readonly pull: (url: string) => Effect.Effect<string[]>
+}
+
+/**
+ * index.json is remote, untrusted input. Skill names and file entries are joined
+ * onto the cache directory, so anything that could climb out of it (absolute
+ * paths, "..", backslashes, NUL) must never reach the filesystem.
+ */
+function safeRelative(input: string) {
+  if (input.length === 0) return false
+  if (input.includes("\\") || input.includes("\0")) return false
+  if (nodePath.isAbsolute(input)) return false
+  return !input.split("/").some((part) => part === "..")
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SkillDiscovery") {}
@@ -70,7 +83,10 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | Path.Path | HttpClient
         (skill) => Effect.logWarning("skill entry missing SKILL.md", { url: index, skill: skill.name }),
         { discard: true },
       )
-      const list = data.skills.filter((skill) => skill.files.includes("SKILL.md"))
+      const list = data.skills
+        .filter((skill) => safeRelative(skill.name))
+        .map((skill) => ({ ...skill, files: skill.files.filter(safeRelative) }))
+        .filter((skill) => skill.files.includes("SKILL.md"))
 
       const dirs = yield* Effect.forEach(
         list,

@@ -390,10 +390,15 @@ const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Service> = 
         const [hasHead, status] = yield* Effect.all([git.hasHead(ctx.directory), git.status(ctx.directory)], {
           concurrency: 2,
         })
-        const tracked = hasHead ? (yield* git.patchAll(ctx.directory, "HEAD")).text : ""
+        const tracked = hasHead
+          ? (yield* git.patchAll(ctx.directory, "HEAD", { maxOutputBytes: MAX_TOTAL_PATCH_BYTES })).text
+          : ""
         const untracked = yield* Effect.forEach(
           status.filter((item) => item.code === "??"),
-          (item) => git.patchUntracked(ctx.directory, item.file).pipe(Effect.map((patch) => patch.text)),
+          (item) =>
+            git.patchUntracked(ctx.directory, item.file, { maxOutputBytes: MAX_PATCH_BYTES }).pipe(
+              Effect.map((patch) => patch.text),
+            ),
         )
         return [tracked, ...untracked].filter(Boolean).join("\n")
       }),

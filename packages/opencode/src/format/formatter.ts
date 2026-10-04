@@ -3,6 +3,7 @@ import type { InstanceContext } from "../project/instance-context"
 import { Filesystem } from "@/util/filesystem"
 import { Process } from "@/util/process"
 import { which } from "@opencode-ai/core/util/which"
+import path from "path"
 
 export interface Context extends Pick<InstanceContext, "directory" | "worktree"> {
   experimentalOxfmt: boolean
@@ -367,7 +368,13 @@ export const pint: Info = {
         require?: Record<string, string>
         "require-dev"?: Record<string, string>
       }>(item)
-      if (json.require?.["laravel/pint"] || json["require-dev"]?.["laravel/pint"]) return ["./vendor/bin/pint", "$FILE"]
+      if (json.require?.["laravel/pint"] || json["require-dev"]?.["laravel/pint"]) {
+        // Resolve against the composer.json that declared the dependency (it may
+        // live above the instance directory) and only report enabled when the
+        // binary is actually installed, otherwise every format attempt fails to spawn.
+        const bin = path.join(path.dirname(item), "vendor/bin/pint")
+        if (await Filesystem.exists(bin)) return [bin, "$FILE"]
+      }
     }
     return false
   },

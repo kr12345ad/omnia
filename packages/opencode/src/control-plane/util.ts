@@ -34,6 +34,10 @@ export function waitEvent(input: { timeout: number; signal?: AbortSignal; fn: (e
 
     GlobalBus.on("event", handler)
     input.signal?.addEventListener("abort", abort, { once: true })
+    // The signal can fire between the `aborted` check above and the listener
+    // registration, in which case the listener never runs. Re-check so the
+    // wait ends as aborted instead of hanging until the timeout.
+    if (input.signal?.aborted) abort()
     return Effect.sync(cleanup)
   })
 }

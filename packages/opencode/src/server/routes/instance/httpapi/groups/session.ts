@@ -34,7 +34,9 @@ export const ListQuery = Schema.Struct({
   roots: Schema.optional(QueryBoolean),
   start: Schema.optional(Schema.NumberFromString),
   search: Schema.optional(Schema.String),
-  limit: Schema.optional(Schema.NumberFromString),
+  // A raw NumberFromString decodes "abc" to NaN and "1e999" to Infinity, which SQLite rejects
+  // with "datatype mismatch", and a negative LIMIT disables the row cap entirely.
+  limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
 })
 export const DiffQuery = Schema.Struct({
   ...WorkspaceRoutingQueryFields,

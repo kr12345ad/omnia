@@ -8,7 +8,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
-import { Context, Effect, Layer, SynchronizedRef } from "effect"
+import { Context, Effect, Exit, Layer, SynchronizedRef } from "effect"
 
 export type AssistantTokenCost = Pick<OpenCodeAssistantMessage, "cost" | "tokens">
 
@@ -144,7 +144,7 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const messageLoader = yield* MessageLoader
     const contextLimitLoader = yield* ContextLimitLoader
-    const limits = yield* SynchronizedRef.make(new Map<string, Effect.Effect<number | undefined>>())
+    const limits = yield* SynchronizedRef.make(new Map<string, Effect.Effect<number | undefined, unknown>>())
 
     const cachedLimit = Effect.fnUntraced(function* (input: {
       readonly directory: string
@@ -157,13 +157,20 @@ const layer = Layer.effect(
           const key = `${input.directory}\u0000${input.providerID}\u0000${input.modelID}`
           const current = items.get(key)
           if (current) return [current, items] as const
+          // Failures must not be memoized: keeping them would cache the fallback
+          // `undefined` for the process lifetime and silently disable usage updates
+          // for this model after a single transient provider-list error.
           const next = yield* Effect.cached(
             contextLimitLoader.providers(input.directory).pipe(
               Effect.map((providers) => findContextLimit(providers, input.providerID, input.modelID)),
-              Effect.catch((error) =>
-                Effect.logError("failed to get providers for usage context limit", { error: error }).pipe(
-                  Effect.as(undefined),
-                ),
+              Effect.onExit((exit) =>
+                Exit.isSuccess(exit)
+                  ? Effect.void
+                  : SynchronizedRef.update(limits, (state) => {
+                      const updated = new Map(state)
+                      updated.delete(key)
+                      return updated
+                    }),
               ),
             ),
           )
@@ -177,7 +184,12 @@ const layer = Layer.effect(
       readonly providerID: ProviderV2.ID
       readonly modelID: ModelV2.ID
     }) {
-      return yield* yield* cachedLimit(input)
+      const cached = yield* cachedLimit(input)
+      return yield* cached.pipe(
+        Effect.catch((error) =>
+          Effect.logError("failed to get providers for usage context limit", { error }).pipe(Effect.as(undefined)),
+        ),
+      )
     })
 
     const sendUpdate = Effect.fn("ACPUsage.sendUpdate")(function* (input: {

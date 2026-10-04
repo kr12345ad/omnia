@@ -1,6 +1,10 @@
 export function prefix(tokens: string[]) {
   for (let len = tokens.length; len > 0; len--) {
     const prefix = tokens.slice(0, len).join(" ")
+    // hasOwn instead of a plain read: ARITY must not resolve inherited keys
+    // such as "constructor" or "__proto__", whose arity would then be used to
+    // slice the tokens and yield an empty prefix.
+    if (!Object.hasOwn(ARITY, prefix)) continue
     const arity = ARITY[prefix]
     if (arity !== undefined) return tokens.slice(0, arity)
   }

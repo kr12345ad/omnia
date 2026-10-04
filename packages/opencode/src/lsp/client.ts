@@ -68,9 +68,16 @@ type ServerCapabilities = {
   [key: string]: unknown
 }
 
-function getFilePath(uri: string) {
-  if (!uri.startsWith("file://")) return
-  return Filesystem.normalizePath(fileURLToPath(uri))
+function getFilePath(uri: string | undefined) {
+  if (typeof uri !== "string" || !uri.startsWith("file://")) return
+  // Servers can report URIs we cannot turn into a path (remote hosts, encoded
+  // separators, malformed escapes). Throwing here would escape the diagnostic
+  // request promises and leave waitForDiagnostics hanging forever.
+  try {
+    return Filesystem.normalizePath(fileURLToPath(uri))
+  } catch {
+    return
+  }
 }
 
 function getSyncKind(capabilities?: ServerCapabilities) {
@@ -158,7 +165,7 @@ export async function create(input: {
   // --- LSP connection handlers ---
 
   connection.onNotification("textDocument/publishDiagnostics", (params) => {
-    const filePath = getFilePath(params.uri)
+    const filePath = getFilePath(params?.uri)
     if (!filePath) return
     published.set(filePath, {
       at: Date.now(),
@@ -396,15 +403,18 @@ export async function create(input: {
         resolved = true
         resolve(merged)
       }
+      const settle = (result: DiagnosticRequestResult) => {
+        results.push(result)
+        pending -= 1
+        const merged = mergeResults(filePath, results)
+        finish(merged)
+        if (pending === 0) finish(merged, true)
+      }
 
       for (const request of requests) {
-        request.then((result) => {
-          results.push(result)
-          pending -= 1
-          const merged = mergeResults(filePath, results)
-          finish(merged)
-          if (pending === 0) finish(merged, true)
-        })
+        request.then(settle, () =>
+          settle({ handled: false, matched: false, byFile: new Map<string, Diagnostic[]>() }),
+        )
       }
     })
   }

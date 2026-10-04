@@ -9,7 +9,7 @@ import matter from "gray-matter"
 import { EOL } from "os"
 import type { Argv } from "yargs"
 import { Effect } from "effect"
-import { effectCmd } from "../effect-cmd"
+import { CliError, effectCmd } from "../effect-cmd"
 
 type AgentMode = "all" | "primary" | "subagent"
 
@@ -206,7 +206,12 @@ const AgentCreateCommand = effectCmd({
 
       // Write file
       const content = matter.stringify(generated.systemPrompt, frontmatter)
-      const filePath = path.join(targetPath, `${generated.identifier}.md`)
+      // The identifier is model output - a value like "../../evil" would write outside
+      // the agents directory, so reject anything that is not a plain file name.
+      const name = generated.identifier.trim()
+      if (!name || /[/\\]/.test(name) || name === "." || name === "..")
+        throw new CliError({ message: `Model returned an invalid agent name: ${generated.identifier}` })
+      const filePath = path.join(targetPath, `${name}.md`)
 
       await fs.mkdir(targetPath, { recursive: true })
 

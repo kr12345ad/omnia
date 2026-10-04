@@ -127,7 +127,9 @@ export const ptyHandlers = HttpApiBuilder.group(InstanceHttpApi, "pty", (handler
     })
 
     const remove = Effect.fn("PtyHttpApi.remove")(function* (ctx: { params: { ptyID: PtyID } }) {
-      yield* get(ctx)
+      // Do not gate removal on `get`: that helper hides exited sessions, so an exited session
+      // could never be deleted and its retained scrollback outlived the client that created it.
+      // Core keeps exited sessions removable until they are dropped by the retention cap.
       yield* pty(Pty.Service.use((service) => service.remove(ctx.params.ptyID))).pipe(
         Effect.catchTag(
           "Pty.NotFoundError",

@@ -1244,28 +1244,34 @@ export const JDTLS: Info = {
       })(),
     )
     const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-jdtls-data"))
+    const proc = spawn(
+      java,
+      [
+        "-jar",
+        launcherJar,
+        "-configuration",
+        configFile,
+        "-data",
+        dataDir,
+        "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+        "-Dosgi.bundles.defaultStartLevel=4",
+        "-Declipse.product=org.eclipse.jdt.ls.core.product",
+        "-Dlog.level=ALL",
+        "--add-modules=ALL-SYSTEM",
+        "--add-opens java.base/java.util=ALL-UNNAMED",
+        "--add-opens java.base/java.lang=ALL-UNNAMED",
+      ],
+      {
+        cwd: root,
+      },
+    )
+    // jdtls builds a full workspace index inside dataDir; without this every
+    // spawn leaves a multi-megabyte directory behind in the system temp folder.
+    proc.once("exit", () => {
+      fs.rm(dataDir, { force: true, recursive: true }).catch(() => {})
+    })
     return {
-      process: spawn(
-        java,
-        [
-          "-jar",
-          launcherJar,
-          "-configuration",
-          configFile,
-          "-data",
-          dataDir,
-          "-Declipse.application=org.eclipse.jdt.ls.core.id1",
-          "-Dosgi.bundles.defaultStartLevel=4",
-          "-Declipse.product=org.eclipse.jdt.ls.core.product",
-          "-Dlog.level=ALL",
-          "--add-modules=ALL-SYSTEM",
-          "--add-opens java.base/java.util=ALL-UNNAMED",
-          "--add-opens java.base/java.lang=ALL-UNNAMED",
-        ],
-        {
-          cwd: root,
-        },
-      ),
+      process: proc,
     }
   },
 }

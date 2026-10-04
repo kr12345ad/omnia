@@ -14,18 +14,20 @@ import { EOL } from "os"
 import path from "path"
 import { which } from "@opencode-ai/core/util/which"
 
-function pagerCmd(): string[] {
+// Returns the pager argv, or undefined when no usable pager is installed.
+// Spawning a missing binary loses the piped output entirely, so probe first.
+function pagerCmd(): string[] | undefined {
   const lessOptions = ["-R", "-S"]
-  if (process.platform !== "win32") {
-    return ["less", ...lessOptions]
-  }
-
-  // user could have less installed via other options
   const lessOnPath = which("less")
   if (lessOnPath) {
     if (Filesystem.stat(lessOnPath)?.size) return [lessOnPath, ...lessOptions]
   }
 
+  if (process.platform !== "win32") {
+    return undefined
+  }
+
+  // user could have less installed via other options
   if (Flag.OPENCODE_GIT_BASH_PATH) {
     const less = path.join(Flag.OPENCODE_GIT_BASH_PATH, "..", "..", "usr", "bin", "less.exe")
     if (Filesystem.stat(less)?.size) return [less, ...lessOptions]
@@ -90,11 +92,11 @@ export const SessionListCommand = effectCmd({
 
     const output = args.format === "json" ? formatSessionJSON(sessions) : formatSessionTable(sessions)
 
-    const shouldPaginate = process.stdout.isTTY && !args.maxCount && args.format === "table"
+    const pager = process.stdout.isTTY && !args.maxCount && args.format === "table" ? pagerCmd() : undefined
 
-    if (shouldPaginate) {
+    if (pager) {
       yield* Effect.promise(async () => {
-        const proc = Process.spawn(pagerCmd(), {
+        const proc = Process.spawn(pager, {
           stdin: "pipe",
           stdout: "inherit",
           stderr: "inherit",
@@ -105,9 +107,13 @@ export const SessionListCommand = effectCmd({
           return
         }
 
+        // A pager that dies early (or is killed) must not surface as an EPIPE
+        // stream error, and `output` is already buffered so a late failure is
+        // swallowed rather than re-printed.
+        proc.stdin.on("error", () => {})
         proc.stdin.write(output)
         proc.stdin.end()
-        await proc.exited
+        await proc.exited.catch(() => {})
       })
     } else {
       console.log(output)

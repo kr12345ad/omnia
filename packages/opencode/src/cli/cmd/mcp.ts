@@ -1,6 +1,6 @@
 import { cmd } from "./cmd"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
-import { effectCmd } from "../effect-cmd"
+import { effectCmd, fail } from "../effect-cmd"
 import { Cause } from "effect"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
@@ -256,7 +256,7 @@ export const McpAuthCommand = effectCmd({
     const spinner = prompts.spinner()
     spinner.start("Starting OAuth flow...")
 
-    yield* MCP.Service.use((mcp) =>
+    const result = yield* MCP.Service.use((mcp) =>
       mcp.authenticate(serverName, (url) => {
         spinner.stop("Authorize in your browser:")
         prompts.log.info(url)
@@ -291,13 +291,18 @@ export const McpAuthCommand = effectCmd({
         }),
       ),
       Effect.catchCause((cause) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           spinner.stop("Authentication failed", 1)
           const error = Cause.squash(cause)
-          prompts.log.error(error instanceof Error ? error.message : String(error))
+          const message = error instanceof Error ? error.message : String(error)
+          // Swallowing the failure here would exit 0 even though nothing was authenticated.
+          return yield* fail(`Authentication failed for ${serverName}: ${message}`)
         }),
       ),
     )
+
+    if (result.status !== "connected")
+      return yield* fail(`Authentication failed for ${serverName} (${result.status})`)
 
     prompts.outro("Done")
   }),

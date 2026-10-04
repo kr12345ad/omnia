@@ -244,6 +244,20 @@ const layer = Layer.effect(
       return share
     })
 
+    // A failed flush must not drop the batch: put it back so the next event for this session
+    // retries it instead of silently losing the update.
+    const requeue = Effect.fnUntraced(function* (s: State, sessionID: SessionID, data: Map<string, Data>) {
+      const existing = s.queue.get(sessionID)
+      if (!existing) {
+        s.queue.set(sessionID, data)
+        return
+      }
+      for (const [entry, item] of data) {
+        if (existing.has(entry)) continue
+        existing.set(entry, item)
+      }
+    })
+
     const flush = Effect.fn("ShareNext.flush")(function* (sessionID: SessionID) {
       if (disabled) return
       const s = yield* InstanceState.get(state)
@@ -260,6 +274,7 @@ const layer = Layer.effect(
         HttpClientRequest.setHeaders(req.headers),
         HttpClientRequest.bodyJson({ secret: share.secret, data: Array.from(queued.values()) }),
         Effect.flatMap((r) => http.execute(r)),
+        Effect.tapCause(() => requeue(s, sessionID, queued)),
       )
 
       if (res.status >= 400) {
@@ -268,6 +283,7 @@ const layer = Layer.effect(
           shareID: share.id,
           status: res.status,
         })
+        yield* requeue(s, sessionID, queued)
       }
     })
 

@@ -30,7 +30,14 @@ export async function load(dir: string) {
     }
     const parsed = decodeInfo(config, { errors: "all", propertyOrder: "original" })
     if (Exit.isSuccess(parsed)) {
-      result[config.name] = parsed.value
+      // Entry names come from file paths, so `command/__proto__.md` yields the key `__proto__`. Plain assignment
+      // would invoke the inherited setter and pollute the registry's prototype instead of registering the command.
+      Object.defineProperty(result, config.name, {
+        value: parsed.value,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      })
       continue
     }
     throw new InvalidError({ path: item, message: Cause.pretty(parsed.cause) }, { cause: Cause.squash(parsed.cause) })

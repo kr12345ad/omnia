@@ -136,7 +136,11 @@ export const experimentalHandlers = HttpApiBuilder.group(InstanceHttpApi, "exper
     })
 
     const session = Effect.fn("ExperimentalHttpApi.session")(function* (ctx: { query: typeof SessionListQuery.Type }) {
-      const limit = ctx.query.limit ?? 100
+      // `limit` decodes from a raw query string, so NaN ("abc"), Infinity ("1e999") and negative
+      // values reach the query: NaN/Infinity make SQLite fail and a negative LIMIT drops the row
+      // cap. Fall back to the default for anything that is not a non-negative integer.
+      const requested = ctx.query.limit
+      const limit = requested !== undefined && Number.isInteger(requested) && requested >= 0 ? requested : 100
       const directory = ctx.query.directory ? yield* InstanceState.directory : undefined
       const all = yield* sessions.listGlobal({
         directory,

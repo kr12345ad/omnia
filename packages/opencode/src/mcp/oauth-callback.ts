@@ -121,12 +121,27 @@ export async function ensureRunning(redirectUri?: string): Promise<void> {
   currentPort = port
   currentPath = path
 
-  server = createServer(handleRequest)
+  const created = createServer(handleRequest)
+  let listening = false
+  let failListen: (error: Error) => void = () => {}
+  // The listener stays attached for the server's whole life: an unhandled
+  // "error" event would take the process down. Before the bind completes it
+  // also clears the module state, because a phantom server would make
+  // isRunning() report true and ensureRunning() short-circuit, leaving every
+  // later OAuth flow to wait for a callback that can never arrive.
+  created.on("error", (error) => {
+    if (listening || server !== created) return
+    server = undefined
+    failListen(error)
+  })
+  server = created
   await new Promise<void>((resolve, reject) => {
-    server!.listen(currentPort, OAUTH_CALLBACK_HOST, () => {
+    failListen = reject
+    created.listen(currentPort, OAUTH_CALLBACK_HOST, () => {
+      listening = true
+      failListen = () => {}
       resolve()
     })
-    server!.on("error", reject)
   })
 }
 

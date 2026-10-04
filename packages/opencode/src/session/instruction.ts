@@ -14,6 +14,12 @@ import { Global } from "@opencode-ai/core/global"
 import type { MessageV2 } from "./message-v2"
 import type { MessageID } from "./schema"
 
+function isInside(root: string, candidate: string) {
+  if (root === candidate) return true
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep
+  return candidate.startsWith(prefix)
+}
+
 function extract(messages: SessionV1.WithParts[]) {
   const paths = new Set<string>()
   for (const msg of messages) {
@@ -191,7 +197,9 @@ const layer: Layer.Layer<
       let current = path.dirname(target)
 
       // Walk upward from the file being read and attach nearby instruction files once per message.
-      while (current.startsWith(root) && current !== root) {
+      // Containment is checked per path segment: a raw `startsWith` prefix test would
+      // also accept siblings such as `<root>-other` that live outside the project.
+      while (current !== root && isInside(root, current)) {
         const found = yield* find(current)
         if (!found || found === target || sys.has(found) || already.has(found)) {
           current = path.dirname(current)

@@ -5,6 +5,27 @@ import { Git } from "@/git"
 import { InstanceRef } from "@/effect/instance-ref"
 import { Process } from "@/util/process"
 
+type PrInfo = {
+  isCrossRepository?: boolean
+  headRepository?: { name: string }
+  headRepositoryOwner?: { login: string }
+  headRefName?: string
+  body?: string
+}
+
+// `gh pr view --json` output is not guaranteed to be JSON: gh can print warnings
+// on stdout, and a captive proxy or auth gateway can answer with an error page.
+// Never let a parse failure escape as a defect and abort the checkout.
+function parsePrInfo(text: string): PrInfo | undefined {
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined
+    return parsed as PrInfo
+  } catch {
+    return undefined
+  }
+}
+
 export const PrCommand = effectCmd({
   command: "pr <number>",
   describe: "fetch and checkout a GitHub PR branch, then run opencode",
@@ -52,7 +73,10 @@ export const PrCommand = effectCmd({
     let sessionId: string | undefined
 
     if (prInfoResult.code === 0 && prInfoResult.text.trim()) {
-      const prInfo = JSON.parse(prInfoResult.text)
+      const prInfo = parsePrInfo(prInfoResult.text)
+      if (!prInfo) {
+        UI.println("Could not read PR metadata from gh; skipping fork remote setup and session import")
+      }
 
       if (prInfo?.isCrossRepository && prInfo.headRepository && prInfo.headRepositoryOwner) {
         const forkOwner = prInfo.headRepositoryOwner.login

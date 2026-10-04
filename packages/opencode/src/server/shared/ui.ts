@@ -41,6 +41,17 @@ export function upstreamURL(path: string) {
   return new URL(path, UI_UPSTREAM).toString()
 }
 
+// The upstream is a public CDN, so it never needs the caller's credentials. Strip
+// them: `authorization` carries the server password (Basic auth or `auth_token`) and
+// `cookie` carries the browser's cookies for this origin. Auth is already enforced by
+// the router middleware before the UI fallback runs.
+export function upstreamHeaders(input: HeadersInit) {
+  const headers = ProxyUtil.headers(input, { host: UI_UPSTREAM.host })
+  headers.delete("authorization")
+  headers.delete("cookie")
+  return headers
+}
+
 export function embeddedUI(disableEmbeddedWebUi: boolean) {
   if (disableEmbeddedWebUi) return Promise.resolve(null)
   return (embeddedUIPromise ??=
@@ -66,7 +77,11 @@ export function serveEmbeddedUIEffect(
   fs: FSUtil.Interface,
   embeddedWebUI: Record<string, string>,
 ) {
-  const file = embeddedWebUI[requestPath.replace(/^\//, "")] ?? embeddedWebUI["index.html"] ?? null
+  const key = requestPath.replace(/^\//, "")
+  // Own-property lookup only: `constructor`, `toString`, `__proto__`, ... would otherwise
+  // resolve to inherited members and be treated as asset entries.
+  const file =
+    (Object.hasOwn(embeddedWebUI, key) ? embeddedWebUI[key] : undefined) ?? embeddedWebUI["index.html"] ?? null
   if (!file) return Effect.succeed(notFound())
 
   return fs.readFile(file).pipe(
@@ -87,7 +102,7 @@ export function serveUIEffect(
 
     const response = yield* services.client.execute(
       HttpClientRequest.make(request.method)(upstreamURL(path), {
-        headers: ProxyUtil.headers(request.headers, { host: UI_UPSTREAM.host }),
+        headers: upstreamHeaders(request.headers),
         body: requestBody(request),
       }),
     )

@@ -40,6 +40,11 @@ export class AuthError extends Schema.TaggedErrorClass<AuthError>()("AuthError",
   cause: Schema.optional(Schema.Defect()),
 }) {}
 
+// Module scope: parseInjected() is a module-level helper and cannot see the
+// layer-local decoder, so keeping it inside the layer made every injected-auth
+// read throw ReferenceError.
+const decode = Schema.decodeUnknownOption(Info)
+
 export interface Interface {
   readonly get: (providerID: string) => Effect.Effect<Info | undefined, AuthError>
   readonly all: () => Effect.Effect<Record<string, Info>, AuthError>
@@ -53,14 +58,10 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const fsys = yield* FSUtil.Service
-    const decode = Schema.decodeUnknownOption(Info)
 
     const all = Effect.fn("Auth.all")(function* () {
-      if (process.env.OPENCODE_AUTH_CONTENT) {
-        try {
-          return JSON.parse(process.env.OPENCODE_AUTH_CONTENT)
-        } catch (err) {}
-      }
+      const injected = process.env.OPENCODE_AUTH_CONTENT ? parseInjected(process.env.OPENCODE_AUTH_CONTENT) : undefined
+      if (injected) return injected
 
       const data = (yield* fsys.readJson(file).pipe(Effect.orElseSucceed(() => ({})))) as Record<string, unknown>
       return Record.filterMap(data, (value) => Result.fromOption(decode(value), () => undefined))
@@ -93,5 +94,19 @@ const layer = Layer.effect(
 )
 
 export const node = LayerNode.make({ service: Service, layer: layer, deps: [FSUtil.node] })
+
+// The env var is externally supplied, so it is decoded through the same schema as
+// the on-disk file. Anything that is not a record of valid credentials is ignored
+// instead of being handed back as an arbitrary JSON value.
+function parseInjected(content: string) {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined
+  return Record.filterMap(parsed as Record<string, unknown>, (value) => Result.fromOption(decode(value), () => undefined))
+}
 
 export * as Auth from "."

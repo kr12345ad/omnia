@@ -102,7 +102,9 @@ class DeviceTokenSuccess extends Schema.Class<DeviceTokenSuccess>("DeviceTokenSu
 
 class DeviceTokenError extends Schema.Class<DeviceTokenError>("DeviceTokenError")({
   error: Schema.String,
-  error_description: Schema.String,
+  // RFC 8628 makes error_description optional on the device token error
+  // response; requiring it turns a normal pending poll into a hard failure.
+  error_description: Schema.optional(Schema.String),
 }) {
   toPollResult(): PollResult {
     if (this.error === "authorization_pending") return new PollPending()
@@ -385,7 +387,12 @@ const layer: Layer.Layer<Service, never, AccountRepo.Service | HttpClient.HttpCl
     })
 
     const login = Effect.fn("Account.login")(function* (server: string) {
-      const normalizedServer = normalizeServerUrl(server)
+      // normalizeServerUrl throws on anything that is not an absolute URL; without this
+      // the parse error escaped as a defect even though login only fails with AccountError.
+      const normalizedServer = yield* Effect.try({
+        try: () => normalizeServerUrl(server),
+        catch: (cause) => new AccountServiceError({ message: `Invalid server URL: ${server}`, cause }),
+      })
       const response = yield* executeEffectOk(
         HttpClientRequest.post(`${normalizedServer}/auth/device/code`).pipe(
           HttpClientRequest.acceptJson,

@@ -322,9 +322,19 @@ export const githubInstall = Effect.fn("Cli.github.install")(function* () {
         s.stop("Installed GitHub app")
 
         async function getInstallation() {
-          return await fetch(`https://api.opencode.ai/get_github_app_installation?owner=${app.owner}&repo=${app.repo}`)
-            .then((res) => res.json())
-            .then((data) => data.installation)
+          // Any transport/parse failure is treated as "not installed yet" so the polling
+          // loop can retry instead of aborting the whole install.
+          try {
+            const res = await fetch(
+              `https://api.opencode.ai/get_github_app_installation?owner=${app.owner}&repo=${app.repo}`,
+              { signal: AbortSignal.timeout(30_000) },
+            )
+            if (!res.ok) return undefined
+            const data = (await res.json()) as { installation?: unknown }
+            return data?.installation
+          } catch {
+            return undefined
+          }
         }
       }
 
@@ -388,7 +398,9 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
   yield* Effect.promise(async () => {
     const isMock = args.token || args.event
 
-    const context = isMock ? (JSON.parse(args.event!) as Context) : github.context
+    if (isMock && !args.event) throw new Error("--event is required when --token is provided")
+
+    const context = args.event ? (JSON.parse(args.event) as Context) : github.context
     if (!SUPPORTED_EVENTS.includes(context.eventName as (typeof SUPPORTED_EVENTS)[number])) {
       core.setFailed(`Unsupported event type: ${context.eventName}`)
       process.exit(1)
@@ -433,7 +445,8 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
     let appToken: string
     let octoRest: Octokit
     let octoGraph: typeof graphql
-    let gitConfig: string
+    // undefined = never configured, null = configured by us and must be removed again
+    let gitConfig: string | null | undefined
     let session: { id: SessionID; title: string; version: string }
     let shareId: string | undefined
     let exitCode = 0
@@ -479,6 +492,8 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
         }
         appToken = githubToken
       } else {
+        if (isMock && !args.token)
+          throw new Error("--token is required when running with --event outside of GitHub Actions")
         const actionToken = isMock ? args.token! : await getOidcToken()
         appToken = await exchangeForAppToken(actionToken)
       }
@@ -654,8 +669,14 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
       //core.setOutput("prepare_error", e.message);
     } finally {
       if (!useGithubToken) {
-        await restoreGitConfig()
-        await revokeAppToken()
+        // Both cleanups must always run: if the first one throws, the app token would
+        // stay valid and the original failure would be masked by the cleanup error.
+        await restoreGitConfig().catch((error) =>
+          console.error("Failed to restore git config:", error instanceof Error ? error.message : error),
+        )
+        await revokeAppToken().catch((error) =>
+          console.error("Failed to revoke app token:", error instanceof Error ? error.message : error),
+        )
       }
     }
     process.exit(exitCode)
@@ -1031,6 +1052,10 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
       if (ret.exitCode === 0) {
         gitConfig = ret.stdout.toString().trim()
         await gitRun(["config", "--local", "--unset-all", config])
+      } else {
+        // No previous value: remember that the token header we are about to write has
+        // to be removed again instead of restored.
+        gitConfig = null
       }
 
       const newCredentials = Buffer.from(`x-access-token:${appToken}`, "utf8").toString("base64")
@@ -1043,6 +1068,11 @@ export const githubRun = Effect.fn("Cli.github.run")(function* (args: { event?: 
     async function restoreGitConfig() {
       if (gitConfig === undefined) return
       const config = "http.https://github.com/.extraheader"
+      if (gitConfig === null) {
+        // We added the credential header ourselves - drop it, never leave the app token on disk.
+        await gitStatus(["config", "--local", "--unset-all", config])
+        return
+      }
       await gitRun(["config", "--local", config, gitConfig])
     }
 

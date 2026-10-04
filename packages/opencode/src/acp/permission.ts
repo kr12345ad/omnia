@@ -107,11 +107,15 @@ export class Handler {
       return
     }
 
-    void this.input.connection.writeTextFile({
-      sessionId,
-      path: filepath,
-      content: next,
-    })
+    // Best-effort preview of the edit in the client's editor. The client may
+    // already be gone, and writeTextFile rejects in that case.
+    void this.input.connection
+      .writeTextFile({
+        sessionId,
+        path: filepath,
+        content: next,
+      })
+      .catch(() => {})
   }
 }
 

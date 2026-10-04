@@ -250,7 +250,7 @@ const layer = Layer.effect(
       )
     })
 
-    const runInWorkspace = <A, E, R>(input: {
+    const runInWorkspace = <A, E, R, F = never>(input: {
       workspaceID?: WorkspaceV2.ID
       local: () => Effect.Effect<A, E, R>
       remote: (input: {
@@ -259,6 +259,9 @@ const layer = Layer.effect(
       }) => HttpClientRequest.HttpClientRequest
       fallback: A
       response?: "json" | "text"
+      // Set by callers where falling back would silently drop work: the HTTP
+      // failure is surfaced instead of being logged and ignored.
+      onHttpError?: (input: { workspace: Info; status: number; body: string }) => Effect.Effect<never, F>
     }) =>
       Effect.gen(function* () {
         if (!input.workspaceID) return yield* input.local()
@@ -284,6 +287,7 @@ const layer = Layer.effect(
         if (!response) return input.fallback
         if (response.status < 200 || response.status >= 300) {
           const body = yield* response.text.pipe(Effect.catch(() => Effect.succeed("")))
+          if (input.onHttpError) return yield* input.onHttpError({ workspace, status: response.status, body })
           yield* Effect.logWarning("workspace target request failed", {
             workspaceID: workspace.id,
             status: response.status,
@@ -617,6 +621,16 @@ const layer = Layer.effect(
                 body: HttpBody.jsonUnsafe({ patch: sourcePatch }),
               }),
             fallback: { applied: false },
+            onHttpError: ({ workspace, status, body }) =>
+              Effect.fail(
+                new SessionWarpHttpError({
+                  message: `Failed to apply changes from session ${input.sessionID} to workspace ${workspace.id}: HTTP ${status} ${body}`,
+                  workspaceID: workspace.id,
+                  sessionID: input.sessionID,
+                  status,
+                  body,
+                }),
+              ),
           }).pipe(Effect.provide(AppNodeBuilderV1.build(InstanceStore.node)))
         }
 
@@ -726,6 +740,7 @@ const layer = Layer.effect(
     })
 
     const syncList = Effect.fn("Workspace.syncList")(function* (project: Project.Info) {
+      if (!flags.experimentalWorkspaces) return
       const names = new Set((yield* list(project)).map((workspace) => workspace.name))
       const discovered = yield* Effect.forEach(
         registeredAdapters(project.id),

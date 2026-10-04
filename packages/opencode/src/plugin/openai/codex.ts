@@ -160,13 +160,14 @@ interface PendingOAuth {
 
 let oauthServer: ReturnType<typeof createServer> | undefined
 let pendingOAuth: PendingOAuth | undefined
+let oauthFlow: symbol | undefined
 
 async function startOAuthServer(): Promise<{ port: number; redirectUri: string }> {
   if (oauthServer) {
     return { port: OAUTH_PORT, redirectUri: `http://localhost:${OAUTH_PORT}/auth/callback` }
   }
 
-  oauthServer = createServer((req, res) => {
+  const server = createServer((req, res) => {
     const url = new URL(req.url || "/", `http://localhost:${OAUTH_PORT}`)
 
     if (url.pathname === "/auth/callback") {
@@ -227,47 +228,77 @@ async function startOAuthServer(): Promise<{ port: number; redirectUri: string }
   })
 
   await new Promise<void>((resolve, reject) => {
-    oauthServer!.listen(OAUTH_PORT, () => {
+    const onError = (error: Error) => {
+      server.off("listening", onListening)
+      // Never publish a server that failed to bind, otherwise the next attempt
+      // reuses it and waits for a callback nothing can receive.
+      if (oauthServer === server) oauthServer = undefined
+      server.close(() => {})
+      reject(error)
+    }
+    const onListening = () => {
+      server.off("error", onError)
       resolve()
-    })
-    oauthServer!.on("error", reject)
+    }
+    server.once("error", onError)
+    server.once("listening", onListening)
+    server.listen(OAUTH_PORT)
   })
+
+  oauthServer = server
 
   return { port: OAUTH_PORT, redirectUri: `http://localhost:${OAUTH_PORT}/auth/callback` }
 }
 
-function stopOAuthServer() {
+// Release the loopback listener, but only for the flow that still owns it: a
+// superseded attempt must not close the listener its replacement is waiting on.
+function stopOAuthServer(flow?: symbol) {
+  if (flow && oauthFlow !== flow) return
+  oauthFlow = undefined
   if (oauthServer) {
     oauthServer.close(() => {})
     oauthServer = undefined
   }
 }
 
-function waitForOAuthCallback(pkce: PkceCodes, state: string): Promise<TokenResponse> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(
-      () => {
-        if (pendingOAuth) {
-          pendingOAuth = undefined
-          reject(new Error("OAuth callback timeout - authorization took too long"))
-        }
-      },
-      5 * 60 * 1000,
-    ) // 5 minute timeout
+function waitForOAuthCallback(pkce: PkceCodes, state: string): { flow: symbol; result: Promise<TokenResponse> } {
+  // A second authorize while one is still pending must not orphan the first
+  // caller: its promise would never settle and its timer would later reject the
+  // newer attempt.
+  if (pendingOAuth) {
+    pendingOAuth.reject(new Error("Superseded by a newer ChatGPT authorize request"))
+    pendingOAuth = undefined
+  }
 
-    pendingOAuth = {
+  const flow = Symbol("codex-oauth")
+
+  const result = new Promise<TokenResponse>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const current: PendingOAuth = {
       pkce,
       state,
       resolve: (tokens) => {
-        clearTimeout(timeout)
+        if (timer) clearTimeout(timer)
         resolve(tokens)
       },
       reject: (error) => {
-        clearTimeout(timeout)
+        if (timer) clearTimeout(timer)
         reject(error)
       },
     }
+
+    timer = setTimeout(() => {
+      if (pendingOAuth !== current) return
+      pendingOAuth = undefined
+      stopOAuthServer(flow)
+      reject(new Error("OAuth callback timeout - authorization took too long"))
+    }, 5 * 60 * 1000) // 5 minute timeout
+
+    pendingOAuth = current
+    oauthFlow = flow
   })
+
+  return { flow, result }
 }
 
 export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPluginOptions = {}): Promise<Hooks> {
@@ -446,22 +477,27 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
             const state = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)).buffer)
             const authUrl = buildAuthorizeUrl(redirectUri, pkce, state)
 
-            const callbackPromise = waitForOAuthCallback(pkce, state)
+            const { flow, result: callbackPromise } = waitForOAuthCallback(pkce, state)
 
             return {
               url: authUrl,
               instructions: "Complete authorization in your browser. This window will close automatically.",
               method: "auto" as const,
               callback: async () => {
-                const tokens = await callbackPromise
-                stopOAuthServer()
-                const accountId = extractAccountId(tokens)
-                return {
-                  type: "success" as const,
-                  refresh: tokens.refresh_token,
-                  access: tokens.access_token,
-                  expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
-                  accountId,
+                try {
+                  const tokens = await callbackPromise
+                  const accountId = extractAccountId(tokens)
+                  return {
+                    type: "success" as const,
+                    refresh: tokens.refresh_token,
+                    access: tokens.access_token,
+                    expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+                    accountId,
+                  }
+                } finally {
+                  // Also on failure paths (timeout, /cancel, bad state, token
+                  // exchange error) otherwise the listener stays bound forever.
+                  stopOAuthServer(flow)
                 }
               },
             }

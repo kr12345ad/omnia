@@ -522,6 +522,11 @@ async function activatePluginEntry(state: RuntimeState, plugin: PluginEntry, per
   }
 
   const scope = createPluginScope(plugin.load, plugin.id, state.dispose_timeout_ms)
+  // Claim the slot before the first await. Plugin init is async, so a concurrent
+  // activate (host command plus api.plugins.activate) would otherwise observe an
+  // empty scope and initialize the plugin twice, orphaning the first scope's
+  // keymap layers, event handlers and slot registrations.
+  plugin.scope = scope
   const api = pluginApi(state, plugin, scope, plugin.id)
   const ok = await Promise.resolve()
     .then(async () => {
@@ -538,19 +543,14 @@ async function activatePluginEntry(state: RuntimeState, plugin: PluginEntry, per
       return false
     })
 
-  if (!ok) {
+  // A concurrent deactivate already released the slot while init was running.
+  if (!ok || !plugin.enabled || plugin.scope !== scope) {
+    if (plugin.scope === scope) plugin.scope = undefined
     await scope.dispose()
     state.view.update({ status: listPluginStatus(state) })
-    return false
+    return ok
   }
 
-  if (!plugin.enabled) {
-    await scope.dispose()
-    state.view.update({ status: listPluginStatus(state) })
-    return true
-  }
-
-  plugin.scope = scope
   state.view.update({ status: listPluginStatus(state) })
   return true
 }

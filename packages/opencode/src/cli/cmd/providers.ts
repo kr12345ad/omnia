@@ -36,6 +36,28 @@ const cliTry = <Value>(message: string, fn: () => PromiseLike<Value>) =>
     catch: (error) => new CliError({ message: message + errorMessage(error) }),
   })
 
+type Wellknown = {
+  command: string[]
+  env: string
+}
+
+// `.well-known/opencode` is remote, untrusted input that we then execute. Validate
+// the shape before touching `command` so a captive portal, proxy error page, or
+// stale host cannot turn into a TypeError defect or an empty spawn.
+async function readWellknown(res: Response): Promise<Wellknown> {
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const body: unknown = await res.json()
+  if (!body || typeof body !== "object") throw new Error("expected a JSON object")
+  const auth = (body as { auth?: unknown }).auth
+  if (!auth || typeof auth !== "object") throw new Error('missing "auth" object')
+  const { command, env } = auth as { command?: unknown; env?: unknown }
+  if (!Array.isArray(command) || command.length === 0 || !command.every((item) => typeof item === "string")) {
+    throw new Error('missing "auth.command" string array')
+  }
+  if (typeof env !== "string" || !env) throw new Error('missing "auth.env" string')
+  return { command, env }
+}
+
 const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
   plugin: { auth: PluginAuth },
   provider: string,
@@ -324,14 +346,14 @@ export const ProvidersLoginCommand = effectCmd({
     yield* Prompt.intro("Add credential")
     if (args.url) {
       const url = args.url.replace(/\/+$/, "")
-      const wellknown = (yield* cliTry(`Failed to load auth provider metadata from ${url}: `, () =>
-        fetch(`${url}/.well-known/opencode`).then((x) => x.json()),
-      )) as {
-        auth: { command: string[]; env: string }
-      }
-      yield* Prompt.log.info(`Running \`${wellknown.auth.command.join(" ")}\``)
+      const wellknown = yield* cliTry(`Failed to load auth provider metadata from ${url}: `, () =>
+        fetch(`${url}/.well-known/opencode`).then(readWellknown),
+      )
+      yield* Prompt.log.info(`Running \`${wellknown.command.join(" ")}\``)
       const abort = new AbortController()
-      const proc = Process.spawn(wellknown.auth.command, { stdout: "pipe", stderr: "inherit", abort: abort.signal })
+      const proc = yield* cliTry("Failed to run auth provider command: ", async () =>
+        Process.spawn(wellknown.command, { stdout: "pipe", stderr: "inherit", abort: abort.signal }),
+      )
       if (!proc.stdout) {
         yield* Prompt.log.error("Failed")
         yield* Prompt.outro("Done")
@@ -345,7 +367,7 @@ export const ProvidersLoginCommand = effectCmd({
         yield* Prompt.outro("Done")
         return
       }
-      yield* Effect.orDie(authSvc.set(url, { type: "wellknown", key: wellknown.auth.env, token: token.trim() }))
+      yield* Effect.orDie(authSvc.set(url, { type: "wellknown", key: wellknown.env, token: token.trim() }))
       yield* Prompt.log.success("Logged into " + url)
       yield* Prompt.outro("Done")
       return

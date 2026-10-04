@@ -3,6 +3,7 @@ import { path } from "@opencode-ai/core/effect/app-node-platform"
 import { Global } from "@opencode-ai/core/global"
 import { InstanceStore } from "@/project/instance-store"
 import { Project } from "@/project/project"
+import type { InstanceContext } from "@/project/instance-context"
 import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
 import { ProjectTable } from "@opencode-ai/core/project/sql"
@@ -385,6 +386,20 @@ const layer: Layer.Layer<
       })
     }
 
+    // Roots that may own a removable sandbox: the project checkout and the managed directory
+    // `create()` places new worktrees in.
+    const isSandboxPath = Effect.fnUntraced(function* (ctx: InstanceContext, directory: string) {
+      const roots = yield* Effect.forEach(
+        [ctx.project.worktree, pathSvc.join(Global.Path.data, "worktree", ctx.project.id)],
+        (root) => canonical(root),
+        { concurrency: "unbounded" },
+      )
+      if (!roots.some((root) => directory === root || directory.startsWith(`${root}${pathSvc.sep}`))) return false
+      const sandboxes = yield* project.sandboxes(ctx.project.id)
+      const registered = yield* Effect.forEach(sandboxes, (sandbox) => canonical(sandbox), { concurrency: "unbounded" })
+      return registered.includes(directory)
+    })
+
     const remove = Effect.fn("Worktree.remove")(function* (input: RemoveInput) {
       const ctx = yield* InstanceState.context
       if (ctx.project.vcs !== "git") {
@@ -393,8 +408,14 @@ const layer: Layer.Layer<
 
       const directory = yield* canonical(input.directory)
 
-      // Preserve the loaded path casing for the store cache; `directory` is lowercased on Windows.
-      if (directory !== (yield* canonical(ctx.worktree))) yield* store.disposeDirectory(input.directory)
+      // The request payload is client supplied, so refuse to touch the checkout the instance runs in
+      // or the project root before any directory is inspected or deleted.
+      const protectedRoots = yield* Effect.forEach([ctx.worktree, ctx.project.worktree], (root) => canonical(root), {
+        concurrency: "unbounded",
+      })
+      if (protectedRoots.some((root) => directory === root)) {
+        return yield* new RemoveFailedError({ message: "Cannot remove the primary workspace" })
+      }
 
       const list = yield* git(["worktree", "list", "--porcelain"], { cwd: ctx.worktree })
       if (list.code !== 0) {
@@ -406,10 +427,15 @@ const layer: Layer.Layer<
 
       if (!entry?.path) {
         const directoryExists = yield* fs.exists(directory).pipe(Effect.orDie)
-        if (directoryExists) {
-          yield* stopFsmonitor(directory)
-          yield* cleanDirectory(directory)
+        if (!directoryExists) return true
+        // Git no longer tracks the path, so only a sandbox this project created may be deleted.
+        if (!(yield* isSandboxPath(ctx, directory))) {
+          return yield* new RemoveFailedError({ message: "Worktree not found" })
         }
+        // Preserve the loaded path casing for the store cache; `directory` is lowercased on Windows.
+        yield* store.disposeDirectory(input.directory)
+        yield* stopFsmonitor(directory)
+        yield* cleanDirectory(directory)
         return true
       }
 
@@ -529,8 +555,12 @@ const layer: Layer.Layer<
       }
 
       const directory = yield* canonical(input.directory)
-      const primary = yield* canonical(ctx.worktree)
-      if (directory === primary) {
+      // `ctx.worktree` is the directory the request was served from, which is a sandbox when the
+      // caller is not on the project checkout, so the project root needs its own guard.
+      const protectedRoots = yield* Effect.forEach([ctx.worktree, ctx.project.worktree], (root) => canonical(root), {
+        concurrency: "unbounded",
+      })
+      if (protectedRoots.some((root) => directory === root)) {
         return yield* new ResetFailedError({ message: "Cannot reset the primary workspace" })
       }
 

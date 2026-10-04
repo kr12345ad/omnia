@@ -40,10 +40,15 @@ function generateID(prefix: keyof typeof prefixes, direction: "descending" | "as
 
 function randomBase62(length: number): string {
   const chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+  // 62 does not divide 256, so `byte % 62` would make the first 8 characters
+  // ~25% more likely. Discard the unusable tail of the byte range instead.
+  const limit = 256 - (256 % chars.length)
   let result = ""
-  const bytes = randomBytes(length)
-  for (let i = 0; i < length; i++) {
-    result += chars[bytes[i] % 62]
+  while (result.length < length) {
+    for (const byte of randomBytes(length - result.length)) {
+      if (byte < limit) result += chars[byte % chars.length]
+      if (result.length === length) break
+    }
   }
   return result
 }

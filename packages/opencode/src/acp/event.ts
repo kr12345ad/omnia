@@ -86,7 +86,12 @@ export class Subscription {
       return response
     } finally {
       waiters.delete(waiter)
-      if (waiters.size === 0) this.idleWaiters.delete(sessionId)
+      // Only drop the entry when it still points at this set: a disconnect (or an
+      // idle event) clears the map while earlier prompts are still unwinding, and a
+      // later prompt for the same session then installs a fresh set. Deleting
+      // unconditionally would orphan that newer waiter, so its prompt would never
+      // see idle and never be rejected either - it would hang forever.
+      if (waiters.size === 0 && this.idleWaiters.get(sessionId) === waiters) this.idleWaiters.delete(sessionId)
     }
   }
 

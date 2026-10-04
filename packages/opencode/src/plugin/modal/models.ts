@@ -47,6 +47,13 @@ function price(value: string | number | undefined, fallback: number) {
   return Number.isFinite(parsed) ? parsed * 1_000_000 : fallback
 }
 
+function existingModel(existing: Record<string, Model>, key: string | undefined) {
+  // `key` comes from the remote /models payload, so a plain lookup would resolve
+  // inherited keys like "constructor" and hand back a non-Model object.
+  if (key === undefined) return undefined
+  return Object.hasOwn(existing, key) ? existing[key] : undefined
+}
+
 export async function get(baseURL: string, apiKey: string, existing: Record<string, Model>) {
   const data = await fetch(`${baseURL.replace(/\/+$/, "")}/models`, {
     headers: {
@@ -60,7 +67,7 @@ export async function get(baseURL: string, apiKey: string, existing: Record<stri
 
   return Object.fromEntries(
     data.data.map((item) => {
-      const template = existing[item.base_model_id ?? item.hugging_face_id ?? item.id]
+      const template = existingModel(existing, item.base_model_id ?? item.hugging_face_id ?? item.id)
       const model: Model = {
         id: item.id,
         providerID: "modal",

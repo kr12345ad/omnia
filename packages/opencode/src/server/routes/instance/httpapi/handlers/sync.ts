@@ -62,7 +62,14 @@ export const syncHandlers = HttpApiBuilder.group(InstanceHttpApi, "sync", (handl
       const workspaceID = yield* InstanceState.workspaceID
       if (!workspaceID) return yield* new HttpApiError.BadRequest({})
 
-      yield* session.setWorkspace({ sessionID: ctx.payload.sessionID, workspaceID })
+      // setWorkspace patches through Session.get, which dies on an unknown session, so an
+      // unknown sessionID would surface as a 500 defect instead of a client error.
+      yield* session
+        .get(ctx.payload.sessionID)
+        .pipe(
+          Effect.catchTag("NotFoundError", () => new HttpApiError.BadRequest({})),
+          Effect.flatMap(() => session.setWorkspace({ sessionID: ctx.payload.sessionID, workspaceID })),
+        )
 
       yield* Effect.logInfo("sync session stolen", { sessionID: ctx.payload.sessionID, workspaceID })
 

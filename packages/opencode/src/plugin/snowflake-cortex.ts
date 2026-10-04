@@ -34,6 +34,7 @@ interface PendingOAuth {
 let oauthServer: ReturnType<typeof createServer> | undefined
 let pendingOAuth: PendingOAuth | undefined
 let oauthServerPort: number | undefined
+let oauthFlow: symbol | undefined
 
 function normalizeAccount(input: string) {
   return input
@@ -160,7 +161,7 @@ async function refreshAccessToken(account: string, refreshToken: string) {
 async function startOAuthServer() {
   if (oauthServer) return
 
-  oauthServer = createServer((req, res) => {
+  const server = createServer((req, res) => {
     const host = req.headers.host || `${OAUTH_CALLBACK_HOST}:${oauthServerPort ?? 0}`
     const url = new URL(req.url || "/", `http://${host}`)
 
@@ -213,54 +214,83 @@ async function startOAuthServer() {
   })
 
   await new Promise<void>((resolve, reject) => {
-    oauthServer!.listen(0, OAUTH_CALLBACK_HOST, () => {
-      const address = oauthServer!.address()
+    const onError = (error: Error) => {
+      server.off("listening", onListening)
+      // Never publish a server we failed to bind or could not read a port from,
+      // otherwise the next attempt reuses it and the callback never arrives.
+      if (oauthServer === server) oauthServer = undefined
+      server.close(() => {})
+      reject(error)
+    }
+    const onListening = () => {
+      const address = server.address()
       if (!address || typeof address === "string") {
-        reject(new Error("Unable to resolve Snowflake OAuth callback port"))
+        onError(new Error("Unable to resolve Snowflake OAuth callback port"))
         return
       }
+      server.off("error", onError)
       oauthServerPort = address.port
       resolve()
-    })
-    oauthServer!.on("error", reject)
+    }
+    server.once("error", onError)
+    server.once("listening", onListening)
+    server.listen(0, OAUTH_CALLBACK_HOST)
   })
+
+  oauthServer = server
 }
 
-function stopOAuthServer() {
+// Release the loopback listener, but only for the flow that still owns it: a
+// superseded attempt must not close the listener its replacement is waiting on.
+function stopOAuthServer(flow?: symbol) {
+  if (flow && oauthFlow !== flow) return
+  oauthFlow = undefined
   if (!oauthServer) return
   oauthServer.close()
   oauthServer = undefined
   oauthServerPort = undefined
 }
 
-function waitForOAuthCallback(account: string, pkce: PkceCodes, state: string): Promise<TokenResponse> {
+function waitForOAuthCallback(
+  account: string,
+  pkce: PkceCodes,
+  state: string,
+): { flow: symbol; result: Promise<TokenResponse> } {
   if (pendingOAuth) {
     pendingOAuth.reject(new Error("Superseded by a newer Snowflake authorize request"))
     pendingOAuth = undefined
   }
 
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      if (!pendingOAuth) return
-      pendingOAuth = undefined
-      stopOAuthServer()
-      reject(new Error("Snowflake OAuth callback timeout - authorization took too long"))
-    }, OAUTH_TIMEOUT_MS)
+  const flow = Symbol("snowflake-oauth")
 
-    pendingOAuth = {
+  const result = new Promise<TokenResponse>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const current: PendingOAuth = {
       account,
       state,
       pkce,
       resolve: (tokens) => {
-        clearTimeout(timeout)
+        if (timer) clearTimeout(timer)
         resolve(tokens)
       },
       reject: (error) => {
-        clearTimeout(timeout)
+        if (timer) clearTimeout(timer)
         reject(error)
       },
     }
+
+    timer = setTimeout(() => {
+      if (pendingOAuth !== current) return
+      pendingOAuth = undefined
+      stopOAuthServer(flow)
+      reject(new Error("Snowflake OAuth callback timeout - authorization took too long"))
+    }, OAUTH_TIMEOUT_MS)
+
+    pendingOAuth = current
+    oauthFlow = flow
   })
+
+  return { flow, result }
 }
 
 export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Hooks> {
@@ -469,7 +499,7 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
             const state = generateRandomString(64)
             const role = (inputs.role || "").trim() || undefined
             const url = buildAuthorizeUrl(account, role, state, pkce)
-            const callbackPromise = waitForOAuthCallback(account, pkce, state)
+            const { flow, result: callbackPromise } = waitForOAuthCallback(account, pkce, state)
             await open(url).catch(() => undefined)
 
             return {
@@ -490,7 +520,7 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
                 } catch {
                   return { type: "failed" as const }
                 } finally {
-                  stopOAuthServer()
+                  stopOAuthServer(flow)
                 }
               },
             }

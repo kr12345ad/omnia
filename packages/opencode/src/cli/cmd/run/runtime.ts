@@ -217,12 +217,20 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       return state.session
     }
 
-    state.session = input.resolveSession(ctx).then((next) => {
-      state.sessionID = next.sessionID
-      state.sessionTitle = next.sessionTitle ?? state.sessionTitle
-      state.agent = next.agent
+    // Share one in-flight promise, but drop it on failure so a later prompt can
+    // retry instead of replaying the cached rejection forever.
+    const next = input.resolveSession(ctx).then((resolved) => {
+      state.sessionID = resolved.sessionID
+      state.sessionTitle = resolved.sessionTitle ?? state.sessionTitle
+      state.agent = resolved.agent
     })
-    return state.session
+    state.session = next
+    void next.catch(() => {
+      if (state.session === next) {
+        state.session = undefined
+      }
+    })
+    return next
   }
 
   const shell = await (deps.createRuntimeLifecycle ?? createRuntimeLifecycle)({
@@ -753,19 +761,26 @@ export async function runInteractiveLocalMode(input: RunLocalInput): Promise<voi
         return session
       }
 
-      session = Promise.all([input.resolveAgent(), input.session(sdk)]).then(([agent, next]) => {
-        if (!next?.id) {
+      const next = Promise.all([input.resolveAgent(), input.session(sdk)]).then(([agent, resolved]) => {
+        if (!resolved?.id) {
           throw new Error("Session not found")
         }
 
-        void input.share(sdk, next.id).catch(() => {})
+        void input.share(sdk, resolved.id).catch(() => {})
         return {
-          sessionID: next.id,
-          sessionTitle: next.title,
+          sessionID: resolved.id,
+          sessionTitle: resolved.title,
           agent,
         }
       })
-      return session
+      // Forget a failed lookup so the next prompt can try again.
+      session = next
+      void next.catch(() => {
+        if (session === next) {
+          session = undefined
+        }
+      })
+      return next
     },
     createSession: createSessionResolver(input.createSession),
     boot: async () => {

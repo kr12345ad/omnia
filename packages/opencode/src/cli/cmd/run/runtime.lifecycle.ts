@@ -176,6 +176,10 @@ function queueSplash(
 export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lifecycle> {
   const source = resolveInteractiveStdin()
   let unregisterKeymap: (() => void) | undefined
+  // Hoisted so the catch below can tear the renderer down. createCliRenderer
+  // already switched the terminal into split-footer mode with stdout captured,
+  // so leaking it swallows all later output and keeps the event loop alive.
+  let created: CliRenderer | undefined
 
   try {
     const renderer = await createCliRenderer({
@@ -193,6 +197,7 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
       consoleMode: "disabled",
       clearOnShutdown: false,
     })
+    created = renderer
     const theme = await resolveRunTheme(renderer)
     renderer.setBackgroundColor(theme.background)
     const keymap = createDefaultOpenTuiKeymap(renderer)
@@ -400,6 +405,7 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
     }
   } catch (error) {
     unregisterKeymap?.()
+    if (created) shutdown(created)
     source.cleanup?.()
     throw error
   }
