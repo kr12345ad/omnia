@@ -90,12 +90,18 @@ function useServerPreview() {
     return host.includes(".") || host.includes(":")
   }
 
+  // Each keystroke starts another probe, so probes finish out of order. Only the
+  // newest one may publish, otherwise a slow earlier probe overwrites the status
+  // of the URL that is actually in the form.
+  let generation = 0
+
   const previewStatus = async (
     value: string,
     username: string,
     password: string,
     setStatus: (value: boolean | undefined) => void,
   ) => {
+    const current = ++generation
     setStatus(undefined)
     if (!looksComplete(value)) return
     const normalized = normalizeServerUrl(value)
@@ -103,8 +109,9 @@ function useServerPreview() {
     const http: ServerConnection.HttpBase = { url: normalized }
     if (username) http.username = username
     if (password) http.password = password
-    const result = await checkServerHealth(http)
-    setStatus(result.healthy)
+    const result = await checkServerHealth(http).catch(() => undefined)
+    if (current !== generation) return
+    setStatus(result?.healthy)
   }
 
   return { previewStatus }
@@ -259,8 +266,8 @@ export function useServerManagementController(options: { onSelect?: () => void; 
       if (store.addServer.name.trim()) conn.displayName = store.addServer.name.trim()
       if (store.addServer.password) conn.http.password = store.addServer.password
       if (store.addServer.password && store.addServer.username) conn.http.username = store.addServer.username
-      const result = await checkServerHealth(conn.http)
-      if (!result.healthy) {
+      const result = await checkServerHealth(conn.http).catch(() => undefined)
+      if (!result?.healthy) {
         setStore("addServer", { error: language.t("dialog.server.add.error") })
         return
       }
@@ -310,8 +317,8 @@ export function useServerManagementController(options: { onSelect?: () => void; 
         displayName: name,
         http: { url: normalized, username, password },
       }
-      const result = await checkServerHealth(conn.http)
-      if (!result.healthy) {
+      const result = await checkServerHealth(conn.http).catch(() => undefined)
+      if (!result?.healthy) {
         setStore("editServer", { error: language.t("dialog.server.add.error") })
         return
       }

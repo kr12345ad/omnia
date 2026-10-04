@@ -448,6 +448,9 @@ function ConnectionGate(props: ParentProps<{ disableHealthCheck?: boolean; start
             const res = yield* Effect.promise(() => checkServerHealth(http))
             if (res.healthy) return true
             if (checkMode() === "background" || type === "http") return false
+            // Pause between probes. A fast negative answer (reachable but unhealthy)
+            // would otherwise spin this loop into a request flood for the whole grace period.
+            yield* Effect.sleep("500 millis")
           }
         }).pipe(
           Effect.timeoutOrElse({ duration: "10 seconds", orElse: () => Effect.succeed(false) }),
