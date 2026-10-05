@@ -181,12 +181,38 @@ describe("subscription folding", () => {
     expect(second.state.subscriptions).toHaveLength(1)
   })
 
-  test("a newer subscription replaces the profile's old one", () => {
+  test("a second subscription is added, not swapped in", () => {
     const subscription = subscriptionFromEvent(event)!
     const first = applySubscription(EMPTY_STATE, subscription, "pro", "evt_1")
     const upgraded = applySubscription(first.state, { ...subscription, subscriptionId: "sub_2" }, "business", "evt_2")
-    expect(upgraded.state.subscriptions).toHaveLength(1)
+    expect(upgraded.state.subscriptions).toHaveLength(2)
     expect(resolvePlan(upgraded.state, "230746284").id).toBe("business")
+  })
+
+  test("a late cancellation of the OLD subscription does not downgrade the customer", () => {
+    // Stripe does not guarantee event ordering. The real sequence for an upgrade
+    // is: sub_A created, sub_B created, then sub_A cancelled. Folding that last
+    // event by profileId deleted sub_B and dropped a paying customer to free.
+    const subscription = subscriptionFromEvent(event)!
+    const first = applySubscription(EMPTY_STATE, subscription, "pro", "evt_1")
+    const upgraded = applySubscription(first.state, { ...subscription, subscriptionId: "sub_2" }, "business", "evt_2")
+    const lateCancellation = applySubscription(
+      upgraded.state,
+      { ...subscription, status: "canceled" },
+      "pro",
+      "evt_3",
+    )
+    expect(lateCancellation.state.subscriptions).toHaveLength(2)
+    expect(resolvePlan(lateCancellation.state, "230746284").id).toBe("business")
+  })
+
+  test("the same subscription id is updated in place", () => {
+    const subscription = subscriptionFromEvent(event)!
+    const first = applySubscription(EMPTY_STATE, subscription, "pro", "evt_1")
+    const canceled = applySubscription(first.state, { ...subscription, status: "canceled" }, "pro", "evt_2")
+    expect(canceled.state.subscriptions).toHaveLength(1)
+    expect(canceled.state.subscriptions[0]?.status).toBe("canceled")
+    expect(resolvePlan(canceled.state, "230746284").id).toBe("free")
   })
 
   test("a lapsed period does not entitle", () => {

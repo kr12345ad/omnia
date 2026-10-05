@@ -325,9 +325,13 @@ export function applySubscription(
   eventId: string,
 ): { state: BillingState; changed: boolean; duplicate: boolean } {
   if (state.processedEvents.includes(eventId)) return { state, changed: false, duplicate: true }
-  const others = state.subscriptions.filter(
-    (entry) => entry.subscriptionId !== subscription.subscriptionId && entry.profileId !== subscription.profileId,
-  )
+  // Keyed ONLY on subscriptionId. Evicting by profileId as well meant that when
+  // Stripe sent an upgrade (sub_B) and then the cancellation of the old
+  // subscription (sub_A), the late cancellation deleted sub_B and the customer
+  // fell back to free while still being charged. Stripe does not guarantee
+  // ordering, so the record for a subscription id is updated in place and every
+  // other subscription is left alone.
+  const others = state.subscriptions.filter((entry) => entry.subscriptionId !== subscription.subscriptionId)
   const next: SubscriptionRecord = {
     customerId: subscription.customerId,
     subscriptionId: subscription.subscriptionId,

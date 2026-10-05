@@ -54,12 +54,23 @@ function json(response: ServerResponse, status: number, payload: unknown): void 
  * free plan rather than to nobody's plan.
  */
 function profileId(context: ApiContext, request: IncomingMessage, body: Record<string, unknown> = {}): string | undefined {
+  // The signed-in profile is the ONLY acceptable answer.
+  //
+  // This used to read an x-omnia-profile header and fall back to body.profileId,
+  // which meant any valid bearer - including a thin client token - could name
+  // another customer's profile: read their plan, spend their quota, and open a
+  // Stripe portal bound to their customer id. A header the caller controls is
+  // not an identity.
+  const session = context.auth.status().profile
+  if (session !== undefined && /^[0-9]{1,32}$/.test(String(session.id))) return String(session.id)
+  // No signed-in profile: fall back to a header ONLY when the caller presented
+  // the server token, which is the desktop UI's own credential and is not
+  // delegable to a third party.
+  if (!presentsServerToken(context, request)) return undefined
   const fromHeader = request.headers["x-omnia-profile"]
   const header = Array.isArray(fromHeader) ? fromHeader[0] : fromHeader
   const candidate = typeof header === "string" && header.length > 0 ? header : body.profileId
   if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > 128) return undefined
-  // Numeric-only ids are what GitHub returns; anything else is not a profile we
-  // ever wrote a subscription against.
   return /^[0-9]{1,32}$/.test(candidate) ? candidate : undefined
 }
 
@@ -279,7 +290,17 @@ export async function handleBillingRoute(
         return [capability, { allowed: decision.allowed, code: decision.code, used: decision.used, limit: decision.limit }]
       }),
     )
-    json(response, 200, { ok: true, plan, computers: PLANS[plan].computers, capabilities, billingConfigured: stripeSecret() !== undefined })
+    json(response, 200, {
+      ok: true,
+      plan,
+      computers: PLANS[plan].computers,
+      // Both halves matter: a server with an API key but no webhook secret can
+      // take a payment and then never grant the plan, so reporting "configured"
+      // on the strength of the key alone is how a customer pays for nothing.
+      monthlyUsd: PLANS[plan].monthlyUsd,
+      capabilities,
+      billingConfigured: billingConfigured(),
+    })
     return true
   }
 
