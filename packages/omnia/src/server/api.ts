@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http"
 import { createHmac, timingSafeEqual } from "node:crypto"
+import { handleBillingRoute } from "./billing-api"
 import type { EventBus, ServerEvent } from "./events"
 import type { ComputerManager, DragEndpoint, ServerActionRequest, ServerBatchStep } from "./computers"
 import { OMNIA_ACTION_CATALOG } from "./catalog"
@@ -175,6 +176,34 @@ export function isAuthorized(
   const expected = Buffer.from(token)
   const actual = Buffer.from(presented)
   return actual.length === expected.length && timingSafeEqual(actual, expected)
+}
+
+/**
+ * Routes that must be reachable WITHOUT a bearer token, and what authenticates
+ * them instead.
+ *
+ * This list exists as one named function because getting it wrong is silent and
+ * expensive in both directions: leave a public route out and a legitimate client
+ * gets a 401 it can never fix (the desktop app could not sign in; Stripe could
+ * not deliver a subscription), and put a privileged route in and you have
+ * handed out access for free. Anything added here needs a comment saying what
+ * stands in for the token.
+ */
+export function isPublicApiRoute(method: string, pathname: string): boolean {
+  if (!pathname.startsWith(`${OMNIA_API_PREFIX}/`)) return false
+  const route = pathname.slice(OMNIA_API_PREFIX.length)
+  // The GitHub OAuth handshake, which by definition runs before anyone holds a
+  // credential. Authorization is the signed state parameter.
+  if (method === "POST" && route === "/auth/github/start") return true
+  if (method === "GET" && route === "/auth/github/callback") return true
+  if (method === "GET" && route === "/auth/github/status") return true
+  if (method === "POST" && route === "/auth/github/poll") return true
+  // Stripe cannot present an Omnia bearer. It authenticates with a signature
+  // over the raw body, verified before anything is parsed or written. Matched on
+  // path rather than method so a misconfigured Stripe dashboard gets an honest
+  // "POST only" instead of a 401 that looks like a credential problem.
+  if (route === "/billing/stripe/webhook") return true
+  return false
 }
 
 // The server token is the root credential the desktop UI holds, and comparing
@@ -2076,6 +2105,13 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
     }
     json(response, 404, { ok: false, error: "Unknown computer-use route." })
     return true
+  }
+
+  // Billing lives in its own module because it is the money path. It is matched
+  // before anything that parses a body, because the Stripe webhook must verify
+  // its signature over the RAW bytes.
+  if (segments[1] === "billing") {
+    if (await handleBillingRoute(context, request, response, parsed)) return true
   }
 
   if (segments.length === 3 && segments[1] === "auth" && segments[2] === "clients" && parsed.method === "POST") {

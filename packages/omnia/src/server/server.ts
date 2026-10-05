@@ -30,6 +30,7 @@ import {
   handleRequest,
   InvalidJsonBodyError,
   isAuthorized,
+  isPublicApiRoute,
   json,
   OMNIA_API_PREFIX,
   OMNIA_API_VERSION,
@@ -447,12 +448,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       const authorization = ((): "ok" | "unauthorized" | "bad_request" => {
         if (isAuthorized(request, token, (a, b) => timingSafeEqual(a, b), auth)) return "ok"
         const url = new URL(request.url ?? "/", "http://127.0.0.1")
-        const publicGitHubRoute =
-          (request.method === "POST" && url.pathname === `${OMNIA_API_PREFIX}/auth/github/start`) ||
-          (request.method === "GET" && url.pathname === `${OMNIA_API_PREFIX}/auth/github/callback`) ||
-          (request.method === "GET" && url.pathname === `${OMNIA_API_PREFIX}/auth/github/status`) ||
-          (request.method === "POST" && url.pathname === `${OMNIA_API_PREFIX}/auth/github/poll`)
-        if (publicGitHubRoute) return "ok"
+        if (isPublicApiRoute(request.method ?? "", url.pathname)) return "ok"
         if (request.method === "POST" && url.pathname === `${OMNIA_API_PREFIX}/computers/pair/claim`) {
           const address = request.socket.remoteAddress ?? "unknown"
           return claimRateLimited(address) ? "unauthorized" : "ok"
