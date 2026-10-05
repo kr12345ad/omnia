@@ -194,4 +194,22 @@ export const dict: Record<string, string> = {
   "ui.question.multiHint": "Välj alla svar som gäller",
   "ui.question.singleHint": "Välj ett svar",
   "ui.question.custom.placeholder": "Skriv ditt svar...",
+
+  "ui.paywall.capability.remoteShell": "Fjärrshell",
+  "ui.paywall.capability.clipboard": "Urklippsynkronisering",
+  "ui.paywall.capability.credentialVault": "Valv för inloggningsuppgifter",
+  "ui.paywall.capability.vaultLogin": "Inloggningar i valvet",
+  "ui.paywall.capability.cloudVision": "Cloud Vision",
+  "ui.paywall.capability.scheduledRuns": "Körningar utan tillsyn",
+
+  "ui.paywall.fairUse.title": "{{capability}} har överskridit sin kvot för rimlig användning",
+  "ui.paywall.fairUse.description": "Det fungerar fortfarande. En uppgradering ökar kvoten.",
+  "ui.paywall.usedUp.title": "Kvoten för {{capability}} är slut",
+  "ui.paywall.usedUp.description": "En uppgradering ökar kvoten direkt.",
+  "ui.paywall.locked.title": "{{capability}} ingår inte i din plan",
+  "ui.paywall.locked.description": "En uppgradering till {{plan}} lägger till {{capability}}.",
+  "ui.paywall.locked.description.generic": "En betald plan lägger till {{capability}}.",
+  "ui.paywall.usage": "{{used}} av {{limit}} använt under den här perioden",
+  "ui.paywall.upgrade": "Uppgradera",
+  "ui.paywall.dismiss": "Avfärda",
 }

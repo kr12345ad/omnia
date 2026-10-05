@@ -203,4 +203,22 @@ export const dict: Record<string, string> = {
   "ui.question.multiHint": "Izberite vse ustrezne odgovore",
   "ui.question.singleHint": "Izberite en odgovor",
   "ui.question.custom.placeholder": "Vnesite odgovor ...",
+
+  "ui.paywall.capability.remoteShell": "Oddaljena lupina",
+  "ui.paywall.capability.clipboard": "Sinhronizacija odložišča",
+  "ui.paywall.capability.credentialVault": "Trezor poverilnic",
+  "ui.paywall.capability.vaultLogin": "Prijave v trezor",
+  "ui.paywall.capability.cloudVision": "Cloud Vision",
+  "ui.paywall.capability.scheduledRuns": "Nenadzorovani zagoni",
+
+  "ui.paywall.fairUse.title": "Kvota poštene uporabe za {{capability}} je presežena",
+  "ui.paywall.fairUse.description": "Deluje še naprej. Nadgradnja poveča kvoto.",
+  "ui.paywall.usedUp.title": "Kvota za {{capability}} je porabljena",
+  "ui.paywall.usedUp.description": "Nadgradnja poveča kvoto takoj.",
+  "ui.paywall.locked.title": "Vaš načrt ne vključuje {{capability}}",
+  "ui.paywall.locked.description": "Nadgradnja na {{plan}} doda {{capability}}.",
+  "ui.paywall.locked.description.generic": "Plačljiv načrt doda {{capability}}.",
+  "ui.paywall.usage": "V tem obdobju je uporabljenih {{used}} od {{limit}}",
+  "ui.paywall.upgrade": "Nadgradnja",
+  "ui.paywall.dismiss": "Opusti",
 }

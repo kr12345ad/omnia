@@ -216,4 +216,22 @@ export const dict: Record<string, string> = {
   "ui.question.multiHint": "Pilih semua jawaban yang sesuai",
   "ui.question.singleHint": "Pilih satu jawaban",
   "ui.question.custom.placeholder": "Ketik jawaban Anda...",
+
+  "ui.paywall.capability.remoteShell": "Shell jarak jauh",
+  "ui.paywall.capability.clipboard": "Sinkronisasi papan klip",
+  "ui.paywall.capability.credentialVault": "Brankas kredensial",
+  "ui.paywall.capability.vaultLogin": "Masuk ke brankas",
+  "ui.paywall.capability.cloudVision": "Cloud Vision",
+  "ui.paywall.capability.scheduledRuns": "Eksekusi tanpa pengawasan",
+
+  "ui.paywall.fairUse.title": "{{capability}} telah melampaui kuota penggunaan wajar",
+  "ui.paywall.fairUse.description": "Ini masih berfungsi. Upgrade meningkatkan kuota.",
+  "ui.paywall.usedUp.title": "Kuota untuk {{capability}} sudah habis",
+  "ui.paywall.usedUp.description": "Upgrade langsung meningkatkan kuota.",
+  "ui.paywall.locked.title": "{{capability}} tidak termasuk dalam paket Anda",
+  "ui.paywall.locked.description": "Upgrade ke {{plan}} menambahkan {{capability}}.",
+  "ui.paywall.locked.description.generic": "Paket berbayar menambahkan {{capability}}.",
+  "ui.paywall.usage": "{{used}} dari {{limit}} digunakan pada periode ini",
+  "ui.paywall.upgrade": "Upgrade",
+  "ui.paywall.dismiss": "Tutup",
 }

@@ -198,4 +198,22 @@ export const dict: Record<string, string> = {
   "ui.question.multiHint": "Seleccioneu totes les respostes aplicables",
   "ui.question.singleHint": "Seleccioneu una resposta",
   "ui.question.custom.placeholder": "Escriu la teva resposta...",
+
+  "ui.paywall.capability.remoteShell": "Shell remot",
+  "ui.paywall.capability.clipboard": "Sincronització del porta-retalls",
+  "ui.paywall.capability.credentialVault": "Cofre de credencials",
+  "ui.paywall.capability.vaultLogin": "Inicis de sessió al cofre",
+  "ui.paywall.capability.cloudVision": "Cloud Vision",
+  "ui.paywall.capability.scheduledRuns": "Execucions no supervisades",
+
+  "ui.paywall.fairUse.title": "{{capability}} ha superat la quota d'ús just",
+  "ui.paywall.fairUse.description": "Encara funciona. Actualitzar augmenta la quota.",
+  "ui.paywall.usedUp.title": "La quota de {{capability}} s'ha esgotat",
+  "ui.paywall.usedUp.description": "Actualitzar augmenta la quota immediatament.",
+  "ui.paywall.locked.title": "El vostre pla no inclòs {{capability}}",
+  "ui.paywall.locked.description": "Actualitzar a {{plan}} afegeix {{capability}}.",
+  "ui.paywall.locked.description.generic": "Un pla de pagament afegeix {{capability}}.",
+  "ui.paywall.usage": "{{used}} de {{limit}} usats en aquest període",
+  "ui.paywall.upgrade": "Actualitza",
+  "ui.paywall.dismiss": "Descarta",
 }

@@ -194,4 +194,22 @@ export const dict: Record<string, string> = {
   "ui.question.multiHint": "Επιλογή όλων των απαντήσεων που ισχύουν",
   "ui.question.singleHint": "Επιλέξτε μία απάντηση",
   "ui.question.custom.placeholder": "Πληκτρολογήστε την απάντησή σας...",
+
+  "ui.paywall.capability.remoteShell": "Απομακρυσμένο Shell",
+  "ui.paywall.capability.clipboard": "Συγχρονισμός προχείρου",
+  "ui.paywall.capability.credentialVault": "Θησαυροφυλάκιο διαπιστευτηρίων",
+  "ui.paywall.capability.vaultLogin": "Συνδέσεις στο θησαυροφυλάκιο",
+  "ui.paywall.capability.cloudVision": "Cloud Vision",
+  "ui.paywall.capability.scheduledRuns": "Εκτελέσεις χωρίς επιτήρηση",
+
+  "ui.paywall.fairUse.title": "Το {{capability}} έχει ξεπεράσει το δίκαιο όριο χρήσης",
+  "ui.paywall.fairUse.description": "Λειτουργεί ακόμα. Η αναβάθμιση αυξάνει το όριο.",
+  "ui.paywall.usedUp.title": "Το όριο του {{capability}} έχει εξαντληθεί",
+  "ui.paywall.usedUp.description": "Η αναβάθμιση αυξάνει αμέσως το όριο.",
+  "ui.paywall.locked.title": "Το {{capability}} δεν περιλαμβάνεται στο πλάνο σας",
+  "ui.paywall.locked.description": "Η αναβάθμιση σε {{plan}} προσθέτει {{capability}}.",
+  "ui.paywall.locked.description.generic": "Ένα επίγδυσμο πλάνο προσθέτει {{capability}}.",
+  "ui.paywall.usage": "{{used}} από {{limit}} χρησιμοποιήθηκε αυτή την περίοδο",
+  "ui.paywall.upgrade": "Αναβάθμιση",
+  "ui.paywall.dismiss": "Απόρριψη",
 }

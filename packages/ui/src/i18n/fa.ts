@@ -194,4 +194,22 @@ export const dict: Record<string, string> = {
   "ui.question.multiHint": "همه پاسخ هایی که اعمال می شوند را انتخاب کنید",
   "ui.question.singleHint": "یک پاسخ را انتخاب کنید",
   "ui.question.custom.placeholder": "پاسخ خود را تایپ کنید...",
+
+  // TODO(i18n): needs a native review
+  "ui.paywall.capability.remoteShell": "Remote shell",
+  "ui.paywall.capability.clipboard": "Clipboard sync",
+  "ui.paywall.capability.credentialVault": "Credential vault",
+  "ui.paywall.capability.vaultLogin": "Vault sign-ins",
+  "ui.paywall.capability.cloudVision": "Cloud vision",
+  "ui.paywall.capability.scheduledRuns": "Unattended runs",
+  "ui.paywall.fairUse.title": "{{capability}} is past its fair-use allowance",
+  "ui.paywall.fairUse.description": "It still works. Upgrading raises the allowance.",
+  "ui.paywall.usedUp.title": "The {{capability}} allowance is used up",
+  "ui.paywall.usedUp.description": "Upgrading raises the allowance straight away.",
+  "ui.paywall.locked.title": "{{capability}} is not included in your plan",
+  "ui.paywall.locked.description": "Upgrading to {{plan}} adds {{capability}}.",
+  "ui.paywall.locked.description.generic": "A paid plan adds {{capability}}.",
+  "ui.paywall.usage": "{{used}} of {{limit}} used this period",
+  "ui.paywall.upgrade": "Upgrade",
+  "ui.paywall.dismiss": "Dismiss",
 }
