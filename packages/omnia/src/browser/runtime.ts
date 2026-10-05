@@ -6,6 +6,7 @@
 
 import { CdpError, CdpRuntime } from "./cdp"
 import type { BrowserDownload, CdpAuthChallenge, CdpNavigationResult } from "./cdp"
+import { BrowserEntitlementGate } from "./entitlement"
 import { BROWSER_RAW_TEXT_LIMIT, BROWSER_TEXT_LIMIT } from "./page-script"
 import type {
   BrowserCandidate,
@@ -57,20 +58,33 @@ export interface BrowserRuntimeOptions {
   readonly now?: () => number
   readonly log?: (message: string, meta?: Record<string, unknown>) => void
   readonly embedded?: { readonly endpoint: string; readonly token: string }
+  /**
+   * Billing gate for browser_automation. The runtime charges the underlying
+   * CdpRuntime per operation, so this is only a way to point that gate at a
+   * control plane; passing it twice would not double-charge.
+   */
+  readonly entitlement?: BrowserEntitlementGate
 }
 
 export class BrowserRuntime {
   private cdp: CdpRuntime | undefined
   private ensuring: Promise<void> | undefined
   private readonly embedded: { readonly endpoint: string; readonly token: string } | undefined
+  private readonly entitlement: BrowserEntitlementGate
   private readonly log: (message: string, meta?: Record<string, unknown>) => void
   // Kept for callers that inject a clock; the embedded bridge owns all timing.
   private readonly now: () => number
 
   constructor(options: BrowserRuntimeOptions = {}) {
     this.embedded = options.embedded ?? embeddedFromEnv()
+    this.entitlement = options.entitlement ?? BrowserEntitlementGate.fromEnv()
     this.log = options.log ?? (() => undefined)
     this.now = options.now ?? Date.now
+  }
+
+  /** The billing gate, so a composite action can charge one request for a span. */
+  get entitlementGate(): BrowserEntitlementGate {
+    return this.entitlement
   }
 
   private embeddedRuntime(): CdpRuntime {
@@ -81,6 +95,7 @@ export class BrowserRuntime {
       endpoint: this.embedded.endpoint,
       token: this.embedded.token,
       log: this.log,
+      entitlement: this.entitlement,
     })
     return this.cdp
   }

@@ -1,0 +1,113 @@
+/*
+ * Paywall — inline upgrade surface for a metered capability.
+ *
+ * Tone carries the meaning, and the tones are deliberately not "error" tones:
+ * `fair-use` is a working feature past its allowance, so it is drawn in the
+ * informational accent and never in the danger colour. A paywall that looks
+ * like a crash is the dark pattern this component exists to avoid.
+ */
+
+[data-component="paywall"] {
+  --paywall-accent: var(--v2-icon-icon-accent);
+  --paywall-tint: var(--v2-background-bg-layer-01);
+
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  background-color: var(--paywall-tint);
+  color: var(--v2-text-text-base);
+  font-family: var(--font-family-sans);
+  font-size: var(--font-size-small);
+  font-weight: var(--font-weight-regular);
+  line-height: var(--line-height-large);
+  letter-spacing: var(--letter-spacing-normal);
+}
+
+[data-component="paywall"][data-tone="used-up"] {
+  --paywall-accent: var(--v2-state-fg-warning);
+}
+
+[data-component="paywall"][data-tone="locked"] {
+  --paywall-accent: var(--v2-icon-icon-accent);
+}
+
+[data-slot="paywall-icon"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  color: var(--paywall-accent);
+}
+
+[data-slot="paywall-body"] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+[data-slot="paywall-title"] {
+  font-weight: var(--font-weight-medium);
+  color: var(--v2-text-text-base);
+}
+
+[data-slot="paywall-description"] {
+  color: var(--v2-text-text-muted);
+}
+
+[data-slot="paywall-usage"] {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+[data-slot="paywall-usage-track"] {
+  position: relative;
+  width: 100%;
+  max-width: 220px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background-color: var(--v2-background-bg-base);
+}
+
+[data-slot="paywall-usage-fill"] {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background-color: var(--paywall-accent);
+  transition: width 200ms ease;
+}
+
+[data-slot="paywall-usage-text"] {
+  color: var(--v2-text-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-slot="paywall-actions"] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+[data-slot="paywall-price"] {
+  color: var(--v2-text-text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="paywall-usage-fill"] {
+    transition: none;
+  }
+}

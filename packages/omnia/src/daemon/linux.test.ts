@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import {
+  allowCapability,
   buildObservation,
   commandRequiresShell,
   displayName,
@@ -17,6 +18,7 @@ import {
   parseXrandrMonitors,
   parseXwininfo,
   probeDisplaySocket,
+  refusedCapability,
   splitCommand,
   summarizeObservation,
   windowToElement,
@@ -494,6 +496,134 @@ describe("linux shell commands", () => {
     const result = await host.runCommand({ command: "true", stdin: "z".repeat(1024 * 1024) })
     expect(result.success).toBe(true)
   }, 10000)
+})
+
+// The two paid primitives, gated on the surface the driver was built for. The
+// assertions that matter are the ones about what did NOT happen: a refusal that
+// arrives after the spawn or after the clipboard is touched is not enforcement.
+describe("paid primitive enforcement", () => {
+  test("refuses remote_shell on a free paired computer before anything is spawned", async () => {
+    const probe = join(mkdtempSync(join(tmpdir(), "omnia-gate-")), "spawned")
+    const host = new LinuxHostDriver({ access: { surface: "paired", plan: "free" } })
+    const result = await host.runCommand({ command: `touch ${probe}` })
+    expect(result.success).toBe(false)
+    expect(result.status).toBe("rejected")
+    expect(result.command).toBeUndefined()
+    expect(result.error).toMatchObject({ code: "capability_not_entitled", retryable: false })
+    expect(result.message).toContain("remote_shell")
+    expect(result.message).toContain("free")
+    // The dispatch is what would have created this file.
+    expect(existsSync(probe)).toBe(false)
+  })
+
+  test("refuses a free paired computer before the clipboard is read", async () => {
+    const calls: string[] = []
+    const host = new LinuxHostDriver({
+      access: { surface: "paired", plan: "free" },
+      runner: async (file, args) => {
+        calls.push(`${file} ${args.join(" ")}`)
+        return { stdout: JSON.stringify({ ok: true, text: "secret", length: 6 }), stderr: "" }
+      },
+    })
+    const result = await host.readClipboard()
+    expect(result.success).toBe(false)
+    expect(result.text).toBeUndefined()
+    expect(result.error).toMatchObject({ code: "capability_not_entitled" })
+    expect(result.message).toContain("clipboard")
+    // Not even the python interpreter probe: the clipboard was never touched.
+    expect(calls).toEqual([])
+  })
+
+  test("refuses a free paired computer before the clipboard is written", async () => {
+    const calls: string[] = []
+    const host = new LinuxHostDriver({
+      access: { surface: "paired", plan: "free" },
+      runner: async (file, args) => {
+        calls.push(`${file} ${args.join(" ")}`)
+        return { stdout: JSON.stringify({ ok: true }), stderr: "" }
+      },
+    })
+    const written = await host.writeClipboard("secret")
+    expect(written.success).toBe(false)
+    expect(written.error).toMatchObject({ code: "capability_not_entitled" })
+    const image = await host.writeClipboardImage("/tmp/whatever.png")
+    expect(image.success).toBe(false)
+    expect(image.error).toMatchObject({ code: "capability_not_entitled" })
+    expect(calls).toEqual([])
+  })
+
+  test("refuses a paired computer whose plan nobody resolved", async () => {
+    const host = new LinuxHostDriver({ access: { surface: "paired" } })
+    const result = await host.runCommand({ command: "printf never" })
+    expect(result.success).toBe(false)
+    expect(result.message).toContain("free")
+  })
+
+  test("runs the command on a paid paired computer", async () => {
+    const host = new LinuxHostDriver({ access: { surface: "paired", plan: "pro" } })
+    const result = await host.runCommand({ command: "printf omnia-pro" })
+    expect(result.success).toBe(true)
+    expect(result.command?.stdout).toBe("omnia-pro")
+  })
+
+  test("leaves the local path alone: undeclared means local", async () => {
+    const calls: string[] = []
+    const host = new LinuxHostDriver({
+      runner: async (file, args) => {
+        calls.push(`${file} ${args.join(" ")}`)
+        if (file === "which") return { stdout: "/usr/bin/python3", stderr: "" }
+        return { stdout: JSON.stringify({ ok: true, text: "local-clip", length: 11 }), stderr: "" }
+      },
+    })
+    const command = await host.runCommand({ command: "printf omnia-local" })
+    expect(command.success).toBe(true)
+    expect(command.command?.stdout).toBe("omnia-local")
+    const read = await host.readClipboard()
+    expect(read.success).toBe(true)
+    expect(read.text).toBe("local-clip")
+  })
+
+  test("an explicitly local surface ignores a free plan", async () => {
+    const host = new LinuxHostDriver({ access: { surface: "local", plan: "free" } })
+    const result = await host.runCommand({ command: "printf omnia-local" })
+    expect(result.success).toBe(true)
+    expect(result.command?.stdout).toBe("omnia-local")
+  })
+
+  test("leaves every other primitive ungated", async () => {
+    const calls: string[] = []
+    const host = new LinuxHostDriver({
+      access: { surface: "paired", plan: "free" },
+      runner: async (file, args) => {
+        calls.push(`${file} ${args.join(" ")}`)
+        return { stdout: "", stderr: "" }
+      },
+    })
+    // Only remote_shell and clipboard are gated. Input, observation, and the
+    // rest of the driver must keep working on a free paired computer, and the
+    // input-freeze lifecycle another owner depends on must not be reachable
+    // from here at all.
+    const info = await host.info()
+    expect(info.id).toBe("linux-host")
+    expect(calls.length).toBeGreaterThan(0)
+    const denial = allowCapability({ surface: "paired", plan: "free" }, "input_freeze")
+    expect(denial?.error).toMatchObject({ code: "capability_not_entitled" })
+  })
+
+  test("allowCapability names the capability and the plan it refused", () => {
+    expect(allowCapability({ surface: "local", plan: "free" }, "remote_shell")).toBeUndefined()
+    expect(allowCapability({ surface: "paired", plan: "pro" }, "remote_shell")).toBeUndefined()
+    expect(allowCapability({ surface: "paired", plan: "pro" }, "clipboard")).toBeUndefined()
+    const denial = allowCapability({ surface: "paired", plan: "free" }, "clipboard")
+    expect(denial?.message).toContain("clipboard")
+    expect(denial?.message).toContain("free")
+    expect(denial?.error).toMatchObject({ code: "capability_not_entitled" })
+    expect(refusedCapability("remote_shell", "free")).toMatchObject({
+      success: false,
+      status: "rejected",
+      error: { code: "capability_not_entitled" },
+    })
+  })
 })
 
 const x11Display = process.env.DISPLAY

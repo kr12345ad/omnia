@@ -20,6 +20,17 @@ export {
 export { browserFailure, browserFailureCode, browserFailureStatus } from "./errors"
 export type { BrowserFailure } from "./errors"
 export {
+  BrowserEntitlementError,
+  BrowserEntitlementGate,
+  METERED_BROWSER_OPERATIONS,
+} from "./entitlement"
+export type {
+  BrowserEntitlementOptions,
+  Entitlement,
+  EntitlementCode,
+  MeteredBrowserOperation,
+} from "./entitlement"
+export {
   ImageFileError,
   decodeDataUrl,
   imageDownloadsDir,

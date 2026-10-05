@@ -148,6 +148,11 @@ export type ComputerUseErrorCode =
   | "driver_unavailable"
   | "calibration_stale"
   | "verification_failed"
+  // The plan matrix does not include the capability this operation needs (for
+  // example cloud_vision on a free plan). The capability and the control
+  // plane's reason travel in `metadata` so the caller can degrade on purpose
+  // instead of guessing from an empty result.
+  | "capability_required"
 
 export const COMPUTER_USE_ERROR_CODES: readonly ComputerUseErrorCode[] = [
   "title_bar_ban",
@@ -167,6 +172,7 @@ export const COMPUTER_USE_ERROR_CODES: readonly ComputerUseErrorCode[] = [
   "driver_unavailable",
   "calibration_stale",
   "verification_failed",
+  "capability_required",
 ]
 
 export function isComputerUseErrorCode(value: unknown): value is ComputerUseErrorCode {

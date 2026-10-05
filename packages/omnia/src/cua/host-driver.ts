@@ -28,6 +28,7 @@ import { withInputPermission } from "../daemon/host-driver"
 import type { InputGrabEvent, InputGrabReleasedBy } from "../daemon/linux"
 import { LinuxHostDriver } from "../daemon/linux"
 import { CuaEngine, elementByRef } from "./engine"
+import { CuaLiveView, type LiveViewOptions } from "./live-view"
 import type {
   CuaAction,
   CuaActionResult,
@@ -318,6 +319,18 @@ export class CuaHostDriver implements HostDriver {
     }
 
     return unavailable(`Action ${action.type} is not supported by this driver.`)
+  }
+
+  /**
+   * Opens a metered screenshot stream for this computer.
+   *
+   * Streaming is `live_view`; a single `screenshot` action is not, because it
+   * is one capture inside one action. The lease inside the returned session
+   * holds the single decision, so per-frame capture never calls the control
+   * plane. Throws EntitlementRefusedError when the plan does not include it.
+   */
+  openLiveView(options: LiveViewOptions = {}): Promise<CuaLiveView> {
+    return CuaLiveView.open(() => this.legacy().captureScreen(), options)
   }
 
   async revalidateTarget(reference: ElementReference): Promise<HostRevalidation> {

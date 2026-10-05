@@ -1568,6 +1568,14 @@ export class ComputerManager {
     // approver for desktop-originated calls, but agent sessions are gated.
     // A type action that selects a stored credential resolves it here so the
     // SECRETS scope is part of the same policy decision.
+    // A browser_login fills a form with a stored secret, so it reads the vault.
+    // The entitlement has to be settled BEFORE the read, otherwise the highest
+    // value gate in the product runs after the credential is already in memory.
+    if (actionType.startsWith("browser_") && request.credential !== undefined) {
+      const capability = actionType === "browser_login" ? "vault_login" : "browser_automation"
+      const denied = await this.denyUnentitled(capability)
+      if (denied !== undefined) return denied
+    }
     const typedCredential =
       actionType === "type" && request.credential !== undefined
         ? this.resolveTypedCredential(computer, request, actionType)
@@ -2604,6 +2612,56 @@ export class ComputerManager {
 
   // Resolves the credential plus the exact field value a type action should
   // enter. The value stays separate from model-visible output.
+  /**
+   * Refuses a capability the current plan does not include.
+   *
+   * Returns undefined when the caller may proceed. A transport failure is NOT
+   * treated as a refusal here: the browser and CUA layers already own the
+   * fail-open/fail-closed split per capability, and duplicating that decision in
+   * the driver would let one unreachable endpoint deny every local action.
+   */
+  private async denyUnentitled(
+    capability: "vault_login" | "browser_automation",
+  ): Promise<{ readonly httpStatus: number; readonly result: ActionResult } | undefined> {
+    let json: Record<string, unknown>
+    try {
+      const response = await fetch(`${this.controlPlaneUrl()}/v1/billing/check`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${this.controlPlaneToken()}`, "content-type": "application/json" },
+        body: JSON.stringify({ capability }),
+      })
+      json = (await response.json()) as Record<string, unknown>
+    } catch {
+      return undefined
+    }
+    if (json.allowed === true) return undefined
+    const reason = typeof json.reason === "string" ? json.reason : `${capability} is not available on your plan.`
+    return {
+      httpStatus: 402,
+      result: {
+        success: false,
+        status: "rejected",
+        message: reason,
+        // The plan and the capability are named in the message on purpose:
+        // ActionResult has no details bag, and a refusal the user cannot act on
+        // is a support ticket instead of an upgrade.
+        error: {
+          code: "capability_not_entitled",
+          message: `${reason} (${capability}, plan: ${typeof json.plan === "string" ? json.plan : "free"})`,
+        },
+      },
+    }
+  }
+
+  private controlPlaneUrl(): string | undefined {
+    const url = process.env.OMNIA_SERVER_URL ?? process.env.OMNIA_PUBLIC_URL
+    return url === undefined || url.length === 0 ? undefined : url.replace(/\/+$/, "")
+  }
+
+  private controlPlaneToken(): string {
+    return process.env.OMNIA_SERVER_TOKEN ?? ""
+  }
+
   private resolveTypedCredential(
     computer: ManagedComputer,
     request: ServerActionRequest,

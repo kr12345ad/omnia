@@ -4,6 +4,7 @@ export { INPUT_ESCAPE_WINDOW_MS, INPUT_GRAB_SCRIPT, parseInputGrabLine } from ".
 export type { InputGrabMessage, InputGrabReleasedBy } from "./input-grab-script"
 export {
   LinuxHostDriver,
+  allowCapability,
   buildObservation,
   capabilityState,
   defaultRunner,
@@ -16,6 +17,7 @@ export {
   parseXprop,
   parseXrandr,
   parseXwininfo,
+  refusedCapability,
   splitCommand,
   summarizeObservation,
   windowToElement,
@@ -30,6 +32,8 @@ export {
 export type {
   AtspiApplication,
   AtspiNode,
+  DriverAccess,
+  DriverSurface,
   InputGrabEvent,
   LinuxDriverOptions,
   RunResult,

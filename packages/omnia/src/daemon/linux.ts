@@ -16,6 +16,7 @@ import type {
   Observation,
   UIElement,
 } from "../protocol"
+import { PLANS, planFor, type Capability, type PlanId } from "../billing/plans"
 import { retrieveElements } from "../retrieval"
 import { ATSPI_SCRIPT } from "./atspi-script"
 import { CLIPBOARD_SCRIPT } from "./clipboard-script"
@@ -597,6 +598,69 @@ export interface LinuxDriverOptions {
   // its helper readiness and X11 calls fail into empty results). Defaults to
   // probing the local socket so a stale DISPLAY is reported unavailable.
   probeDisplay?: boolean
+  // Declares which side of the product is driving this driver. Defaults to
+  // `local`, so an undeclared driver is never the thing that breaks.
+  access?: DriverAccess
+}
+
+/**
+ * Which side of the product is driving a driver.
+ *
+ * `local` is the person at this keyboard. The product is local-first, and a
+ * shell or a clipboard on the machine you are sitting at is not a metered
+ * service, so it is never refused. `paired` is a control plane reaching this
+ * machine over the signed remote channel, where `remote_shell` and `clipboard`
+ * are paid capabilities and the free plan gets a typed refusal instead.
+ *
+ * A driver cannot work this out from a request. One driver instance is handed
+ * to both the local surface and the remote agent, `CommandRequest` carries no
+ * marker, and every dispatch looks identical from in here. Whoever constructs
+ * the driver declares which side it is on; nothing here guesses.
+ */
+export type DriverSurface = "local" | "paired"
+
+export interface DriverAccess {
+  readonly surface?: DriverSurface
+  /**
+   * The plan the control plane resolved for a paired computer. An unknown or
+   * missing plan resolves to free, which is the fail-closed answer: an
+   * entitlement nobody vouched for is not a paid subscription.
+   */
+  readonly plan?: PlanId
+}
+
+/**
+ * The refusal that replaces a dispatch, or undefined when the capability is
+ * allowed. Returned rather than thrown so the paid primitives keep reporting
+ * through `ActionResult`, like every other refusal on this driver.
+ *
+ * A refusal has to be typed and name the capability and the plan: "free" with
+ * no explanation reads as a bug and gets retried forever, and an empty result
+ * reads as "the clipboard was empty".
+ */
+export function refusedCapability(capability: Capability, plan: PlanId): ActionResult {
+  const message = `${capability} is not included in the ${plan} plan. This computer is paired to a control plane, so ${capability} needs the pro plan or above.`
+  return {
+    success: false,
+    status: "rejected",
+    message,
+    error: { code: "capability_not_entitled", message, retryable: false, details: { capability, plan } },
+  }
+}
+
+/**
+ * The gate, asked BEFORE a command is spawned or the clipboard is touched.
+ *
+ * Callers run this first and return the refusal without invoking the dispatch,
+ * so a refused remote_shell spawns nothing and a refused clipboard never
+ * reaches the python helper: there is no process to kill and no selection to
+ * restore afterwards.
+ */
+export function allowCapability(access: DriverAccess, capability: Capability): ActionResult | undefined {
+  if ((access.surface ?? "local") === "local") return undefined
+  const plan = planFor(access.plan)
+  if (plan.capabilities[capability].limit > 0) return undefined
+  return refusedCapability(capability, plan.id)
 }
 
 // Extracts the display number from a local X11 display name. Remote
@@ -683,6 +747,7 @@ export class LinuxHostDriver {
   private atspiRetryAt = 0
   private disposed = false
   private readonly probeDisplay: boolean
+  private readonly access: DriverAccess
   windowListTruncated = false
 
   constructor(options: LinuxDriverOptions = {}) {
@@ -694,6 +759,7 @@ export class LinuxHostDriver {
     this.session = options.session ?? detectSessionType()
     this.injectedAtspiHelper = options.atspiHelper
     this.probeDisplay = options.probeDisplay !== false
+    this.access = options.access ?? {}
     if (this.session === "wayland") void this.probeYdotool()
   }
 
@@ -1327,6 +1393,9 @@ export class LinuxHostDriver {
   }
 
   async readClipboard(): Promise<ActionResult & { text?: string; length?: number; hash?: string }> {
+    // Before the python helper is even resolved: the clipboard is never read.
+    const denial = allowCapability(this.access, "clipboard")
+    if (denial !== undefined) return denial
     const result = await this.runner(
       await this.resolvePython(),
       ["-c", CLIPBOARD_SCRIPT, "get"],
@@ -1361,6 +1430,8 @@ export class LinuxHostDriver {
   }
 
   async writeClipboardImage(path: string): Promise<ActionResult> {
+    const denial = allowCapability(this.access, "clipboard")
+    if (denial !== undefined) return denial
     const result = await this.runner(
       await this.resolvePython(),
       ["-c", CLIPBOARD_SCRIPT, "set_image", "--path", path, "--hold", "0"],
@@ -1397,6 +1468,8 @@ export class LinuxHostDriver {
   }
 
   async writeClipboard(text: string): Promise<ActionResult> {
+    const denial = allowCapability(this.access, "clipboard")
+    if (denial !== undefined) return denial
     const python = await this.resolvePython()
     // Clipboard text is unbounded, so it is passed over stdin rather than
     // argv; the helper reads it when --stdin is present.
@@ -2156,6 +2229,10 @@ export class LinuxHostDriver {
   async runCommand(
     request: CommandRequest,
   ): Promise<ActionResult & { command?: CommandResult & { stdinError?: string } }> {
+    // Before anything is validated, spawned, or resolved: a free-plan paired
+    // computer never gets as far as a process.
+    const denial = allowCapability(this.access, "remote_shell")
+    if (denial !== undefined) return denial
     const timeoutMs = Math.max(1000, Math.min(request.timeoutMs ?? 120000, 600000))
     const maxOutputBytes = Math.max(4096, Math.min(request.maxOutputBytes ?? 262144, 1024 * 1024))
     const startedAt = Date.now()

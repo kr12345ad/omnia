@@ -8,6 +8,19 @@ export {
 export type { CuaEngineOptions } from "./engine"
 export { CuaHostDriver, createCuaHostDriver } from "./host-driver"
 export type { CuaHostDriverOptions, CuaLegacyFallbacks } from "./host-driver"
+export {
+  ENTITLEMENT_OUTAGE_TTL_MS,
+  ENTITLEMENT_TIMEOUT_MS,
+  EntitlementGate,
+  EntitlementRefusedError,
+  createEntitlementGate,
+  defaultEntitlementGate,
+  isEntitlementRefusedError,
+  setDefaultEntitlementGate,
+} from "./entitlements"
+export type { EntitlementDecision, EntitlementGateOptions, EntitlementOrigin } from "./entitlements"
+export { CuaLiveView, LIVE_VIEW_CAPABILITY } from "./live-view"
+export type { LiveViewCapture, LiveViewFrame, LiveViewOptions } from "./live-view"
 export { createDarwinBackend } from "./backends/darwin"
 export { createLinuxBackend } from "./backends/linux"
 export type { LinuxCuaBackendOptions } from "./backends/linux"

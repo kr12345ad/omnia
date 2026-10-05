@@ -1,5 +1,20 @@
 export { RemoteAgent } from "./agent"
-export type { RemoteAgentOptions, RemoteBrowserCommand, RemoteBrowserHandler } from "./agent"
+export type { RemoteAgentOptions, RemoteBrowserCommand, RemoteBrowserHandler, RemoteSessionEnd } from "./agent"
+export {
+  REMOTE_ENTITLEMENT_TIMEOUT_MS,
+  REMOTE_SESSION_LIMIT_CODE,
+  RemoteEntitlementGate,
+  remoteSessionCeilingMinutes,
+  remoteSessionLimit,
+} from "./entitlement"
+export type {
+  ComputerAllowanceDecision,
+  RemoteAllowanceCode,
+  RemoteAllowanceOrigin,
+  RemoteEntitlementEnvOptions,
+  RemoteEntitlementOptions,
+  RemoteSessionLimit,
+} from "./entitlement"
 export {
   createRemoteKeyPair,
   defaultRemoteKeyFile,

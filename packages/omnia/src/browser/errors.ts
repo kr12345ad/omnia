@@ -41,6 +41,11 @@ const KNOWN_BROWSER_CODES = new Set([
   "already_connected",
   "activate_failed",
   "auth_required",
+  // Billing refusals. 402 is "upgrade to get this", 503 is "the counter could
+  // not be read, retry" - they are different failures and a caller recovers
+  // from them differently.
+  "billing_required",
+  "billing_unavailable",
   "busy",
   "cdp_error",
   "connection_closed",
@@ -93,6 +98,8 @@ export function browserFailureStatus(code: string): number {
     case "invalid_params":
     case "marker_not_found":
       return 400
+    case "billing_required":
+      return 402
     case "element_not_found":
     case "image_not_found":
     case "stale_element_reference":
@@ -122,6 +129,11 @@ export function browserFailureStatus(code: string): number {
     case "open_failed":
     case "busy":
     case "activate_failed":
+      return 503
+    // A hard allowance that could not be checked is refused, not granted. It is
+    // a 503 rather than a 402 because nothing is wrong with the caller's plan:
+    // the store was unreadable, so retrying later is the correct response.
+    case "billing_unavailable":
       return 503
     case "timeout":
     case "load_timeout":

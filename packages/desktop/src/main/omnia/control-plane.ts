@@ -30,14 +30,41 @@ export async function fetchControlPlane(path: string, init: RequestInit = {}): P
   return fetch(`${auth.url}${path.startsWith("/") ? path : `/${path}`}`, { ...init, headers })
 }
 
-export async function controlPlaneCall(
+export type ControlPlaneRequestInit = {
+  readonly body?: unknown
+  readonly headers?: Record<string, string>
+  /**
+   * Statuses that carry an answer instead of a failure. `/v1/billing/check`
+   * answers a refusal with 402, so the default "any non-2xx throws" rule would
+   * turn a metered refusal into an exception.
+   */
+  readonly accept?: (status: number) => boolean
+}
+
+/**
+ * A failure the control plane reported, with the status that carried it.
+ *
+ * `name` stays `Error` so nothing a caller renders changes; the status is what
+ * lets a caller tell "the server said no" apart from a dropped connection.
+ */
+export class ControlPlaneRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message)
+  }
+}
+
+export async function controlPlaneRequest(
   path: string,
   method: "GET" | "POST" | "DELETE",
-  body?: unknown,
-): Promise<Record<string, unknown>> {
+  init: ControlPlaneRequestInit = {},
+): Promise<{ readonly status: number; readonly json: Record<string, unknown> }> {
   const response = await fetchControlPlane(path, {
     method,
-    ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+    headers: { ...(init.body === undefined ? {} : { "content-type": "application/json" }), ...init.headers },
+    ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
     signal: AbortSignal.timeout(300000),
   })
   const text = await response.text()
@@ -48,8 +75,18 @@ export async function controlPlaneCall(
   } catch {
     json = {}
   }
-  if (!response.ok || json.ok !== true) throw new Error(errorMessage(json, text, response.status))
-  return json
+  const accept = init.accept ?? (() => response.ok && json.ok === true)
+  if (!accept(response.status))
+    throw new ControlPlaneRequestError(errorMessage(json, text, response.status), response.status)
+  return { status: response.status, json }
+}
+
+export async function controlPlaneCall(
+  path: string,
+  method: "GET" | "POST" | "DELETE",
+  body?: unknown,
+): Promise<Record<string, unknown>> {
+  return (await controlPlaneRequest(path, method, { body })).json
 }
 
 function errorMessage(json: Record<string, unknown>, text: string, status: number): string {

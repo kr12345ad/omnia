@@ -20,6 +20,7 @@ import type {
 } from "../protocol"
 import { retrieveElements } from "../retrieval"
 import type { HostDriver, HostRevalidation } from "./host-driver"
+import { allowCapability, type DriverAccess } from "./linux"
 import { executeShellCommand, runProcess, runProcessWithInput, type ProcessResult } from "./process"
 
 export const DARWIN_OBSERVE_TIMEOUT_MS = 45000
@@ -490,6 +491,8 @@ export interface DarwinDriverOptions {
   readonly screencapture?: string
   readonly ioreg?: string
   readonly shell?: string
+  // Which side of the product is driving this driver. Defaults to `local`.
+  readonly access?: DriverAccess
 }
 
 const SECURE_INPUT_TTL_MS = 500
@@ -522,6 +525,7 @@ export class DarwinHostDriver {
   private readonly screencapture: string
   private readonly ioreg: string
   private readonly shell: string
+  private readonly access: DriverAccess
   private secureInput: { at: number; active: boolean } | undefined
   // Honest accessibility capability: the static "available" claim used to
   // survive a revoked grant, so callers trusted capabilities that the tree
@@ -533,6 +537,7 @@ export class DarwinHostDriver {
     this.screencapture = options.screencapture ?? "/usr/sbin/screencapture"
     this.ioreg = options.ioreg ?? "/usr/sbin/ioreg"
     this.shell = options.shell ?? "/bin/zsh"
+    this.access = options.access ?? {}
     void this.refreshAccessibility()
   }
 
@@ -934,6 +939,8 @@ JSON.stringify({ ok: true })
   }
 
   async readClipboard(): Promise<ActionResult & { text?: string; length?: number; hash?: string }> {
+    const denial = allowCapability(this.access, "clipboard")
+    if (denial !== undefined) return denial
     const result = await runProcess("/usr/bin/pbpaste", [], 5000)
     const text = result.stdout
     return {
@@ -947,6 +954,8 @@ JSON.stringify({ ok: true })
   }
 
   async writeClipboard(text: string): Promise<ActionResult> {
+    const denial = allowCapability(this.access, "clipboard")
+    if (denial !== undefined) return denial
     const result = await runProcessWithInput("/usr/bin/pbcopy", [], text, 5000)
     if (result.code !== 0) return { success: false, status: "failed", message: "Writing the macOS clipboard failed." }
     return { success: true, status: "success", message: `Wrote ${text.length} characters to the clipboard.` }
@@ -987,6 +996,10 @@ JSON.stringify({ ok: true })
   }
 
   async runCommand(request: CommandRequest): Promise<ActionResult & { command?: CommandResult }> {
+    // Before anything is spawned: a free-plan paired computer never gets as far
+    // as a shell.
+    const denial = allowCapability(this.access, "remote_shell")
+    if (denial !== undefined) return denial
     if (request.cwd !== undefined && request.cwd.length > 0) {
       if (!existsSync(request.cwd) || !statSync(request.cwd).isDirectory()) {
         return {

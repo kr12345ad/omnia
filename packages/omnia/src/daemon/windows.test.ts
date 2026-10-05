@@ -48,3 +48,26 @@ describe("windows clipboard safety", () => {
     expect(up).toContain("mouse_event(0x0004")
   })
 })
+
+describe("windows paid primitive enforcement", () => {
+  test("refuses the clipboard before the PowerShell source is built", async () => {
+    const { calls, runner } = captureInputRunner()
+    const host = new WindowsHostDriver({ inputRunner: runner, access: { surface: "paired", plan: "free" } })
+    const result = await host.writeClipboard("secret")
+    expect(result.success).toBe(false)
+    expect(result.error).toMatchObject({ code: "capability_not_entitled", retryable: false })
+    expect(result.message).toContain("clipboard")
+    expect(result.message).toContain("free")
+    // The recorded runner is the only thing that can reach the clipboard.
+    expect(calls).toEqual([])
+  })
+
+  test("refuses remote_shell before PowerShell is spawned", async () => {
+    const host = new WindowsHostDriver({ access: { surface: "paired", plan: "free" } })
+    const result = await host.runCommand({ command: "whoami" })
+    expect(result.success).toBe(false)
+    expect(result.command).toBeUndefined()
+    expect(result.error).toMatchObject({ code: "capability_not_entitled" })
+    expect(result.message).toContain("remote_shell")
+  })
+})

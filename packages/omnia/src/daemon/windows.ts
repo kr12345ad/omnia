@@ -18,6 +18,7 @@ import type {
 } from "../protocol"
 import { retrieveElements } from "../retrieval"
 import type { HostDriver, HostRevalidation } from "./host-driver"
+import { allowCapability, type DriverAccess } from "./linux"
 import { executeShellCommand, runProcess, runProcessWithInput, type ProcessResult } from "./process"
 
 export const WINDOWS_OBSERVE_TIMEOUT_MS = 60000
@@ -490,6 +491,8 @@ export interface WindowsDriverOptions {
     input: string,
     timeoutMs: number,
   ) => Promise<ProcessResult>
+  // Which side of the product is driving this driver. Defaults to `local`.
+  readonly access?: DriverAccess
 }
 
 export class WindowsHostDriver {
@@ -497,10 +500,12 @@ export class WindowsHostDriver {
   readonly backend = "windows-uia"
   private readonly powershell: string
   private readonly inputRunner: NonNullable<WindowsDriverOptions["inputRunner"]>
+  private readonly access: DriverAccess
 
   constructor(options: WindowsDriverOptions = {}) {
     this.powershell = options.powershell ?? "powershell.exe"
     this.inputRunner = options.inputRunner ?? runProcessWithInput
+    this.access = options.access ?? {}
   }
 
   get available(): boolean {
@@ -806,6 +811,8 @@ export class WindowsHostDriver {
   }
 
   async readClipboard(): Promise<ActionResult & { text?: string; length?: number; hash?: string }> {
+    const denial = allowCapability(this.access, "clipboard")
+    if (denial !== undefined) return denial
     const result = await this.script("Get-Clipboard -Raw")
     const text = result.stdout.replace(/\r?\n$/, "")
     return {
@@ -819,6 +826,8 @@ export class WindowsHostDriver {
   }
 
   async writeClipboard(text: string): Promise<ActionResult> {
+    const denial = allowCapability(this.access, "clipboard")
+    if (denial !== undefined) return denial
     const result = await this.scriptWithInput(WINDOWS_CLIPBOARD_SET_SCRIPT, text)
     if (result.code !== 0) return { success: false, status: "failed", message: "Writing the Windows clipboard failed." }
     return { success: true, status: "success", message: `Wrote ${text.length} characters to the clipboard.` }
@@ -860,6 +869,10 @@ foreach ($vk in @(0x11, 0x10, 0x12, 0x5b)) { [OmniaInput]::keybd_event([byte]$vk
   }
 
   async runCommand(request: CommandRequest): Promise<ActionResult & { command?: CommandResult }> {
+    // Before anything is spawned: a free-plan paired computer never gets as far
+    // as a PowerShell process.
+    const denial = allowCapability(this.access, "remote_shell")
+    if (denial !== undefined) return denial
     return executeShellCommand(request, {
       file: this.powershell,
       args: (command) => ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],

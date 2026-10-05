@@ -8,8 +8,14 @@
 // Security constraints: the bridge is loopback-only (ws://127.0.0.1) and every
 // upgrade must present the shared token. The token is required and must never be
 // logged, echoed in diagnostics, or returned by status().
+//
+// Billing: every page-driving and page-reading operation below asks the billing
+// gate first and is refused before any work happens if the plan does not cover
+// it. The charge is per operation, so an operation that returns hundreds of DOM
+// nodes still costs one request. See ./entitlement.
 
 import { mimeFromSource, resolveImagePath, verifyImageFile, writeImageFile } from "./image-file"
+import { BrowserEntitlementGate } from "./entitlement"
 import { captureUntrustedPayload, escapeUntrustedText, serializeUntrustedForPrompt } from "./envelope"
 import { cdpModifierMask, parseKeyChord } from "./keys"
 import type { KeyModifier } from "./keys"
@@ -391,6 +397,12 @@ export interface CdpRuntimeOptions {
   readonly transport?: CdpTransport
   readonly timeoutMs?: number
   readonly log?: (message: string, meta?: Record<string, unknown>) => void
+  /**
+   * Billing gate for browser_automation. Defaults to whatever the environment
+   * configures, and is inert when no control plane is configured - see
+   * BrowserEntitlementGate.fromEnv.
+   */
+  readonly entitlement?: BrowserEntitlementGate
 }
 
 interface CdpEvaluateResult {
@@ -454,6 +466,7 @@ export class CdpRuntime {
   private readonly isolatedWorlds = new Map<string, number>()
   private readonly intercepted = new Set<string>()
   private readonly options: CdpRuntimeOptions
+  private readonly entitlements: BrowserEntitlementGate
 
   constructor(options: CdpRuntimeOptions) {
     if (options.endpoint.length === 0 || options.token.length === 0) {
@@ -461,6 +474,23 @@ export class CdpRuntime {
     }
     this.options = options
     this.transport = options.transport
+    this.entitlements = options.entitlement ?? BrowserEntitlementGate.fromEnv()
+  }
+
+  /**
+   * The billing gate for page work.
+   *
+   * Checked at the top of every operation below, before the bridge is touched,
+   * so an exhausted allowance refuses the action instead of performing it and
+   * reporting the problem afterwards.
+   */
+  async authorizeBrowserOperation(): Promise<void> {
+    await this.entitlements.authorize("browser_automation")
+  }
+
+  /** The gate itself, so a composite action can charge one request for a span. */
+  get entitlementGate(): BrowserEntitlementGate {
+    return this.entitlements
   }
 
   get connected(): boolean {
@@ -812,6 +842,9 @@ export class CdpRuntime {
 
   async open(url = "about:blank"): Promise<BrowserTabInfo> {
     const target = url.length === 0 ? "about:blank" : assertNavigableBrowserUrl(url)
+    // After the URL policy, before the bridge: a target the allowlist rejects
+    // never becomes a metered request because nothing was ever attempted.
+    await this.authorizeBrowserOperation()
     const before = await this.rawTabs().catch(() => [] as RawTab[])
     let result: { tab?: unknown }
     try {
@@ -904,6 +937,7 @@ export class CdpRuntime {
 
   async navigate(url: string, tabId?: string, sessionId?: string): Promise<BrowserTabInfo> {
     const target = assertNavigableBrowserUrl(url)
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId, sessionId)
     const before = await this.evaluateValueOn(context, "location.href").catch(() => undefined)
     let failure: CdpError | undefined
@@ -939,18 +973,21 @@ export class CdpRuntime {
   }
 
   async back(tabId?: string, sessionId?: string): Promise<CdpNavigationResult> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId, sessionId)
     await this.sendHistory("Omnia.back", context, "There is no previous page in this tab.")
     return this.readNavigation(context, sessionId)
   }
 
   async forward(tabId?: string, sessionId?: string): Promise<CdpNavigationResult> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId, sessionId)
     await this.sendHistory("Omnia.forward", context, "There is no next page in this tab.")
     return this.readNavigation(context, sessionId)
   }
 
   async reload(tabId?: string, sessionId?: string): Promise<CdpNavigationResult> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId, sessionId)
     // Never raw Page.reload: on Electron it reloads the embedder window. The
     // desktop bridge owns the equivalent WebContents reload.
@@ -1094,6 +1131,7 @@ export class CdpRuntime {
   }
 
   async handleDialog(input: CdpDialogAnswer): Promise<{ handled: boolean }> {
+    await this.authorizeBrowserOperation()
     const context =
       input.tabId === undefined ? undefined : await this.resolveTab(input.tabId, input.sessionId).catch(() => undefined)
     const entry = (() => {
@@ -1131,6 +1169,7 @@ export class CdpRuntime {
     tabId?: string,
     options?: { offset?: number; limit?: number; sessionId?: string },
   ): Promise<BrowserPageText> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId, options?.sessionId)
     await this.ensureReadyOn(context)
     const raw = (await this.evaluateJsonOn(context, buildReadExpression())) as {
@@ -1236,6 +1275,7 @@ export class CdpRuntime {
     query: string,
     options: { tabId?: string; role?: string; limit?: number; sessionId?: string } = {},
   ): Promise<BrowserCandidate[]> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(options.tabId, options.sessionId)
     await this.ensureReadyOn(context)
     const raw = await this.evaluateJsonOn(context, buildFindExpression(query, options.role, options.limit ?? 8))
@@ -1282,6 +1322,7 @@ export class CdpRuntime {
     rect?: { x: number; y: number; width: number; height: number }
     popup?: { url: string; tabId: string }
   }> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(target.tabId, target.sessionId)
     if (target.id === undefined) {
       if (target.x === undefined || target.y === undefined) {
@@ -1341,6 +1382,7 @@ export class CdpRuntime {
     tabId?: string,
     sessionId?: string,
   ): Promise<{ hovered: boolean; name?: string; role?: string; x?: number; y?: number }> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId ?? target.tabId, sessionId ?? target.sessionId)
     if (target.id === undefined) {
       if (target.x === undefined || target.y === undefined) {
@@ -1384,6 +1426,7 @@ export class CdpRuntime {
     tabId?: string,
     sessionId?: string,
   ): Promise<{ selected: boolean; value?: string }> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId ?? target.tabId, sessionId ?? target.sessionId)
     await this.ensureReadyOn(context)
     const result = (await this.evaluateJsonOn(
@@ -1420,6 +1463,7 @@ export class CdpRuntime {
     tabId?: string,
     sessionId?: string,
   ): Promise<{ dragged: boolean; method?: "drag_events" | "mouse" }> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId ?? from.tabId, sessionId ?? from.sessionId)
     await this.ensureReadyOn(context)
     const source = await this.dragPoint(from, context)
@@ -1498,6 +1542,7 @@ export class CdpRuntime {
     id: string
     text: string
   }): Promise<{ typed: boolean; value?: string }> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(target.tabId, target.sessionId)
     await this.ensureReadyOn(context)
     const focus = (await this.evaluateJsonOn(context, buildTypeFocusExpression(requireElementRef(target.id)))) as {
@@ -1552,6 +1597,7 @@ export class CdpRuntime {
   }
 
   async value(target: { tabId?: string; sessionId?: string; id: string }): Promise<{ value?: string; sensitive?: boolean }> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(target.tabId, target.sessionId)
     await this.ensureReadyOn(context)
     const result = (await this.evaluateJsonOn(context, buildValueExpression(requireElementRef(target.id)))) as {
@@ -1573,6 +1619,7 @@ export class CdpRuntime {
   }
 
   async key(key: string, tabId?: string, sessionId?: string): Promise<void> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId, sessionId)
     const chord = parseChord(key)
     const mask = cdpModifierMask(chord.modifiers)
@@ -1659,6 +1706,7 @@ export class CdpRuntime {
   async scroll(
     options: { tabId?: string; sessionId?: string; deltaX?: number; deltaY?: number; x?: number; y?: number } = {},
   ): Promise<void> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(options.tabId, options.sessionId)
     const fallback = { width: 800, height: 600 }
     const viewport = (await this.evaluateJsonOn(context, buildViewportExpression()).catch(() => undefined)) as
@@ -1680,6 +1728,7 @@ export class CdpRuntime {
   }
 
   async screenshot(tabId?: string, sessionId?: string): Promise<{ mimeType: string; data: string }> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId, sessionId)
     const result = await this.send<{ data?: string }>("Page.captureScreenshot", { format: "png" }, context)
     if (typeof result.data !== "string") {
@@ -1692,6 +1741,7 @@ export class CdpRuntime {
   }
 
   async images(tabId?: string, options: { limit?: number; sessionId?: string } = {}): Promise<BrowserImage[]> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId, options.sessionId)
     await this.ensureReadyOn(context)
     const raw = await this.evaluateJsonOn(context, buildImagesExpression(options.limit ?? 24))
@@ -1712,6 +1762,7 @@ export class CdpRuntime {
     alt: string
     method: "download" | "fetch"
   }> {
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(target.tabId, target.sessionId)
     await this.ensureReadyOn(context)
     const raw = (await this.evaluateJsonOn(
@@ -1819,6 +1870,7 @@ export class CdpRuntime {
   }
 
   async downloads(): Promise<BrowserDownload[]> {
+    await this.authorizeBrowserOperation()
     const result = await this.send<{ downloads?: unknown }>("Omnia.downloads", {})
     if (result === null || typeof result !== "object" || !Array.isArray(result.downloads)) {
       throw new CdpError("cdp_error", "The embedded browser returned an unexpected download list.")
@@ -1839,6 +1891,7 @@ export class CdpRuntime {
   }
 
   async answerAuth(input: { username: string; password: string }): Promise<{ answered: true }> {
+    await this.authorizeBrowserOperation()
     const preferred = [...this.authChallenges.keys()].at(-1)
     const tabId = preferred === undefined || preferred === "default" ? undefined : preferred
     const result = await this.send<{ answered?: unknown }>(
@@ -1855,6 +1908,7 @@ export class CdpRuntime {
 
   async upload(files: readonly string[], tabId?: string, sessionId?: string): Promise<{ files: string[] }> {
     if (files.length === 0) throw new CdpError("invalid_params", "The upload needs at least one file.")
+    await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId, sessionId)
     const pending = this.fileChoosers.get(context) ?? this.fileChoosers.get("default")
     if (pending === undefined) throw new CdpError("no_file_chooser", "The page is not waiting for files.")

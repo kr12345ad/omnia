@@ -44,6 +44,30 @@ function firstString(...values: unknown[]): string | undefined {
 }
 
 export function readAuthSession(): ControlPlaneAuth | undefined {
+  const session = readSession()
+  if (session === undefined) return undefined
+  const url = firstString(session.controlPlaneUrl, session.url)
+  const clientToken = firstString(session.clientToken, session.token)
+  if (url === undefined || clientToken === undefined) return undefined
+  return { url: url.replace(/\/+$/, ""), clientToken }
+}
+
+/**
+ * The signed-in profile id, which is what per-profile entitlements are keyed by.
+ *
+ * The control plane does not derive it from the client token, so a caller that
+ * needs "whose plan is this" has to present it. Numeric only, because that is
+ * all the profile ids GitHub returns and all the server accepts.
+ */
+export function readSessionProfileId(): string | undefined {
+  const profile = readSession()?.profile
+  if (typeof profile !== "object" || profile === null || Array.isArray(profile)) return undefined
+  const id = (profile as { id?: unknown }).id
+  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) return undefined
+  return String(id)
+}
+
+function readSession(): Record<string, unknown> | undefined {
   const file = join(app.getPath("userData"), "auth-session.json")
   if (!existsSync(file)) return undefined
   let parsed: unknown
@@ -52,10 +76,5 @@ export function readAuthSession(): ControlPlaneAuth | undefined {
   } catch {
     return undefined
   }
-  const session = decodeSession(parsed)
-  if (session === undefined) return undefined
-  const url = firstString(session.controlPlaneUrl, session.url)
-  const clientToken = firstString(session.clientToken, session.token)
-  if (url === undefined || clientToken === undefined) return undefined
-  return { url: url.replace(/\/+$/, ""), clientToken }
+  return decodeSession(parsed)
 }

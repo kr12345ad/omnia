@@ -5,6 +5,7 @@ import { Tabs } from "@opencode-ai/ui/tabs"
 import { ResizeHandle } from "@opencode-ai/ui/resize-handle"
 import { IconButton } from "@opencode-ai/ui/icon-button"
 import { TooltipKeybind } from "@opencode-ai/ui/tooltip"
+import { Paywall, type PaywallDecision, type PaywallOffer } from "@opencode-ai/ui/paywall"
 import { DragDropProvider, DragDropSensors, DragOverlay, SortableProvider, closestCenter } from "@thisbeyond/solid-dnd"
 import type { DragEvent } from "@thisbeyond/solid-dnd"
 import { ConstrainDragYAxis, getDraggableId } from "@/utils/solid-dnd"
@@ -22,7 +23,18 @@ import { createSizing, focusTerminalById } from "@/pages/session/helpers"
 import { getTerminalHandoff, setTerminalHandoff } from "@/pages/session/handoff"
 import { useSessionLayout } from "@/pages/session/session-layout"
 
-export function TerminalPanel() {
+/**
+ * `shell` is the billing decision for the remote shell capability, passed in
+ * from the single owner of the entitlement snapshot. `Paywall` renders nothing
+ * when the capability is granted.
+ */
+export interface TerminalPanelProps {
+  shell?: PaywallDecision
+  shellOffer?: PaywallOffer
+  onDismissShell?: () => void
+}
+
+export function TerminalPanel(props: TerminalPanelProps = {}) {
   const delays = [120, 240]
   const layout = useLayout()
   const terminal = useTerminal()
@@ -267,6 +279,13 @@ export function TerminalPanel() {
             <DragDropSensors />
             <ConstrainDragYAxis />
             <div class="flex flex-col h-full">
+              <Paywall
+                capability="remote_shell"
+                decision={props.shell}
+                offer={props.shellOffer}
+                onDismiss={props.onDismissShell}
+                class="mx-2 mt-2"
+              />
               <Tabs
                 variant="alt"
                 value={terminal.active()}

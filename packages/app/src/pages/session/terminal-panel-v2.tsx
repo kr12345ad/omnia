@@ -13,6 +13,7 @@ import { IconButton } from "@opencode-ai/ui/icon-button"
 import { TooltipKeybind } from "@opencode-ai/ui/tooltip"
 import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
 import { KeybindV2 } from "@opencode-ai/ui/v2/keybind-v2"
+import { Paywall, type PaywallDecision, type PaywallOffer } from "@opencode-ai/ui/paywall"
 
 import { SortableTerminalTabV2 } from "@/components/session/session-sortable-terminal-tab-v2"
 import { Terminal } from "@/components/terminal"
@@ -27,7 +28,20 @@ import { createSizing, focusTerminalById } from "@/pages/session/helpers"
 import { getTerminalHandoff, setTerminalHandoff } from "@/pages/session/handoff"
 import { useSessionLayout } from "@/pages/session/session-layout"
 
-export function TerminalPanelV2(props: { stacked?: boolean } = {}) {
+/**
+ * `shell` is the billing decision for the remote shell capability. It is passed
+ * in rather than fetched here so one owner of the entitlement snapshot feeds
+ * every surface; `Paywall` renders nothing for a granted capability, so leaving
+ * it undefined costs nothing.
+ */
+export interface TerminalPanelV2Props {
+  stacked?: boolean
+  shell?: PaywallDecision
+  shellOffer?: PaywallOffer
+  onDismissShell?: () => void
+}
+
+export function TerminalPanelV2(props: TerminalPanelV2Props = {}) {
   const layout = useLayout()
   const terminal = useTerminal()
   const sdk = useSDK()
@@ -256,6 +270,13 @@ export function TerminalPanelV2(props: { stacked?: boolean } = {}) {
             }}
           >
             <div class="flex flex-col h-full">
+              <Paywall
+                capability="remote_shell"
+                decision={props.shell}
+                offer={props.shellOffer}
+                onDismiss={props.onDismissShell}
+                class="mx-2 mt-2"
+              />
               <Tabs
                 variant={newLayout() ? "normal" : "alt"}
                 value={terminal.active()}

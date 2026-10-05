@@ -32,6 +32,35 @@ describe("macOS command boundary", () => {
 
 const describeShell = process.platform === "win32" ? describe.skip : describe
 
+describe("macOS paid primitive enforcement", () => {
+  // Nothing here spawns: on a free paired computer the refusal replaces the
+  // dispatch, so there is no /bin/zsh and no pbpaste/pbcopy to observe.
+  test("refuses remote_shell and the clipboard on a free paired computer", async () => {
+    const host = new DarwinHostDriver({ shell: "/bin/sh", access: { surface: "paired", plan: "free" } })
+    const command = await host.runCommand({ command: "printf never" })
+    expect(command.success).toBe(false)
+    expect(command.command).toBeUndefined()
+    expect(command.error).toMatchObject({ code: "capability_not_entitled", retryable: false })
+    expect(command.message).toContain("remote_shell")
+    expect(command.message).toContain("free")
+    const read = await host.readClipboard()
+    expect(read.success).toBe(false)
+    expect(read.text).toBeUndefined()
+    expect(read.error).toMatchObject({ code: "capability_not_entitled" })
+    const written = await host.writeClipboard("secret")
+    expect(written.success).toBe(false)
+    expect(written.error).toMatchObject({ code: "capability_not_entitled" })
+  })
+})
+
+describeShell("macOS paid primitive local path", () => {
+  test("an undeclared driver is local and still runs commands", async () => {
+    const result = await testDriver().runCommand({ command: "printf omnia-local" })
+    expect(result.success).toBe(true)
+    expect(result.command?.stdout).toBe("omnia-local")
+  })
+})
+
 describeShell("macOS command execution", () => {
   test("captures output, exit codes, and stdin", async () => {
     const host = testDriver()

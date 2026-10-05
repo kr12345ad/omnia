@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test"
+import type { PlanId } from "../billing/plans"
 import type { HostDriver } from "../daemon/host-driver"
 import { RemoteAgent } from "./agent"
+import { REMOTE_SESSION_LIMIT_CODE } from "./entitlement"
 import { createRemoteKeyPair, type RemoteKeyPair } from "./keys"
 import { remoteRequestPath, verifyRemoteSignature } from "./signing"
 
@@ -192,5 +194,167 @@ describe("remote agent stop", () => {
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(agent.running).toBe(false)
     expect(executed).toEqual([])
+  })
+})
+
+describe("remote session ceiling", () => {
+  const command = { id: "cmd-1", method: "execute", params: { type: "click", x: 1, y: 2 } }
+  type Posted = { id: string; ok: boolean; error?: string; code?: string }
+
+  interface SessionAgentInput {
+    readonly plan?: PlanId
+    readonly executed: string[]
+    readonly posted: Posted[]
+    readonly logs: string[]
+  }
+
+  /**
+   * An agent on a clock the test owns.
+   *
+   * The first poll answers with one command after jumping the clock past the
+   * ceiling; every later poll parks forever, which is what a real long-poll
+   * looks like and keeps the loop from spinning. `control` lets a test rewind
+   * to a fresh window without rebuilding the agent.
+   */
+  function sessionAgent(input: SessionAgentInput) {
+    const control = { jumpMs: 121 * 60_000, deliver: true, polls: 0 }
+    let clock = 10_000
+    const http = fakeFetch(async (request, init) => {
+      const url = typeof request === "string" ? request : request instanceof URL ? request.toString() : request.url
+      if (url.includes("/remote/commands")) {
+        control.polls += 1
+        clock += control.jumpMs
+        if (control.polls > 1) return new Promise<Response>(() => {})
+        return new Response(JSON.stringify({ ok: true, command: control.deliver ? command : null }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      if (url.includes("/remote/results")) {
+        input.posted.push(JSON.parse(String(init?.body)) as Posted)
+        return new Response(JSON.stringify({ ok: true }), { status: 200 })
+      }
+      return new Response(JSON.stringify({ ok: false }), { status: 401 })
+    })
+    return {
+      control,
+      agent: new RemoteAgent({
+        serverUrl: "http://127.0.0.1:9999",
+        computerId: "remote-1",
+        token: "token-1",
+        driver: {
+          ...driver,
+          execute: async (action) => {
+            input.executed.push(action.type)
+            return { success: true, status: "success", message: "ok" }
+          },
+        },
+        fetch: http,
+        now: () => clock,
+        log: (message) => input.logs.push(message),
+        ...(input.plan === undefined ? {} : { plan: input.plan }),
+      }),
+    }
+  }
+
+  function recorder() {
+    return { executed: [] as string[], posted: [] as Posted[], logs: [] as string[] }
+  }
+
+  /**
+   * `running` is a getter, and a `while` on it narrows the property to false for
+   * the rest of the test, so the assertions read it through a call instead.
+   */
+  function isRunning(agent: RemoteAgent): boolean {
+    return agent.running
+  }
+
+  test("refuses the command that lands after the free ceiling and ends the session", async () => {
+    const seen = recorder()
+    const { agent } = sessionAgent({ plan: "free", ...seen })
+    agent.start()
+    while (agent.running) await new Promise((resolve) => setTimeout(resolve, 1))
+
+    expect(seen.executed).toEqual([])
+    expect(seen.posted).toHaveLength(1)
+    expect(seen.posted[0]).toMatchObject({ id: "cmd-1", ok: false, code: REMOTE_SESSION_LIMIT_CODE })
+    expect(seen.posted[0]!.error).toContain("120 minute limit for the free plan")
+    expect(seen.posted[0]!.error).toContain("Reconnect to start a new session")
+    expect(agent.sessionEnd).toMatchObject({ code: REMOTE_SESSION_LIMIT_CODE, minutes: 120, resumable: true })
+    expect(seen.logs.join("\n")).toContain("120 minute limit for the free plan")
+    agent.stop()
+  })
+
+  test("ends the session with the same reason when no command was waiting", async () => {
+    const seen = recorder()
+    const { agent, control } = sessionAgent({ plan: "free", ...seen })
+    control.deliver = false
+    agent.start()
+    while (agent.running) await new Promise((resolve) => setTimeout(resolve, 1))
+
+    expect(seen.executed).toEqual([])
+    expect(seen.posted).toEqual([])
+    expect(agent.sessionEnd).toMatchObject({ minutes: 120, resumable: true })
+    expect(seen.logs.join("\n")).toContain("Reconnect to start a new session")
+    agent.stop()
+  })
+
+  test("a plan that could not be determined still runs under the free ceiling", async () => {
+    const seen = recorder()
+    const { agent } = sessionAgent(seen)
+    agent.start()
+    while (agent.running) await new Promise((resolve) => setTimeout(resolve, 1))
+
+    expect(seen.executed).toEqual([])
+    expect(seen.posted[0]!.code).toBe(REMOTE_SESSION_LIMIT_CODE)
+    expect(seen.posted[0]!.error).toContain("The plan could not be confirmed")
+    agent.stop()
+  })
+
+  test("a paid plan runs the command past the free ceiling", async () => {
+    const seen = recorder()
+    const { agent } = sessionAgent({ plan: "pro", ...seen })
+    agent.start()
+    while (seen.posted.length === 0) await new Promise((resolve) => setTimeout(resolve, 1))
+
+    expect(seen.executed).toEqual(["click"])
+    expect(seen.posted[0]).toMatchObject({ id: "cmd-1", ok: true })
+    expect(agent.sessionEnd).toBeUndefined()
+    expect(isRunning(agent)).toBe(true)
+    agent.stop()
+  })
+
+  test("starting again after the ceiling resumes the same pairing", async () => {
+    const seen = recorder()
+    const { agent, control } = sessionAgent({ plan: "free", ...seen })
+    agent.start()
+    while (agent.running) await new Promise((resolve) => setTimeout(resolve, 1))
+    expect(agent.sessionEnd).toBeDefined()
+
+    // Only the loop closed: the pairing, token and key are untouched, so the
+    // same agent opens a fresh window and the command runs.
+    const before = seen.posted.length
+    control.jumpMs = 0
+    control.polls = 0
+    agent.start()
+    while (seen.posted.length === before) await new Promise((resolve) => setTimeout(resolve, 1))
+
+    expect(isRunning(agent)).toBe(true)
+    expect(agent.sessionEnd).toBeUndefined()
+    expect(seen.posted.slice(before)).toMatchObject([{ id: "cmd-1", ok: true }])
+    expect(seen.executed).toEqual(["click"])
+    agent.stop()
+  })
+
+  test("stop() is still final: a stopped agent does not resume", async () => {
+    const seen = recorder()
+    const { agent } = sessionAgent({ plan: "pro", ...seen })
+    agent.start()
+    agent.stop()
+    agent.start()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+
+    expect(isRunning(agent)).toBe(false)
+    expect(seen.executed).toEqual([])
   })
 })

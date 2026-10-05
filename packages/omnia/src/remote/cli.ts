@@ -3,6 +3,7 @@ import { createDarwinHostDriver, createHostDriver, createWindowsHostDriver, Linu
 import type { HostDriver } from "../daemon"
 import { parsePairingCode } from "../pairing"
 import { RemoteAgent } from "./agent"
+import { RemoteEntitlementGate } from "./entitlement"
 import { fileRemoteKeyStorage, loadOrCreateRemoteKeyPair } from "./keys"
 import { remoteAuthHeaders } from "./signing"
 
@@ -39,7 +40,7 @@ function platformDriver(): HostDriver | undefined {
 }
 
 const usage =
-  "Usage: bun packages/omnia/src/remote/cli.ts pair --code <pairing-code> [--url <server-url>] [--name <computer-name>]"
+  "Usage: bun packages/omnia/src/remote/cli.ts pair --code <pairing-code> [--url <server-url>] [--name <computer-name>] [--token <server-token>] [--profile <github-id>]"
 
 async function main(): Promise<void> {
   const { command, flags } = parseArgs(process.argv.slice(2))
@@ -66,6 +67,21 @@ async function main(): Promise<void> {
     process.exit(1)
   }
   const base = url.replace(/\/+$/, "")
+  // Checked BEFORE the claim, because the claim consumes the single-use pairing
+  // code: a computer past the plan's allowance is refused here with the reason,
+  // so the code survives an upgrade and the operator can retry it.
+  const allowance = await RemoteEntitlementGate.fromEnv({
+    endpoint: base,
+    token: flags.token,
+    profileId: flags.profile,
+    log: (message) => console.log(`[omnia-remote] ${message}`),
+  }).authorizeComputer()
+  if (!allowance.allowed) {
+    // The operator gets the server's own sentence about the refusal, the same
+    // way a claim the control plane turns down is reported below.
+    console.error(allowance.reason)
+    process.exit(1)
+  }
   const info = await driver.getInfo()
   const keys = await loadOrCreateRemoteKeyPair(fileRemoteKeyStorage())
   const response = await fetch(`${base}/v1/computers/pair/claim`, {
@@ -94,6 +110,10 @@ async function main(): Promise<void> {
     token,
     driver,
     keys,
+    // An unconfirmed plan is left unset so the session runs under the free
+    // ceiling instead of an unbounded one; a paid ceiling only comes from a
+    // plan the control plane actually named.
+    ...(allowance.planKnown ? { plan: allowance.plan } : {}),
     log: (message) => console.log(`[omnia-remote] ${message}`),
   })
   agent.start()

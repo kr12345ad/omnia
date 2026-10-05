@@ -5,6 +5,7 @@ import type { EventBus } from "../server/events"
 import type { ComputerManager, ExecuteOutcome, ServerActionRequest } from "../server/computers"
 import type { OmniaScope } from "../server/permissions"
 import type { Observation } from "../protocol"
+import { defaultEntitlementGate, type EntitlementGate } from "../cua/entitlements"
 import type {
   CuaAction,
   CuaActionResult,
@@ -71,6 +72,10 @@ export interface ComputerUseServiceOptions {
   // pointer path; when a calibrated profile exists but is inapplicable to the
   // current screen the service refuses instead of executing uncalibrated.
   readonly calibration?: CalibrationManager
+  // Entitlement gate for paid capabilities. Omitted in most embeddings, in
+  // which case the process-wide gate resolves from the environment, so
+  // enforcement never depends on this constructor being threaded.
+  readonly entitlements?: EntitlementGate
 }
 
 export interface AnalyzeInput {
@@ -350,6 +355,15 @@ export class ComputerUseService {
           latencyMs: 0,
         },
       }
+    }
+    // The vision fallback is the paid capability. Exactly one cloud_vision
+    // check per action, taken here — after routing (so a semantic action never
+    // spends a unit) and before any provider runs (so a refusal never depends
+    // on which provider the router happened to pick, and a fallback chain
+    // cannot turn one action into several checks).
+    if (decision.provider !== "semantic") {
+      const refusal = await this.refuseWithoutCloudVision(decision, context)
+      if (refusal !== undefined) return refusal
     }
     const request: ComputerUseRequest = {
       computerId: input.computerId,
@@ -685,6 +699,60 @@ export class ComputerUseService {
         ]),
       ),
     }
+  }
+
+  /**
+   * Refuses the vision fallback when the plan does not include cloud_vision.
+   *
+   * Returns undefined when the capability is entitled so the caller continues
+   * into the provider chain. On refusal it produces a typed failure carrying
+   * the capability and the control plane's reason, and it degrades rather than
+   * bricks: JSON-only observation (computer_observe / computer_snapshot) needs
+   * no vision model and is untouched, so the refusal names it as the way
+   * forward instead of reporting an empty observation.
+   */
+  private async refuseWithoutCloudVision(
+    decision: RoutingDecision,
+    context: ComputerUseContext,
+  ): Promise<ComputerUseAnalysis | undefined> {
+    const granted = await this.entitlements().check("cloud_vision")
+    if (granted.allowed) return undefined
+    const detail = granted.degraded
+      ? `${granted.reason} Vision grounding is unavailable while billing cannot be reached.`
+      : granted.reason
+    return {
+      decision: {
+        ...decision,
+        provider: "none",
+        reason: [
+          ...decision.reason,
+          `cloud_vision is not available: ${detail}`,
+          "visual grounding requires cloud_vision; computer_observe still returns the accessibility tree as JSON",
+        ],
+      },
+      fallbacks: 0,
+      errorCode: "capability_required",
+      context,
+      result: {
+        success: false,
+        provider: "none",
+        confidence: 0,
+        errorCode: "capability_required",
+        reasoning: `Visual grounding needs the cloud_vision capability, which this plan does not include: ${detail} Use computer_observe for JSON-only access to the screen.`,
+        latencyMs: 0,
+        metadata: {
+          capability: "cloud_vision",
+          capabilityCode: granted.code,
+          capabilityReason: granted.reason,
+          entitlement: granted.origin,
+          ...(granted.plan === undefined ? {} : { plan: granted.plan }),
+        },
+      },
+    }
+  }
+
+  private entitlements(): EntitlementGate {
+    return this.options.entitlements ?? defaultEntitlementGate()
   }
 
   // P0: window-management intents bypass vision entirely. Try semantic

@@ -3,6 +3,7 @@ import { Icon } from "@opencode-ai/ui/icon"
 import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
 import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
+import { Paywall, type PaywallDecision, type PaywallOffer } from "@opencode-ai/ui/paywall"
 import { AttachmentCardV2 } from "@opencode-ai/session-ui/v2/attachment-card-v2"
 import { CommentCardV2 } from "@opencode-ai/session-ui/v2/comment-card-v2"
 import { typeLabel } from "@opencode-ai/session-ui/message-file"
@@ -22,6 +23,14 @@ type PromptImageAttachmentsProps = {
   commentActive?: (item: PromptCommentItem) => boolean
   onOpenComment?: (item: PromptCommentItem) => void
   onRemoveComment?: (item: PromptCommentItem) => void
+  /**
+   * Billing decision for cloud vision, which is what an attached image costs.
+   * Supplied by the owner of the entitlement snapshot; `Paywall` renders
+   * nothing while the capability is granted.
+   */
+  vision?: PaywallDecision
+  visionOffer?: PaywallOffer
+  onDismissVision?: () => void
 }
 
 const fallbackClass = "size-16 rounded-md bg-surface-base flex items-center justify-center border border-border-base"
@@ -164,6 +173,17 @@ export const PromptImageAttachments: Component<PromptImageAttachmentsProps> = (p
           />
         </Show>
       </div>
+      {/* Only an image costs vision, so a text attachment never earns a paywall. */}
+      <Show when={props.attachments.some((attachment) => attachment.mime.startsWith("image/"))}>
+        <div class="px-2 pb-2">
+          <Paywall
+            capability="cloud_vision"
+            decision={props.vision}
+            offer={props.visionOffer}
+            onDismiss={props.onDismissVision}
+          />
+        </div>
+      </Show>
     </Show>
   )
 }

@@ -14,6 +14,8 @@ export {
 } from "./runtimes"
 export { parseShowUiAction, parseUiTarsAction, resolvePoint } from "./parse"
 export { createProviders, SemanticProvider } from "./providers"
+export { EntitlementGate, createEntitlementGate, defaultEntitlementGate } from "../cua/entitlements"
+export { CuaLiveView, LIVE_VIEW_CAPABILITY } from "../cua/live-view"
 export { DefaultComputerUseRouter, DEFAULT_ROUTING_WEIGHTS } from "./router"
 export { ComputerUseService, DEFAULT_COMPUTER_USE_SETTINGS, defaultComputerUseSettingsFile } from "./service"
 export {
