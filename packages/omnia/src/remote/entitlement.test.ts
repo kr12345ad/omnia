@@ -4,12 +4,14 @@ import {
   RemoteEntitlementGate,
   remoteSessionCeilingMinutes,
   remoteSessionLimit,
+  type RemoteEntitlementOptions,
 } from "./entitlement"
 
 interface ControlPlane {
   readonly plan?: string
   readonly computers?: number
   readonly entitlementStatus?: number
+  readonly computersStatus?: number
 }
 
 function urlOf(input: URL | RequestInfo): string {
@@ -28,6 +30,7 @@ function fakeFetch(plane: ControlPlane, seen: string[] = []): typeof fetch {
       })
     }
     if (url.endsWith("/v1/computers")) {
+      if (plane.computersStatus !== undefined) return new Response(JSON.stringify({ ok: false }), { status: plane.computersStatus })
       return new Response(
         JSON.stringify({ ok: true, computers: Array.from({ length: plane.computers ?? 0 }, (_, index) => ({ id: `c-${index}` })) }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -38,8 +41,21 @@ function fakeFetch(plane: ControlPlane, seen: string[] = []): typeof fetch {
   return Object.assign(handler, { preconnect: () => undefined })
 }
 
-function gate(overrides: Partial<ConstructorParameters<typeof RemoteEntitlementGate>[0]> = {}, http = fakeFetch({ plan: "free", computers: 0 })) {
-  return new RemoteEntitlementGate({ endpoint: "http://127.0.0.1:4096", token: "token-1", profileId: "230746284", http, ...overrides })
+/**
+ * The wire is pointed at a control plane the way production points it: through
+ * the environment. There is deliberately no endpoint or token option, so a test
+ * that wants a different control plane hands over a different environment.
+ */
+function gate(
+  overrides: Partial<RemoteEntitlementOptions> = {},
+  http = fakeFetch({ plan: "free", computers: 0 }),
+) {
+  return new RemoteEntitlementGate({
+    env: { OMNIA_SERVER_URL: "http://127.0.0.1:4096", OMNIA_SERVER_TOKEN: "token-1" },
+    profileId: "230746284",
+    http,
+    ...overrides,
+  })
 }
 
 describe("computer allowance", () => {
@@ -74,6 +90,15 @@ describe("computer allowance", () => {
     expect(decision.allowance).toBe(Number.POSITIVE_INFINITY)
   })
 
+  test("a rejected credential cannot pair, rather than counting as an unknown count", async () => {
+    for (const status of [401, 403]) {
+      const decision = await gate({}, fakeFetch({ plan: "business", computers: 9, entitlementStatus: status, computersStatus: status })).authorizeComputer()
+      expect(`HTTP ${status} -> ${String(decision.allowed)}/${decision.code}`).toBe(`HTTP ${status} -> false/computer_allowance_exceeded`)
+      expect(decision.reason).toContain("credential was rejected")
+      expect(decision.registered).toBeUndefined()
+    }
+  })
+
   test("asks the control plane with its own credential and the signed-in profile", async () => {
     const requests: Array<{ url: string; headers: Headers }> = []
     const http = Object.assign(
@@ -94,7 +119,7 @@ describe("computer allowance", () => {
 
   test("a wire with no credential enforces nothing and asks nothing", async () => {
     const seen: string[] = []
-    const decision = await gate({ token: undefined }, fakeFetch({ plan: "business", computers: 9 }, seen)).authorizeComputer()
+    const decision = await gate({ env: {} }, fakeFetch({ plan: "business", computers: 9 }, seen)).authorizeComputer()
     expect(decision.allowed).toBe(true)
     expect(decision.code).toBe("unconfigured")
     expect(decision.origin).toBe("unconfigured")
@@ -117,6 +142,30 @@ describe("computer allowance", () => {
   test("fromEnv without a token leaves the wire unconfigured rather than guessing", () => {
     const built = RemoteEntitlementGate.fromEnv({ env: { OMNIA_SERVER_URL: "http://control.test:4096" } })
     expect(built.configured).toBe(false)
+  })
+
+  test("a host with NO port is inert, never a request to port 80", async () => {
+    // This exact shape is what the desktop sidecar produces: it sets the URL and
+    // the token but no port. Guessing 80 sent the bearer in cleartext to whatever
+    // answered there and then reported the allowance as unconfirmed.
+    const seen: string[] = []
+    const built = RemoteEntitlementGate.fromEnv({
+      env: { OMNIA_SERVER_TOKEN: "token-env", OMNIA_SERVER_HOST: "127.0.0.1" },
+      http: fakeFetch({ plan: "business", computers: 9 }, seen),
+    })
+    expect(built.endpoint).toBeUndefined()
+    expect(built.configured).toBe(false)
+    const decision = await built.authorizeComputer()
+    expect(decision.code).toBe("unconfigured")
+    expect(seen).toEqual([])
+  })
+
+  test("an unusable port is inert too, while a real host:port is honoured", async () => {
+    expect(RemoteEntitlementGate.fromEnv({ env: { OMNIA_SERVER_TOKEN: "t", OMNIA_SERVER_PORT: "eighty" } }).endpoint).toBeUndefined()
+    expect(
+      RemoteEntitlementGate.fromEnv({ env: { OMNIA_SERVER_TOKEN: "t", OMNIA_SERVER_HOST: "127.0.0.1", OMNIA_SERVER_PORT: "4096" } })
+        .endpoint,
+    ).toBe("http://127.0.0.1:4096")
   })
 })
 
@@ -167,6 +216,18 @@ describe("an unreachable control plane", () => {
     expect(decision.code).toBe("unconfirmed")
     expect(decision.registered).toBeUndefined()
     expect(decision.reason).toContain("could not be read")
+  })
+
+  test("an unconfirmed count is capped at the free allowance, never at unlimited", async () => {
+    const http = Object.assign(
+      async () => Promise.reject(new Error("the network is down")),
+      { preconnect: () => undefined },
+    ) as typeof fetch
+    const decision = await gate({}, http).authorizeComputer()
+    expect(decision.allowance).toBe(3)
+    expect(decision.plan).toBe("free")
+    expect(decision.planKnown).toBe(false)
+    expect(decision.origin).toBe("fail-closed")
   })
 })
 

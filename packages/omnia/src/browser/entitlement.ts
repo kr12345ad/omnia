@@ -1,52 +1,43 @@
 // Billing enforcement for the browser layer.
 //
-// Entitlements are resolved on the control plane (POST /v1/billing/check)
-// because that is the only shared authority: the desktop app and the sidecar
-// both ask it, and it is the only place that can count against a plan. This
-// module is the browser's side of that contract - it asks before the work and
-// refuses before the work, never after.
+// This gate does NOT decide anything about billing. It used to: it resolved its
+// own endpoint, kept its own copy of the plan matrix's failure policy, and grew
+// a third opinion on what a status code means - and it disagreed with the CUA
+// gate, the remote wire and the canonical client in ../billing/client on all
+// three. Every one of those questions has exactly one answer now, and that answer
+// belongs to BillingClient, so this module delegates all of them: the endpoint
+// comes from resolveBillingEndpoint, the bearer comes from the environment, 402 is
+// a decision and a 5xx is a failure, and the failure policy is evaluated against
+// the plan the control plane last named rather than against `free`.
 //
-// Three properties matter here, and they are the reason this is not a single
-// `if` at each call site:
+// What is left here is what is genuinely the browser's own:
 //
-//   1. Counted per operation, not per node. A read that returns four hundred
-//      DOM nodes, or a find that returns forty candidates, is one browser
-//      action. Metering is attached to the operation boundary (navigate, click,
-//      type, read, find, upload, download, ...) and never to the size of what an
-//      operation returns.
+//   1. Counted per operation, not per node. A read that returns four hundred DOM
+//      nodes, or a find that returns forty candidates, is one browser action.
+//      Metering is attached to the operation boundary (navigate, click, type,
+//      read, find, upload, download, ...) and never to the size of what an
+//      operation returns - see OPERATION_SPAN.
 //   2. vault_login is checked before the credential store is touched at all.
 //      `vaultLogin` takes the reader as a thunk precisely so a refusal cannot
 //      have already pulled a secret out of the vault: the only way to reach the
 //      reader is through the gate, and the gate throws first. This is the gate
 //      that stops the product being resold as a bot-as-a-service.
-//   3. The failure policy is asymmetric and is inherited from the plan table
-//      rather than re-decided here. `failsClosed()` says a hard allowance cannot
-//      be honoured when the counter is unknown, so a billing outage refuses a
-//      hard-metered capability and lets a soft-metered one through. Getting this
-//      backwards is a bug either way: one direction bricks the app, the other is
-//      an unmetered-usage hole.
+//   3. A refusal is an Error a transport can map, because a call site has to
+//      distinguish "upgrade" (402) from "retry" (503). See BrowserEntitlementError.
 //
-// Nothing here ever sees a credential value. Requests carry a capability name
-// and nothing else, and a refusal is reported with the server's reason for that
-// capability, so there is no code path that could put a secret in a log line or
-// an error message - no secret is ever an argument.
+// Nothing here ever sees a credential value, and it cannot: there is no option to
+// supply an endpoint or a token, so the only credential in play is the one the
+// client reads from the environment and sends to the host the environment names.
 
 import { AsyncLocalStorage } from "node:async_hooks"
-import { failsClosed, isPlanId, planFor, type Capability, type Metered, type PlanId } from "../billing/plans"
+import { BillingClient, type BillingCode, type BillingEntitlement, type BillingEnv } from "../billing/client"
+import type { Capability, PlanId } from "../billing/plans"
 
-/** The control plane's answer, narrowed to what a call site may branch on. */
-export type EntitlementCode = "granted" | "not_entitled" | "limit_reached" | "unknown" | "unreachable" | "unconfigured"
+/** The control plane's answer, re-exported so browser call sites import it from here. */
+export type EntitlementCode = BillingCode
 
-export interface Entitlement {
-  readonly allowed: boolean
-  readonly code: EntitlementCode
-  readonly capability: Capability
-  readonly plan: PlanId
-  readonly used: number
-  readonly limit: number
-  readonly metering: Metered
-  readonly reason: string
-}
+/** One answer about one capability, as the canonical client resolved it. */
+export type Entitlement = BillingEntitlement
 
 /**
  * A refusal, carrying the decision that produced it.
@@ -112,12 +103,20 @@ const OPERATION_SPAN = new AsyncLocalStorage<{
 }>()
 
 export interface BrowserEntitlementOptions {
-  /** Control plane origin, e.g. http://127.0.0.1:4096. Empty means unconfigured. */
-  readonly endpoint?: string
-  /** The server bearer token. Without it a check cannot be authenticated. */
-  readonly token?: string
+  /**
+   * The environment to read the control plane from.
+   *
+   * There is deliberately no `endpoint` and no `token` option, here or on the
+   * client: a caller-supplied endpoint is a way to aim somebody else's bearer at
+   * a host of the caller's choosing, which is the same class of bug as guessing
+   * port 80. A test or an embedding points this at a different control plane by
+   * handing over an environment, exactly as production does.
+   */
+  readonly env?: BillingEnv
   /** Entitlements are per profile; absent resolves to the anonymous free plan. */
   readonly profileId?: string
+  /** The plan this gate is known to be on, for wiring that already resolved it. */
+  readonly plan?: PlanId
   readonly timeoutMs?: number
   readonly log?: (message: string, meta?: Record<string, unknown>) => void
 }
@@ -128,66 +127,60 @@ export interface BrowserEntitlementOptions {
  * A composite action (a login reads the page, finds two fields, types twice,
  * submits) is one request as far as the plan is concerned, so `operation` charges
  * the capability once for the whole span - see OPERATION_SPAN.
+ *
+ * One BillingClient per gate, because the plan it last saw is shared state: that
+ * remembered plan is what makes the failure policy follow the CURRENT plan rather
+ * than keying itself off `free`, and a second client per call would forget it.
  */
 export class BrowserEntitlementGate {
-  private readonly endpoint: string
-  private readonly token: string
-  private readonly profileId: string | undefined
-  private readonly timeoutMs: number
-  private readonly log: (message: string, meta?: Record<string, unknown>) => void
+  private readonly billing: BillingClient
 
   constructor(options: BrowserEntitlementOptions = {}) {
-    this.endpoint = (options.endpoint ?? "").replace(/\/+$/, "")
-    this.token = options.token ?? ""
-    this.profileId = options.profileId
-    this.timeoutMs = options.timeoutMs ?? 5_000
-    this.log = options.log ?? (() => undefined)
+    this.billing = new BillingClient(options)
   }
 
   /**
    * The gate as the environment configures it.
    *
-   * An install with no server token has no control plane to ask, so the gate is
-   * `unconfigured` and inert: there is nothing to enforce against, and refusing
-   * every browser action would break an install that never opted into billing.
+   * Resolution is the client's: OMNIA_SERVER_URL, then OMNIA_PUBLIC_URL, then
+   * host with a REAL port, and no guessing. An install with no token or no usable
+   * endpoint has no control plane to ask, so the client answers `unconfigured`
+   * and is inert - there is nothing to enforce against, and refusing every
+   * browser action would break an install that never opted into billing.
    */
-  static fromEnv(env: Record<string, string | undefined> = process.env): BrowserEntitlementGate {
-    const token = env.OMNIA_SERVER_TOKEN ?? ""
-    if (token.length === 0) return new BrowserEntitlementGate()
-    // OMNIA_SERVER_URL wins, exactly as the CUA, remote and driver gates do.
-    //
-    // This used to build the endpoint from OMNIA_SERVER_HOST and only append a
-    // port when OMNIA_SERVER_PORT was set. The desktop sidecar sets URL and
-    // TOKEN but no PORT, so the gate POSTed to http://127.0.0.1 - port 80 - and
-    // sent the bearer in cleartext to whatever happened to be listening there,
-    // while every hard-metered capability came back "unreachable" and was
-    // refused. A host:port guess must never be the fallback for a configured
-    // URL, and an unset port must never silently mean port 80.
-    const configured = env.OMNIA_SERVER_URL ?? env.OMNIA_PUBLIC_URL
-    if (configured !== undefined && configured.length > 0) {
-      return new BrowserEntitlementGate({ token, endpoint: configured })
-    }
-    const host = env.OMNIA_SERVER_HOST ?? "127.0.0.1"
-    const port = env.OMNIA_SERVER_PORT
-    if (port === undefined || port.length === 0 || !/^\d{1,5}$/.test(port)) {
-      // No URL and no usable port: there is no control plane to ask. Inert beats
-      // guessing a port and shipping the bearer somewhere unintended.
-      return new BrowserEntitlementGate()
-    }
-    return new BrowserEntitlementGate({ token, endpoint: `http://${host}:${port}` })
+  static fromEnv(env: BillingEnv = process.env): BrowserEntitlementGate {
+    return new BrowserEntitlementGate({ env })
   }
 
-  /** True when a control plane was configured at all. */
+  /**
+   * Where the control plane is, read-only.
+   *
+   * This is the resolver's answer for display and diagnosis, not a dial: there is
+   * no setter and no option that sets it, so the only way to change where a bearer
+   * goes is to change the environment.
+   */
+  get endpoint(): string | undefined {
+    return this.billing.endpoint
+  }
+
+  /** True when this install has a control plane it can actually ask. */
   get configured(): boolean {
-    return this.endpoint.length > 0 && this.token.length > 0
+    return this.billing.configured
   }
 
-  /** Asks the control plane, applying the plan's failure policy to transport errors. */
+  /**
+   * One answer about one capability.
+   *
+   * The span check comes first and is the browser's own contribution: a nested
+   * charge inside an operation returns the decision already made, which is what
+   * keeps a 400-node read or a five-step login at one request. Everything after
+   * that point - the request, the deadline, the status-code policy, the echo
+   * check, the failure policy and its plan - belongs to the client.
+   */
   async check(capability: Capability): Promise<Entitlement> {
     const span = OPERATION_SPAN.getStore()
     if (span !== undefined && span.capability === capability) return span.entitlement
-    if (!this.configured) return unconfigured(capability)
-    return this.ask(capability)
+    return this.billing.check(capability)
   }
 
   /** Throws a BrowserEntitlementError when the capability is refused. */
@@ -229,112 +222,6 @@ export class BrowserEntitlementGate {
   async vaultListing<T>(list: () => T | Promise<T>): Promise<T> {
     await this.authorize("credential_vault")
     return list()
-  }
-
-  private async ask(capability: Capability): Promise<Entitlement> {
-    let response: Response
-    try {
-      response = await fetch(`${this.endpoint}/v1/billing/check`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${this.token}`,
-          "content-type": "application/json",
-          // Entitlements are per profile; the header is what binds this check to
-          // a subscription rather than to the anonymous free plan.
-          ...(this.profileId === undefined ? {} : { "x-omnia-profile": this.profileId }),
-        },
-        // The body is the capability and nothing else: no credential, no tab id,
-        // nothing that would need redacting before it is sent or logged.
-        body: JSON.stringify({ capability }),
-        signal: AbortSignal.timeout(this.timeoutMs),
-      })
-    } catch {
-      return this.unreachable(capability, "The billing service could not be reached.")
-    }
-    // A 5xx is the control plane failing, not a decision about this capability,
-    // so it takes the same path as an unreachable socket rather than being read
-    // as an answer. 402 is a real decision and is parsed below.
-    if (response.status >= 500) {
-      return this.unreachable(capability, "The billing service returned an error.")
-    }
-    let payload: unknown
-    try {
-      payload = await response.json()
-    } catch {
-      return this.unreachable(capability, "The billing service returned an unreadable answer.")
-    }
-    const decision = readDecision(payload, capability)
-    if (decision === undefined) return this.unreachable(capability, "The billing service returned an unrecognized answer.")
-    return decision
-  }
-
-  /**
-   * A control plane we could not reach.
-   *
-   * The asymmetry is the whole point and it is not a judgement call made here:
-   * `failsClosed` comes from the plan table, so a capability whose allowance is
-   * hard cannot be honoured with an unknown counter and is refused, while a soft
-   * (fair-use) allowance degrades to "still works".
-   */
-  private unreachable(capability: Capability, reason: string): Entitlement {
-    const rule = planFor("free").capabilities[capability]
-    const closed = failsClosed(capability)
-    if (closed) this.log("refused a metered capability because billing state is unavailable", { capability })
-    return {
-      allowed: !closed,
-      code: "unreachable",
-      capability,
-      plan: "free",
-      used: 0,
-      limit: rule.limit,
-      metering: rule.metering,
-      reason: closed ? reason : `${reason} Failing open to the free plan.`,
-    }
-  }
-}
-
-function unconfigured(capability: Capability): Entitlement {
-  const rule = planFor("free").capabilities[capability]
-  return {
-    allowed: true,
-    code: "unconfigured",
-    capability,
-    plan: "free",
-    used: 0,
-    limit: rule.limit,
-    metering: rule.metering,
-    reason: "Billing is not configured on this install.",
-  }
-}
-
-/**
- * Reads a decision out of the control plane's reply.
- *
- * The reply is untrusted: an `allowed: true` is honoured only when the shape
- * also agrees about which capability it is talking about, so a stale or proxied
- * answer for a different capability cannot grant this one.
- */
-function readDecision(payload: unknown, capability: Capability): Entitlement | undefined {
-  if (typeof payload !== "object" || payload === null) return undefined
-  const record = payload as Record<string, unknown>
-  if (record.capability !== capability) return undefined
-  if (typeof record.allowed !== "boolean") return undefined
-  const code = record.code
-  if (code !== "granted" && code !== "not_entitled" && code !== "limit_reached" && code !== "unknown") return undefined
-  const rule = planFor("free").capabilities[capability]
-  return {
-    allowed: record.allowed,
-    code,
-    capability,
-    // An unknown plan id resolves to free rather than to whatever was claimed,
-    // so a bogus `plan` cannot widen the message a caller is shown.
-    plan: isPlanId(record.plan) ? record.plan : "free",
-    used: typeof record.used === "number" ? record.used : 0,
-    limit: typeof record.limit === "number" ? record.limit : rule.limit,
-    metering: record.metering === "soft" ? "soft" : "hard",
-    // The reason is the server's own sentence about a capability. It cannot
-    // contain a credential: the server never had one.
-    reason: typeof record.reason === "string" && record.reason.length > 0 ? record.reason : "Refused by billing.",
   }
 }
 

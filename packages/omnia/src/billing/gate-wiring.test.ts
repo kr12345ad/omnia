@@ -54,8 +54,7 @@ describe("browser gate endpoint resolution", () => {
 describe("cua gate answer validation", () => {
   test("an answer about a different capability is not accepted", async () => {
     const gate = new CuaGate({
-      endpoint: "http://127.0.0.1:1",
-      token: "t",
+      env: { OMNIA_SERVER_URL: "http://127.0.0.1:1", OMNIA_SERVER_TOKEN: "t" },
       // A granted answer for a DIFFERENT capability must not grant this one.
       http: Object.assign(async () =>
         new Response(JSON.stringify({ allowed: true, code: "granted", capability: "browser_automation" }), {
@@ -69,8 +68,7 @@ describe("cua gate answer validation", () => {
 
   test("a matching echo is accepted", async () => {
     const gate = new CuaGate({
-      endpoint: "http://127.0.0.1:1",
-      token: "t",
+      env: { OMNIA_SERVER_URL: "http://127.0.0.1:1", OMNIA_SERVER_TOKEN: "t" },
       http: Object.assign(async () =>
         new Response(JSON.stringify({ allowed: true, code: "granted", capability: "cloud_vision" }), {
           status: 200,
@@ -84,8 +82,7 @@ describe("cua gate answer validation", () => {
 describe("remote allowance cannot be bypassed", () => {
   const gate = (status: number) =>
     new RemoteEntitlementGate({
-      endpoint: "http://127.0.0.1:1",
-      token: "t",
+      env: { OMNIA_SERVER_URL: "http://127.0.0.1:1", OMNIA_SERVER_TOKEN: "t" },
       profileId: "230746284",
       http: Object.assign(async () => new Response("{}", { status }), { preconnect: () => undefined }) as unknown as typeof fetch,
     })

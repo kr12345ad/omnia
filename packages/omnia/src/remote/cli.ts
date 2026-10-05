@@ -71,8 +71,12 @@ async function main(): Promise<void> {
   // code: a computer past the plan's allowance is refused here with the reason,
   // so the code survives an upgrade and the operator can retry it.
   const allowance = await RemoteEntitlementGate.fromEnv({
-    endpoint: base,
-    token: flags.token,
+    // The gate resolves its own endpoint from the environment, so a caller can no
+    // longer point it at an arbitrary host.
+    env: {
+      OMNIA_SERVER_URL: base,
+      ...(flags.token === undefined ? {} : { OMNIA_SERVER_TOKEN: flags.token }),
+    },
     profileId: flags.profile,
     log: (message) => console.log(`[omnia-remote] ${message}`),
   }).authorizeComputer()

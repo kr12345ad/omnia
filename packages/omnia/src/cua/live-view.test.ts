@@ -46,7 +46,7 @@ function countingGate(response: () => Response | Promise<Response>): { gate: Ent
     calls.push(String((JSON.parse(String(init?.body ?? "{}")) as { capability?: string }).capability))
     return response()
   }) as unknown as typeof fetch
-  return { calls, gate: new EntitlementGate({ endpoint: "http://control.test", authFile: "/nonexistent/auth.json", http }) }
+  return { calls, gate: new EntitlementGate({ env: { OMNIA_SERVER_URL: "http://control.test", OMNIA_SERVER_TOKEN: "t" }, authFile: "/nonexistent/auth.json", http }) }
 }
 
 function frame(index: number): ActionResult & { path?: string } {
@@ -92,7 +92,7 @@ describe("live view metering", () => {
   test("live_view is free-tier soft, so an unreachable control plane still streams", async () => {
     const calls: string[] = []
     const gate = new EntitlementGate({
-      endpoint: "http://control.test",
+      env: { OMNIA_SERVER_URL: "http://control.test", OMNIA_SERVER_TOKEN: "t" },
       authFile: "/nonexistent/auth.json",
       http: (async () => {
         calls.push("asked")

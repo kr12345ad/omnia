@@ -256,7 +256,7 @@ function harness(server: Server, providers: ComputerUseProvider[], visionCalls: 
       providers: all,
       catalog: [],
       settingsFile: file,
-      entitlements: new EntitlementGate({ endpoint: server.url, token: server.token, profileId: PROFILE }),
+      entitlements: new EntitlementGate({ env: { OMNIA_SERVER_URL: server.url, OMNIA_SERVER_TOKEN: server.token }, profileId: PROFILE }),
     }),
   }
 }
@@ -363,7 +363,7 @@ describe("cloud_vision enforcement", () => {
       catalog: [],
       settingsFile: settingsFile(),
       // A control plane that is configured but not answering.
-      entitlements: new EntitlementGate({ endpoint: "http://127.0.0.1:1", profileId: PROFILE, timeoutMs: 250 }),
+      entitlements: new EntitlementGate({ env: { OMNIA_SERVER_URL: "http://127.0.0.1:1", OMNIA_SERVER_TOKEN: "t" }, profileId: PROFILE, timeoutMs: 250 }),
     })
     const refused = await service.analyze(clickCanvas)
     expect(refused.result.errorCode).toBe("capability_required")

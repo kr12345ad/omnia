@@ -14,13 +14,16 @@ import type { CdpTransport } from "./cdp"
 import { BrowserEntitlementError, BrowserEntitlementGate } from "./entitlement"
 import { browserFailureStatus } from "./errors"
 import { CredentialStore } from "../credentials/store"
+import type { BillingEnv } from "../billing/client"
 import { PLANS } from "../billing/plans"
-import { currentPeriod, readBillingState } from "../billing/store"
+import { readBillingState } from "../billing/store"
 import { startOmniaServer } from "../server/server"
 
 const PROFILE = "424242"
 const SECRET = "correct-horse-battery-staple"
 const TOKEN = "browser-billing-test-token"
+/** Port 1 is reserved and nothing listens there, so a check cannot be attempted. */
+const UNREACHABLE = "http://127.0.0.1:1"
 
 type ControlPlane = Awaited<ReturnType<typeof startOmniaServer>>
 
@@ -28,19 +31,49 @@ let dir = ""
 let server: ControlPlane
 let vault: CredentialStore
 let credentialId = ""
+let billingFile = ""
+let previousBillingFile: string | undefined
 
-function gate(profileId: string = PROFILE, options: { endpoint?: string; token?: string } = {}): BrowserEntitlementGate {
+/**
+ * The gate points at the control plane the way production does: through the
+ * environment. There is deliberately no endpoint or token option on the gate, so
+ * a test that wants a different control plane - including one that is not there
+ * at all - hands over a different environment.
+ */
+function gate(
+  profileId: string = PROFILE,
+  options: {
+    readonly url?: string
+    readonly token?: string
+    readonly log?: (message: string, meta?: Record<string, unknown>) => void
+  } = {},
+): BrowserEntitlementGate {
   return new BrowserEntitlementGate({
-    endpoint: options.endpoint ?? server.url,
-    token: options.token ?? server.token,
+    env: {
+      OMNIA_SERVER_URL: options.url ?? server.url,
+      OMNIA_SERVER_TOKEN: options.token ?? server.token,
+    } satisfies BillingEnv,
     profileId,
     timeoutMs: 5_000,
+    ...(options.log === undefined ? {} : { log: options.log }),
   })
 }
 
-/** The counter the control plane actually kept, rather than a caller's tally. */
+/**
+ * The counter the control plane actually kept, rather than a caller's tally.
+ *
+ * Deliberately NOT keyed on the month that happens to be current when the
+ * assertion runs. The control plane keys each counter by the month its own clock
+ * read at the moment it consumed the unit, so a run that spends a unit at 23:59
+ * and asserts at 00:00 used to look up a period that had no counters in it and
+ * report zero. Summing the capability's counters across every period is the
+ * number that was actually spent, whenever the assertions land.
+ */
 function used(capability: "browser_automation" | "vault_login" | "credential_vault", profileId = PROFILE): number {
-  return readBillingState(join(dir, "billing.json")).usage[profileId]?.counters[`${capability}:${currentPeriod()}`] ?? 0
+  const counters = readBillingState(billingFile).usage[profileId]?.counters ?? {}
+  return Object.entries(counters)
+    .filter(([key]) => key.startsWith(`${capability}:`))
+    .reduce((total, [, count]) => total + count, 0)
 }
 
 /**
@@ -72,7 +105,12 @@ function crowdedTransport(nodes: number): CdpTransport & { calls: () => number }
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "omnia-browser-billing-"))
-  process.env.OMNIA_BILLING_FILE = join(dir, "billing.json")
+  // Saved and restored, not just deleted: bun runs every test file in one
+  // process, so a var left pointing at a directory this file is about to remove
+  // leaks into the next file and points its billing state at a deleted path.
+  previousBillingFile = process.env.OMNIA_BILLING_FILE
+  billingFile = join(dir, "billing.json")
+  process.env.OMNIA_BILLING_FILE = billingFile
   server = await startOmniaServer({
     token: TOKEN,
     credentialsFile: join(dir, "credentials.json"),
@@ -93,7 +131,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await server?.stop()
-  delete process.env.OMNIA_BILLING_FILE
+  if (previousBillingFile === undefined) delete process.env.OMNIA_BILLING_FILE
+  else process.env.OMNIA_BILLING_FILE = previousBillingFile
   try {
     rmSync(dir, { recursive: true, force: true })
   } catch {
@@ -132,10 +171,7 @@ describe("vault_login", () => {
   test("never puts the credential value in the refusal or in a log line", async () => {
     const logged: string[] = []
     const lines: string[] = []
-    const watching = new BrowserEntitlementGate({
-      endpoint: server.url,
-      token: server.token,
-      profileId: PROFILE,
+    const watching = gate(PROFILE, {
       log: (message) => logged.push(`${message} ${JSON.stringify(lines)}`),
     })
     let reads = 0
@@ -169,7 +205,7 @@ describe("vault_login", () => {
     // attempted - the counter is unknown, and an unknown counter cannot honour a
     // hard limit.
     let reads = 0
-    await gate(PROFILE, { endpoint: "http://127.0.0.1:1" })
+    await gate(PROFILE, { url: UNREACHABLE })
       .vaultLogin(() => {
         reads += 1
         return vault.get(credentialId)
@@ -196,7 +232,7 @@ describe("credential_vault", () => {
 
   test("fails open on a transport error because its free allowance is soft", async () => {
     let listed = 0
-    const listing = await gate(PROFILE, { endpoint: "http://127.0.0.1:1" }).vaultListing(() => {
+    const listing = await gate(PROFILE, { url: UNREACHABLE }).vaultListing(() => {
       listed += 1
       return vault.summaries("local")
     })
@@ -351,5 +387,30 @@ describe("browser_automation", () => {
     expect(transport.calls()).toBeGreaterThan(0)
     // The unconfigured path never claims a capability is entitled; it says so.
     expect((await inert.check("vault_login")).code).toBe("unconfigured")
+  })
+})
+
+describe("the gate resolves nothing a caller hands it", () => {
+  test("the endpoint is the one the environment names", () => {
+    const fromEnvironment = BrowserEntitlementGate.fromEnv({
+      OMNIA_SERVER_TOKEN: server.token,
+      OMNIA_SERVER_URL: server.url,
+    })
+    expect(fromEnvironment.configured).toBe(true)
+    expect(fromEnvironment.endpoint).toBe(server.url)
+  })
+
+  test("a host with no port is inert, never a request to port 80", async () => {
+    // This is the desktop sidecar's shape: the UI sets URL and TOKEN and never
+    // PORT. The gate used to build http://127.0.0.1 out of exactly this and POST
+    // the bearer in cleartext to whatever happened to be listening there, while
+    // every hard-metered capability came back "unreachable" and was refused.
+    const halfConfigured = BrowserEntitlementGate.fromEnv({
+      OMNIA_SERVER_TOKEN: server.token,
+      OMNIA_SERVER_HOST: "127.0.0.1",
+    })
+    expect(halfConfigured.endpoint).toBeUndefined()
+    expect(halfConfigured.configured).toBe(false)
+    expect((await halfConfigured.check("vault_login")).code).toBe("unconfigured")
   })
 })

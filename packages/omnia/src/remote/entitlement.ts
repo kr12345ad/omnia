@@ -1,8 +1,17 @@
 // Billing enforcement for the remote wire layer.
 //
-// ../billing/plans is the only source of truth for what a plan may do, and the
-// control plane is the only authority that can answer it. This module is the
-// wire's side of that contract, and it enforces exactly two things:
+// ../billing/client decides what a plan may do. This module used to keep its own
+// copy of endpoint resolution, of the bearer and of the failure policy, and all
+// three had drifted: `fromEnv` built `http://${host}` with NO port whenever
+// OMNIA_SERVER_PORT was unset, so the desktop sidecar - which sets the URL and the
+// token but no port - sent the bearer in cleartext to whatever answered on 80.
+// That whole question now belongs to the canonical client, so this gate delegates
+// it: resolveBillingEndpoint picks the origin, the bearer comes from the
+// environment, and there is deliberately no constructor option for either. A
+// caller-supplied endpoint is a way to aim somebody else's credential at a host of
+// the caller's choosing, which is the same class of bug as the port guess.
+//
+// What is left here is what is genuinely the wire's own:
 //
 //   1. The computer allowance. A pairing claim (or a registration) past
 //      PLANS[plan].computers is refused with a reason the operator can act on.
@@ -14,8 +23,8 @@
 //      free (it is what makes someone convert), so it is deliberately not a
 //      refusal gate; the plan's sessionMinutes is what bounds it.
 //
-// The failure policy is asymmetric and is inherited from the plan table rather
-// than re-decided at each call site:
+// The allowance's failure policy is asymmetric and stays here rather than in the
+// client, because it is denominated in computers and not in a metered capability:
 //
 //   - A wire with no control plane token has no billing relationship to enforce.
 //     Nothing is checked, and pairing is untouched.
@@ -39,12 +48,20 @@
 // computer.disconnected events when it refuses a computer; this layer carries the
 // same vocabulary and adds no channel of its own.
 
+import { BillingClient, type BillingEnv } from "../billing/client"
 import { PLANS, isPlanId, planFor, type Plan, type PlanId } from "../billing/plans"
+
+/** The route that names the plan the asking profile is on. */
+const ENTITLEMENT_PATH = "/v1/billing/entitlement"
+
+/** The server's own registered driver list, which is what `computers` counts. */
+const COMPUTERS_PATH = "/v1/computers"
 
 /**
  * Short on purpose. This check sits in front of a pairing attempt, so a hung
  * control plane must not become the operator's latency; a slow answer simply
- * takes the failure policy below.
+ * takes the failure policy below. The client's own ceiling is above this, so
+ * asking for less is honoured and asking for more is not.
  */
 export const REMOTE_ENTITLEMENT_TIMEOUT_MS = 2_000
 
@@ -131,72 +148,65 @@ export function remoteSessionEndedReason(input: {
 }
 
 export interface RemoteEntitlementOptions {
-  /** Control plane origin, e.g. http://127.0.0.1:4096. */
-  readonly endpoint: string
   /**
-   * A bearer the control plane accepts: the server token or a desktop client
-   * token. Without one there is nothing to ask, and nothing is enforced here.
+   * The environment to read the control plane from: OMNIA_SERVER_URL, then
+   * OMNIA_PUBLIC_URL, then a host with a REAL port, plus OMNIA_SERVER_TOKEN.
+   *
+   * There is deliberately no `endpoint` and no `token` option, here or on the
+   * client. Pointing the wire at an arbitrary host is exactly what let a pairing
+   * run send a credential somewhere it did not belong, and the pairing CLI hands
+   * over an environment instead.
    */
-  readonly token?: string
+  readonly env?: BillingEnv
   /** Entitlements are per profile; absent resolves the anonymous free plan. */
   readonly profileId?: string
   readonly timeoutMs?: number
   readonly http?: typeof fetch
-  readonly log?: (message: string) => void
+  readonly log?: (message: string, meta?: Record<string, unknown>) => void
 }
 
-export interface RemoteEntitlementEnvOptions extends Omit<RemoteEntitlementOptions, "endpoint"> {
-  /** Overrides the endpoint the environment resolves. */
-  readonly endpoint?: string
-  readonly env?: Record<string, string | undefined>
-}
+/**
+ * What `fromEnv` takes, which is now the same thing.
+ *
+ * The name is kept because ./index.ts re-exports it and the pairing CLI reaches
+ * for it. It no longer adds an `endpoint` of its own, because there is no longer
+ * a second way to choose where the bearer goes.
+ */
+export type RemoteEntitlementEnvOptions = RemoteEntitlementOptions
 
 export class RemoteEntitlementGate {
-  private readonly endpoint: string
-  private readonly token: string
-  private readonly profile: string | undefined
-  private readonly timeoutMs: number
-  private readonly http: typeof fetch
-  private readonly log: (message: string) => void
+  private readonly billing: BillingClient
+  private readonly log: (message: string, meta?: Record<string, unknown>) => void
 
-  constructor(options: RemoteEntitlementOptions) {
-    this.endpoint = options.endpoint.replace(/\/+$/, "")
-    this.token = options.token ?? ""
-    // The control plane ignores a profile id that is not the numeric id it wrote
-    // the subscription against, so an unusable one is dropped here rather than
-    // spent on a request that could only ever answer 401.
-    this.profile = isProfileId(options.profileId) ? options.profileId : undefined
-    this.timeoutMs = options.timeoutMs ?? REMOTE_ENTITLEMENT_TIMEOUT_MS
-    this.http = options.http ?? fetch
-    this.log = options.log ?? (() => {})
+  constructor(options: RemoteEntitlementOptions = {}) {
+    this.log = options.log ?? (() => undefined)
+    this.billing = new BillingClient({
+      env: options.env,
+      profileId: options.profileId,
+      timeoutMs: options.timeoutMs ?? REMOTE_ENTITLEMENT_TIMEOUT_MS,
+      http: options.http,
+      log: this.log,
+    })
   }
 
   /**
    * The gate as the environment configures it: OMNIA_SERVER_TOKEN is the
-   * deployment's root credential, and OMNIA_SERVER_HOST/PORT is where this
-   * process already reaches the server.
+   * deployment's root credential and OMNIA_SERVER_URL/HOST/PORT is where this
+   * process already reaches the server. Resolution is the client's, so a host
+   * with no port is inert rather than a request to port 80.
    */
   static fromEnv(options: RemoteEntitlementEnvOptions = {}): RemoteEntitlementGate {
-    const env = options.env ?? process.env
-    const token = options.token ?? env.OMNIA_SERVER_TOKEN
-    const configured = options.endpoint ?? env.OMNIA_SERVER_URL
-    if (configured !== undefined && configured.length > 0) {
-      return new RemoteEntitlementGate({ ...stripEndpoint(options), endpoint: configured, token })
-    }
-    const port = env.OMNIA_SERVER_PORT
-    const host = env.OMNIA_SERVER_HOST ?? "127.0.0.1"
-    const number = Number(port)
-    const resolved = port === undefined || port.length === 0 ? `http://${host}` : `http://${host}:${port}`
-    return new RemoteEntitlementGate({
-      ...stripEndpoint(options),
-      endpoint: Number.isInteger(number) && number > 0 ? resolved : "",
-      token,
-    })
+    return new RemoteEntitlementGate(options)
+  }
+
+  /** Where the control plane is, read-only: the resolver's answer, never a dial. */
+  get endpoint(): string | undefined {
+    return this.billing.endpoint
   }
 
   /** True when this wire can ask the control plane anything at all. */
   get configured(): boolean {
-    return this.endpoint.length > 0 && this.token.length > 0
+    return this.billing.configured
   }
 
   /**
@@ -244,13 +254,13 @@ export class RemoteEntitlementGate {
     const plan = named ?? PLANS.free
     const allowance = named?.computers ?? PLANS.free.computers
     if (registered.count === undefined) {
-      // This used to allow the claim outright. Combined with askRegistered()
-      // returning undefined for ANY non-2xx - including the 401 a revoked token
-      // produces and the 402 a real refusal produces - the 3-computer allowance
-      // could be bypassed entirely by making the control plane unreachable or by
-      // revoking the token. An unconfirmed count now gets the FREE allowance as
-      // its ceiling and no more, which is still generous to a legitimate new
-      // user and no longer unlimited.
+      // This used to allow the claim outright. Combined with an unreadable list
+      // being indistinguishable from a rejected credential - which is what let a
+      // revoked token, or simply an unreachable control plane, bypass the
+      // 3-computer allowance entirely - the ceiling could be walked straight past.
+      // An unconfirmed count now gets the FREE allowance as its ceiling and no
+      // more, which is still generous to a legitimate new user and no longer
+      // unlimited.
       const unconfirmedCeiling = PLANS.free.computers
       const allowed = true
       return {
@@ -298,9 +308,11 @@ export class RemoteEntitlementGate {
   }
 
   private async askPlan(): Promise<Plan | undefined> {
-    const payload = await this.ask("/v1/billing/entitlement")
-    if (payload === undefined) return undefined
-    return isPlanId(payload.plan) ? planFor(payload.plan) : undefined
+    const read = await this.billing.read(ENTITLEMENT_PATH)
+    // A rejected credential and an unreadable route are both "no plan was named
+    // here"; askRegistered is what tells the two apart for the refusal below.
+    if (read.status !== "ok" || !isPlanId(read.body.plan)) return undefined
+    return planFor(read.body.plan)
   }
 
   /**
@@ -308,49 +320,12 @@ export class RemoteEntitlementGate {
    * list, which is what the plan's `computers` allowance is denominated in.
    */
   private async askRegistered(): Promise<{ count?: number; revoked?: boolean }> {
-    const payload = await this.ask("/v1/computers")
-    if (payload === undefined) return {}
-    // `ask` reports a rejected credential as {revoked:true}; that is categorically
-    // different from "the count could not be read".
-    if ("revoked" in payload) return { revoked: true }
-    return Array.isArray(payload.computers) ? { count: payload.computers.length } : {}
+    const read = await this.billing.read(COMPUTERS_PATH)
+    // `revoked` is a rejected credential, which is categorically different from
+    // "the count could not be read": one of them must refuse the claim and the
+    // other must not.
+    if (read.status === "revoked") return { revoked: true }
+    if (read.status !== "ok") return {}
+    return Array.isArray(read.body.computers) ? { count: read.body.computers.length } : {}
   }
-
-  // A 5xx, a 401 or an unreadable body are all "the control plane did not
-  // decide", never a decision about this computer. A 402 would be a decision,
-  // but neither route answers it here, so it falls through as unknown too.
-  private async ask(path: string): Promise<Record<string, unknown> | undefined> {
-    try {
-      const response = await this.http(`${this.endpoint}${path}`, {
-        method: "GET",
-        headers: {
-          authorization: `Bearer ${this.token}`,
-          ...(this.profile === undefined ? {} : { "x-omnia-profile": this.profile }),
-        },
-        signal: AbortSignal.timeout(this.timeoutMs),
-      })
-      // A 402 is a decision and a 401 means the credential is no longer valid;
-      // neither is "the count is unknown", and collapsing them into undefined is
-      // what let a revoked token bypass the allowance.
-      if (response.status === 401 || response.status === 403) return { revoked: true }
-      if (!response.ok) return undefined
-      const payload: unknown = await response.json().catch(() => undefined)
-      return isRecord(payload) ? payload : undefined
-    } catch {
-      return undefined
-    }
-  }
-}
-
-function stripEndpoint(options: RemoteEntitlementEnvOptions): Omit<RemoteEntitlementOptions, "endpoint"> {
-  const { endpoint: _endpoint, env: _env, ...rest } = options
-  return rest
-}
-
-function isProfileId(value: string | undefined): value is string {
-  return value !== undefined && /^[0-9]{1,32}$/.test(value)
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
