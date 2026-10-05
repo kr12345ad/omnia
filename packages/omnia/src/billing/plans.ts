@@ -19,6 +19,19 @@ export type PlanId = "free" | "pro" | "business" | "enterprise"
 
 export type Metered = "hard" | "soft"
 
+/**
+ * What a `limit` is denominated in.
+ *
+ * `month` is the billing period. `day` is a calendar-day budget that resets at
+ * 00:00 UTC. There is no default and no inference: every rule in the matrix
+ * names one, because the counter key is derived from it.
+ *
+ * This is part of the rule rather than a comment beside it because the counter
+ * key is derived from it: a capability whose period was only implied in a comment
+ * was metered monthly while the product described it as a daily budget.
+ */
+export type MeteringPeriod = "day" | "month"
+
 export type Capability =
   | "local_computer"
   | "remote_computer"
@@ -42,8 +55,10 @@ export type Capability =
 export interface CapabilityRule {
   /** `hard` means the request is refused once the limit is spent. */
   readonly metering: Metered
-  /** Requests allowed per billing period. Infinity for "fair use". */
+  /** Requests allowed per `period`. Infinity for "fair use". */
   readonly limit: number
+  /** Which counter this allowance is drawn from. Never inferred. */
+  readonly period: MeteringPeriod
   /** Wall-clock ceiling for one uninterrupted session, in minutes. */
   readonly sessionMinutes?: number
 }
@@ -55,10 +70,16 @@ export interface Plan {
   readonly capabilities: Readonly<Record<Capability, CapabilityRule>>
 }
 
-const UNLIMITED: CapabilityRule = { metering: "soft", limit: Number.POSITIVE_INFINITY }
-const HARD = (limit: number): CapabilityRule => ({ metering: "hard", limit })
-const SOFT = (limit: number): CapabilityRule => ({ metering: "soft", limit })
-const NEVER: CapabilityRule = { metering: "hard", limit: 0 }
+const UNLIMITED: CapabilityRule = { metering: "soft", limit: Number.POSITIVE_INFINITY, period: "month" }
+// The period is a REQUIRED argument, not a default. A default is an implicit
+// period wearing a type signature: it is how `browser_automation` ended up
+// metered on a monthly counter while every human-readable description of it said
+// "250 a day". Every allowance in the matrix now names its own period at the line
+// that writes it, so the matrix can be read as data and a new capability cannot
+// be added without deciding what its budget resets on.
+const HARD = (limit: number, period: MeteringPeriod): CapabilityRule => ({ metering: "hard", limit, period })
+const SOFT = (limit: number, period: MeteringPeriod): CapabilityRule => ({ metering: "soft", limit, period })
+const NEVER: CapabilityRule = { metering: "hard", limit: 0, period: "month" }
 
 /**
  * Business is pro with its ceilings lifted, plus the two controls that only make
@@ -92,6 +113,11 @@ const BUSINESS: Readonly<Record<Capability, CapabilityRule>> = {
  * includes remote control because that is what makes someone convert, and it is
  * bounded by the two limits people cannot script around cheaply - a two hour
  * session ceiling and 250 browser actions a day.
+ *
+ * Both of those bounds are stated as data. `sessionMinutes` is enforced against
+ * the live session's own clock (see remote/entitlement.ts) and `browser_automation`
+ * declares `period: "day"`, so the daily budget is metered on a daily counter
+ * rather than described as one.
  */
 export const PLANS: Readonly<Record<PlanId, Plan>> = {
   free: {
@@ -99,25 +125,32 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
     monthlyUsd: 0,
     computers: 3,
     capabilities: {
-      local_computer: { metering: "soft", limit: Number.POSITIVE_INFINITY },
+      local_computer: { metering: "soft", limit: Number.POSITIVE_INFINITY, period: "month" },
       // Included on free, but the session ceiling and the daily action budget
       // are what keep it a trial rather than a free hosted bot platform.
-      remote_computer: { metering: "soft", limit: Number.POSITIVE_INFINITY, sessionMinutes: 120 },
+      remote_computer: { metering: "soft", limit: Number.POSITIVE_INFINITY, period: "month", sessionMinutes: 120 },
       input_freeze: NEVER,
       remote_shell: NEVER,
       clipboard: NEVER,
-      browser_automation: HARD(250),
-      credential_vault: SOFT(1),
+      // The one daily allowance in the matrix, and deliberately so. A 250/month
+      // budget was sold as 250/day, and one busy afternoon could otherwise spend
+      // a month of it and leave the account dead until the first of the month -
+      // which is the opposite of what a free tier is for. Resetting at 00:00 UTC
+      // keeps the ceiling real (a scripted bot still stops at 250 today) while
+      // making the punishment for a busy day a day's wait rather than a month's.
+      browser_automation: HARD(250, "day"),
+      credential_vault: SOFT(1, "month"),
       // The vault itself is visible on free so the feature is discoverable, but
       // actually logging in is what gets metered, and hard: this is the
-      // bot-as-a-service primitive.
-      vault_login: HARD(3),
+      // bot-as-a-service primitive. Genuinely monthly - three logins is three for
+      // the billing period, not three a day.
+      vault_login: HARD(3, "month"),
       cloud_vision: NEVER,
       scheduled_runs: NEVER,
-      live_view: SOFT(20),
+      live_view: SOFT(20, "month"),
       api_access: NEVER,
       webhooks: NEVER,
-      subagents: SOFT(2),
+      subagents: SOFT(2, "month"),
       audit_export: NEVER,
       rbac: NEVER,
       sso: NEVER,
@@ -131,18 +164,18 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
     capabilities: {
       local_computer: UNLIMITED,
       remote_computer: UNLIMITED,
-      input_freeze: SOFT(Number.POSITIVE_INFINITY),
-      remote_shell: SOFT(Number.POSITIVE_INFINITY),
-      clipboard: SOFT(Number.POSITIVE_INFINITY),
-      browser_automation: SOFT(2_000),
+      input_freeze: SOFT(Number.POSITIVE_INFINITY, "month"),
+      remote_shell: SOFT(Number.POSITIVE_INFINITY, "month"),
+      clipboard: SOFT(Number.POSITIVE_INFINITY, "month"),
+      browser_automation: SOFT(2_000, "month"),
       credential_vault: UNLIMITED,
-      vault_login: SOFT(300),
-      cloud_vision: SOFT(2_000),
-      scheduled_runs: SOFT(50),
-      live_view: SOFT(500),
+      vault_login: SOFT(300, "month"),
+      cloud_vision: SOFT(2_000, "month"),
+      scheduled_runs: SOFT(50, "month"),
+      live_view: SOFT(500, "month"),
       api_access: UNLIMITED,
       webhooks: UNLIMITED,
-      subagents: SOFT(10),
+      subagents: SOFT(10, "month"),
       audit_export: NEVER,
       rbac: NEVER,
       sso: NEVER,
@@ -166,11 +199,32 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
   },
 }
 
-// Ordered so an unknown or future plan id can never widen access.
-const PLAN_ORDER: readonly PlanId[] = ["free", "pro", "business", "enterprise"]
+/**
+ * How generous a plan is: its rank on the shipped ladder, free at 0.
+ *
+ * This is deliberately NOT the price. Ranking by `monthlyUsd` made a pricing
+ * decision into an entitlement decision, and it resolved the wrong way twice
+ * over: enterprise is priced at 0 because it is sold by hand, so an enterprise
+ * subscriber sharing a profile with a pro one resolved to PRO, and any future
+ * discount on business would have resolved a business subscriber to pro.
+ *
+ * It is also deliberately a `Record` and not a list. Every shipped plan is
+ * ranked by name, so the ladder is a total order the typechecker enforces:
+ * adding a plan without ranking it here fails the build instead of yielding a
+ * silent -1 that loses every comparison against the free fallback. "The most
+ * generous live subscription wins" is then order-independent - a max over a
+ * total order - so neither a price nor the order the events arrived in can move
+ * a customer between plans.
+ */
+const PLAN_TIER: Readonly<Record<PlanId, number>> = { free: 0, pro: 1, business: 2, enterprise: 3 }
 
+export function planTier(plan: Plan): number {
+  return PLAN_TIER[plan.id]
+}
+
+/** Own-property check, so an inherited name like "constructor" is not a plan. */
 export function isPlanId(value: unknown): value is PlanId {
-  return typeof value === "string" && (PLAN_ORDER as readonly string[]).includes(value)
+  return typeof value === "string" && Object.hasOwn(PLAN_TIER, value)
 }
 
 export function planFor(value: unknown): Plan {

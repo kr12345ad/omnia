@@ -26,7 +26,7 @@ import {
 } from "node:fs"
 import { dirname, join } from "node:path"
 import { randomBytes } from "node:crypto"
-import { PLANS, planFor, failsClosed, type Capability, type Plan, type PlanId } from "./plans.js"
+import { PLANS, planFor, planTier, failsClosed, type Capability, type MeteringPeriod, type Plan, type PlanId } from "./plans.js"
 import { entitles, type StripeSubscription, type SubscriptionStatus } from "./stripe.js"
 
 export interface SubscriptionRecord {
@@ -38,11 +38,24 @@ export interface SubscriptionRecord {
   readonly currentPeriodEnd: number
 }
 
+/**
+ * A profile's usage.
+ *
+ * Request counters only. The free plan's two hour session ceiling is deliberately
+ * NOT persisted here: it is enforced in remote/entitlement.ts from the wall clock
+ * of the one live session (startedAt vs now), which needs no durable counter and
+ * cannot be un-spent by editing a file. A `sessionSeconds` map used to sit here,
+ * read by nothing and written by nothing, which read as enforcement that did not
+ * exist - and a second mechanism would have been worse than none, because two
+ * disagreeing answers to "is this session over" is how a ceiling gets bypassed.
+ */
 export interface UsageRecord {
-  /** Requests consumed per capability, keyed `capability:YYYY-MM`. */
+  /**
+   * Requests consumed per capability, keyed `capability:YYYY-MM` for a monthly
+   * allowance and `capability:YYYY-MM-DD` for a daily one, per the rule's own
+   * `period`.
+   */
   readonly counters: Readonly<Record<string, number>>
-  /** Consecutive seconds of the longest session seen today, per capability. */
-  readonly sessionSeconds: Readonly<Record<string, number>>
   readonly updatedAt: number
 }
 
@@ -55,7 +68,41 @@ export interface BillingState {
 
 export const EMPTY_STATE: BillingState = { subscriptions: [], usage: {}, processedEvents: [] }
 
+/**
+ * Stripe event ids remembered as already folded, newest kept.
+ *
+ * A captured (body, signature) pair is only replayable inside
+ * SIGNATURE_TOLERANCE_SECONDS - 300s - so this set only has to outlive that
+ * window; everything beyond it is kept out of caution, not because it is
+ * reachable. Evicting an id needs 1000 NEW events folded into this same file
+ * inside that same 300s, which is 3.3 events per second sustained on one billing
+ * file, and each of them must carry a valid Stripe signature. That is not
+ * something a replaying caller can arrange - only a deployment already folding
+ * faster than Stripe emits events ever gets there - so the count stands rather
+ * than being widened: every extra id is up to 255 bytes rewritten on every
+ * single event, and a bigger number would not move a threshold nothing reaches.
+ *
+ * The 300s tolerance is NOT what stops Stripe's own redeliveries. Those arrive
+ * hours apart and are signed with a fresh timestamp on each attempt, so they
+ * verify and are stopped by this set instead - which is why it is a ring buffer
+ * of ids rather than a timestamp comparison.
+ */
 const MAX_PROCESSED_EVENTS = 1000
+
+/**
+ * Subscription records per file. A parse-bomb guard on a file we did not write,
+ * not a business limit.
+ *
+ * Which end each path trims from is deliberate and is NOT symmetric:
+ *
+ *   - Folding keeps the NEWEST. applySubscription appends the record it is
+ *     folding, so trimming from the front (as this did) discarded the very event
+ *     being applied whenever the cap bit, and a paid upgrade silently did not
+ *     land. That was the bug worth fixing here.
+ *   - Reading keeps the OLDEST, because the parse stops at the cap and the file
+ *     is read in order. A file over the cap can therefore only reach that shape
+ *     by hand, and it is self-healing: the next fold trims to the newest end.
+ */
 const MAX_SUBSCRIPTIONS = 5000
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -91,12 +138,31 @@ export function billingStateReadable(file: string | undefined): boolean {
   }
 }
 
-export function currentPeriod(now: number = Date.now()): string {
-  return new Date(now).toISOString().slice(0, 7)
+/**
+ * The UTC calendar day a daily allowance resets on, `YYYY-MM-DD`.
+ *
+ * UTC on purpose, and the same clock as `currentPeriod`: a day that rolled over
+ * on local time would let somebody move their budget window by changing timezone,
+ * and it would put the daily and monthly keys on different calendars.
+ */
+export function currentDay(now: number = Date.now()): string {
+  return new Date(now).toISOString().slice(0, 10)
 }
 
-function counterKey(capability: Capability, period: string): string {
-  return `${capability}:${period}`
+/** The billing month an allowance resets on, `YYYY-MM`. */
+export function currentPeriod(now: number = Date.now()): string {
+  return currentDay(now).slice(0, 7)
+}
+
+/**
+ * The counter a capability is drawn from, which follows the rule's own period.
+ *
+ * The two shapes cannot collide: `capability:2026-01` (monthly) and
+ * `capability:2026-01-15` (daily) are distinct keys, so switching a capability
+ * between periods cannot read the other period's spend as this one's.
+ */
+function counterKey(capability: Capability, period: MeteringPeriod, now: number): string {
+  return `${capability}:${period === "day" ? currentDay(now) : currentPeriod(now)}`
 }
 
 /**
@@ -158,17 +224,10 @@ export function readBillingState(file: string | undefined, now: number = Date.no
           counters[key] = boundedCount(count)
         }
       }
-      const sessionSeconds: Record<string, number> = {}
-      if (isRecord(value.sessionSeconds)) {
-        for (const [key, seconds] of Object.entries(value.sessionSeconds)) {
-          if (key.length > 128) continue
-          sessionSeconds[key] = Math.min(boundedCount(seconds), 7 * 24 * 3600)
-        }
-      }
       // A crafted state file must not be able to reach Object.prototype through
       // a profile id, or decide() would read inherited counters.
       if (profileId === "__proto__" || profileId === "constructor" || profileId === "prototype") continue
-      usage[profileId] = { counters, sessionSeconds, updatedAt: boundedCount(value.updatedAt) }
+      usage[profileId] = { counters, updatedAt: boundedCount(value.updatedAt) }
     }
   }
   const processedEvents = Array.isArray(parsed.processedEvents)
@@ -240,8 +299,11 @@ export interface Decision {
 
 export function resolvePlan(state: BillingState, profileId: string | undefined, now: number = Date.now()): Plan {
   if (profileId === undefined) return PLANS.free
-  // The most generous live subscription wins, so two subscriptions on one
-  // profile cannot downgrade each other by expiring.
+  // The most generous live subscription wins, so two subscriptions on one profile
+  // cannot downgrade each other by expiring. "Most generous" is the plan's tier
+  // (plans.ts planTier), never its price and never the order the events arrived
+  // in: this is a max over a total order, so folding the same subscriptions in
+  // either order resolves to the same plan.
   let best = PLANS.free
   for (const subscription of state.subscriptions) {
     if (subscription.profileId !== profileId) continue
@@ -250,13 +312,9 @@ export function resolvePlan(state: BillingState, profileId: string | undefined, 
     // entitle. Only a real future timestamp counts.
     if (!Number.isFinite(subscription.currentPeriodEnd) || subscription.currentPeriodEnd <= now) continue
     const candidate = planFor(subscription.plan)
-    if (candidate.monthlyUsd >= best.monthlyUsd || rank(candidate) > rank(best)) best = candidate
+    if (planTier(candidate) > planTier(best)) best = candidate
   }
   return best
-}
-
-function rank(plan: Plan): number {
-  return plan.monthlyUsd === 0 ? (plan.id === "free" ? 0 : 3) : plan.monthlyUsd
 }
 
 /**
@@ -290,9 +348,11 @@ export function decide(
   const storeReadable = options.storeReadable ?? true
   const plan = resolvePlan(state, profileId, now)
   const rule = plan.capabilities[capability]
-  const period = currentPeriod(now)
   const record = usageFor(state, profileId)
-  const used = record === undefined ? 0 : (record.counters[counterKey(capability, period)] ?? 0)
+  const used = record === undefined ? 0 : (record.counters[counterKey(capability, rule.period, now)] ?? 0)
+  // The refusal has to say which budget is spent, because on a daily rule it
+  // comes back at midnight UTC and on a monthly one at the end of the period.
+  const when = rule.period === "day" ? " today" : ""
 
   if (rule.limit === 0) {
     return {
@@ -329,8 +389,8 @@ export function decide(
       limit: rule.limit,
       metering: rule.metering,
       reason: allowed
-        ? `${capability} is past its fair-use allowance (${used}/${rule.limit}); it still works on ${plan.id}.`
-        : `${capability} has used its ${plan.id} allowance (${used}/${rule.limit}).`,
+        ? `${capability} is past its fair-use allowance${when} (${used}/${rule.limit}); it still works on ${plan.id}.`
+        : `${capability} has used its ${plan.id} allowance${when} (${used}/${rule.limit}).`,
     }
   }
   return {
@@ -354,17 +414,35 @@ export function consume(
 ): BillingState {
   if (profileId === undefined) return state
   const now = options.now ?? Date.now()
-  const period = currentPeriod(now)
-  const key = counterKey(capability, period)
+  // Metered from the rule the plan actually has, so a spend is always recorded
+  // against the counter the next decide() will read it from.
+  const rule = resolvePlan(state, profileId, now).capabilities[capability]
+  const key = counterKey(capability, rule.period, now)
   const previous = usageFor(state, profileId)
-  const counters = { ...(previous?.counters ?? {}) }
+  const counters = Object.fromEntries(
+    Object.entries(previous?.counters ?? {}).filter(([existing]) => !isElapsed(existing, capability, key)),
+  )
   counters[key] = (counters[key] ?? 0) + 1
   if (profileId === "__proto__" || profileId === "constructor" || profileId === "prototype") return state
   const usage = {
     ...state.usage,
-    [profileId]: { counters, sessionSeconds: previous?.sessionSeconds ?? {}, updatedAt: now },
+    [profileId]: { counters, updatedAt: now },
   }
   return { ...state, usage }
+}
+
+/**
+ * True for a counter of `capability` from a period that has already ended.
+ *
+ * Period suffixes sort lexicographically within a shape, so a string compare is a
+ * period compare (`browser_automation:2026-01` ends before
+ * `browser_automation:2026-01-15`). Dropping elapsed keys matters more now that a
+ * daily rule exists: the daily budget would otherwise leave one dead key per day
+ * in the state file forever, and the first daily spend after the counter period
+ * change is what clears the old monthly browser key.
+ */
+function isElapsed(key: string, capability: Capability, current: string): boolean {
+  return key.startsWith(`${capability}:`) && key < current
 }
 
 /** Folds a subscription in, ignoring an event id that was already applied. */
@@ -392,7 +470,9 @@ export function applySubscription(
   }
   const processedEvents = [...state.processedEvents, eventId].slice(-MAX_PROCESSED_EVENTS)
   return {
-    state: { ...state, subscriptions: [...others, next].slice(0, MAX_SUBSCRIPTIONS), processedEvents },
+    // Trimmed from the tail so the record being folded survives the cap; see
+    // MAX_SUBSCRIPTIONS.
+    state: { ...state, subscriptions: [...others, next].slice(-MAX_SUBSCRIPTIONS), processedEvents },
     changed: true,
     duplicate: false,
   }
