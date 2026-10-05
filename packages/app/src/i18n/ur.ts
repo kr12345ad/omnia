@@ -99,6 +99,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "فائل چنندہ میں کوئی فائل منتخب نہیں کی گئی",
   "desktop.picker.error.sizeLimit": "منتخب منسلکات {{limit}} MB کی حد سے زیادہ ہیں",
 
+  "desktop.menu.account": "اکاؤنٹ",
+  "desktop.menu.plan": "پلان: {{plan}}",
+  "desktop.menu.upgradePro": "Pro میں اپ گریڈ کریں",
+  "desktop.menu.upgradeBusiness": "Business میں اپ گریڈ کریں",
+  "desktop.menu.manageBilling": "بلنگ مینیج کریں",
+
+  "desktop.billing.title": "بلنگ",
+  "desktop.billing.notConfigured": "اس سرور پر بلنگ ترتیب نہیں دی گئی ہے۔",
+  "desktop.billing.signedOut": "اپنا پلان دیکھنے اور اپ گریڈ کرنے کے لیے Omnia میں سائن اِن کریں۔",
+  "desktop.billing.unreachable": "Omnia آپ کا پلان دیکھنے کے لیے سرور تک نہیں پہنچ سکا۔",
+
   "command.category.suggested": "تجویز کردہ",
   "command.category.view": "دیکھیں",
   "command.category.project": "پروجیکٹ",

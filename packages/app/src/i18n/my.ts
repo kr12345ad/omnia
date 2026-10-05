@@ -93,6 +93,15 @@ export const dict = {
   "desktop.wsl.error.failedPort": "ဆိပ်ကမ်းကို ရယူရန် မအောင်မြင်ပါ။",
   "desktop.picker.error.notSelected": "ဖိုင်ကို ရွေးချယ်သူမှ ရွေးချယ်မထားပါ။",
   "desktop.picker.error.sizeLimit": "ရွေးချယ်ထားသော ပူးတွဲပါဖိုင်များသည် {{limit}} MB ကန့်သတ်ချက်ထက် ကျော်လွန်ပါသည်။",
+  "desktop.menu.account": "Account", // TODO(i18n): needs a native review
+  "desktop.menu.plan": "Plan: {{plan}}", // TODO(i18n): needs a native review
+  "desktop.menu.upgradePro": "Upgrade to Pro", // TODO(i18n): needs a native review
+  "desktop.menu.upgradeBusiness": "Upgrade to Business", // TODO(i18n): needs a native review
+  "desktop.menu.manageBilling": "Manage Billing", // TODO(i18n): needs a native review
+  "desktop.billing.title": "Billing", // TODO(i18n): needs a native review
+  "desktop.billing.notConfigured": "Billing is not configured on this server.", // TODO(i18n): needs a native review
+  "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.", // TODO(i18n): needs a native review
+  "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.", // TODO(i18n): needs a native review
   "command.category.suggested": "အကြံပြုထားသည်။",
   "command.category.view": "ကြည့်ရန်",
   "command.category.project": "ပရောဂျက်",

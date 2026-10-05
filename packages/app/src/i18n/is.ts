@@ -91,6 +91,15 @@ const desktop = [
   "Ekki tókst að sækja gátt",
   "Skráin var ekki valin í skráavalinu",
   "Valin viðhengi fara yfir {{limit}} MB hámarkið",
+  "Account", // TODO(i18n): needs a native review
+  "Áskrift: {{plan}}",
+  "Uppfæra á Pro",
+  "Uppfæra á Business",
+  "Manage Billing", // TODO(i18n): needs a native review
+  "Billing", // TODO(i18n): needs a native review
+  "Billing is not configured on this server.", // TODO(i18n): needs a native review
+  "Skráðu þig inn á Omnia til að sjá áskrift þína og uppfæra.",
+  "Omnia náði ekki í netþjóninn til að athuga áskrift þína.",
 ]
 
 export const dict = {

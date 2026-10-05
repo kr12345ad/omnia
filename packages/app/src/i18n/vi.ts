@@ -98,6 +98,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "Không có tệp nào được chọn trong bộ chọn tệp",
   "desktop.picker.error.sizeLimit": "Các tệp đính kèm đã chọn vượt quá giới hạn {{limit}} MB",
 
+  "desktop.menu.account": "Tài khoản",
+  "desktop.menu.plan": "Gói: {{plan}}",
+  "desktop.menu.upgradePro": "Nâng cấp lên Pro",
+  "desktop.menu.upgradeBusiness": "Nâng cấp lên Business",
+  "desktop.menu.manageBilling": "Quản lý thanh toán",
+
+  "desktop.billing.title": "Thanh toán",
+  "desktop.billing.notConfigured": "Thanh toán chưa được cấu hình trên máy chủ này.",
+  "desktop.billing.signedOut": "Đăng nhập vào Omnia để xem gói của bạn và nâng cấp.",
+  "desktop.billing.unreachable": "Omnia không thể kết nối với máy chủ để kiểm tra gói của bạn.",
+
   "command.category.suggested": "Đề xuất",
   "command.category.view": "Xem",
   "command.category.project": "Dự án",

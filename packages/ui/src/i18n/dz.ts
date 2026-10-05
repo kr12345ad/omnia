@@ -196,4 +196,22 @@ export const dict: Record<string, string> = {
   "ui.question.multiHint": "འཇུག་སྤྱོད་འབད་མི་ལན་ཚུ་ཆ་མཉམ་སེལ་འཐུ་འབད།",
   "ui.question.singleHint": "ལན་གཅིག་སེལ་འཐུ་འབད།",
   "ui.question.custom.placeholder": "ཁྱོད་རའི་ལན་ཡིག་དཔར་རྐྱབས།",
+
+  "ui.paywall.capability.remoteShell": "Remote shell", // TODO(i18n): needs a native review
+  "ui.paywall.capability.clipboard": "Clipboard sync", // TODO(i18n): needs a native review
+  "ui.paywall.capability.credentialVault": "Credential vault", // TODO(i18n): needs a native review
+  "ui.paywall.capability.vaultLogin": "Vault sign-ins", // TODO(i18n): needs a native review
+  "ui.paywall.capability.cloudVision": "Cloud Vision", // TODO(i18n): needs a native review
+  "ui.paywall.capability.scheduledRuns": "Unattended runs", // TODO(i18n): needs a native review
+
+  "ui.paywall.fairUse.title": "{{capability}} is past its fair-use allowance", // TODO(i18n): needs a native review
+  "ui.paywall.fairUse.description": "It still works. Upgrading raises the allowance.", // TODO(i18n): needs a native review
+  "ui.paywall.usedUp.title": "The {{capability}} allowance is used up", // TODO(i18n): needs a native review
+  "ui.paywall.usedUp.description": "Upgrading raises the allowance straight away.", // TODO(i18n): needs a native review
+  "ui.paywall.locked.title": "{{capability}} is not included in your plan", // TODO(i18n): needs a native review
+  "ui.paywall.locked.description": "Upgrading to {{plan}} adds {{capability}}.", // TODO(i18n): needs a native review
+  "ui.paywall.locked.description.generic": "A paid plan adds {{capability}}.", // TODO(i18n): needs a native review
+  "ui.paywall.usage": "{{used}} of {{limit}} used this period", // TODO(i18n): needs a native review
+  "ui.paywall.upgrade": "Upgrade", // TODO(i18n): needs a native review
+  "ui.paywall.dismiss": "Dismiss", // TODO(i18n): needs a native review
 }

@@ -1173,4 +1173,15 @@ export const dict = {
   "desktop.wsl.error.failedPort": "Impossibile ottenere la porta",
   "desktop.picker.error.notSelected": "Il file non è stato selezionato nella finestra di selezione",
   "desktop.picker.error.sizeLimit": "Gli allegati selezionati superano il limite di {{limit}} MB",
+
+  "desktop.menu.account": "Account",
+  "desktop.menu.plan": "Piano: {{plan}}",
+  "desktop.menu.upgradePro": "Passa a Pro",
+  "desktop.menu.upgradeBusiness": "Passa a Business",
+  "desktop.menu.manageBilling": "Gestisci fatturazione",
+
+  "desktop.billing.title": "Fatturazione",
+  "desktop.billing.notConfigured": "La fatturazione non è configurata su questo server.",
+  "desktop.billing.signedOut": "Accedi a Omnia per vedere il tuo piano e effettuare l'upgrade.",
+  "desktop.billing.unreachable": "Omnia non è riuscito a raggiungere il server per controllare il tuo piano.",
 }

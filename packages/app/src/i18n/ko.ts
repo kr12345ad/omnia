@@ -1164,4 +1164,15 @@ export const dict = {
 
   "desktop.picker.error.notSelected": "선택기에서 파일을 선택하지 않았습니다",
   "desktop.picker.error.sizeLimit": "선택한 첨부 파일이 {{limit}} MB 제한을 초과합니다",
+
+  "desktop.menu.account": "계정",
+  "desktop.menu.plan": "요금제: {{plan}}",
+  "desktop.menu.upgradePro": "Pro로 업그레이드",
+  "desktop.menu.upgradeBusiness": "Business로 업그레이드",
+  "desktop.menu.manageBilling": "결제 관리",
+
+  "desktop.billing.title": "결제",
+  "desktop.billing.notConfigured": "이 서버에서는 결제가 구성되어 있지 않습니다.",
+  "desktop.billing.signedOut": "요금제를 확인하고 업그레이드하려면 Omnia에 로그인하세요.",
+  "desktop.billing.unreachable": "Omnia가 서버에 연결하지 못해 요금제를 확인할 수 없습니다.",
 }

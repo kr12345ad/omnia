@@ -98,6 +98,16 @@ export const dict = {
 
   "desktop.picker.error.notSelected": "Засіб вибору не повернув вибраний файл",
   "desktop.picker.error.sizeLimit": "Вибрані вкладення перевищують обмеження в {{limit}} МБ",
+  "desktop.menu.account": "Обліковий запис",
+  "desktop.menu.plan": "Тариф: {{plan}}",
+  "desktop.menu.upgradePro": "Перейти на Pro",
+  "desktop.menu.upgradeBusiness": "Перейти на Business",
+  "desktop.menu.manageBilling": "Керувати оплатою",
+
+  "desktop.billing.title": "Оплата",
+  "desktop.billing.notConfigured": "Оплату не налаштовано на цьому сервері.",
+  "desktop.billing.signedOut": "Увійдіть до Omnia, щоб побачити свій тариф і перейти на вищий.",
+  "desktop.billing.unreachable": "Omnia не зміг звернутися до сервера, щоб перевірити ваш тариф.",
 
   "command.category.suggested": "Рекомендовані",
   "command.category.view": "Вигляд",

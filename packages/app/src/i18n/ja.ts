@@ -97,6 +97,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "ピッカーでファイルが選択されませんでした",
   "desktop.picker.error.sizeLimit": "選択した添付ファイルが上限の{{limit}} MBを超えています",
 
+  "desktop.menu.account": "アカウント",
+  "desktop.menu.plan": "プラン: {{plan}}",
+  "desktop.menu.upgradePro": "Pro にアップグレード",
+  "desktop.menu.upgradeBusiness": "Business にアップグレード",
+  "desktop.menu.manageBilling": "請求を管理",
+
+  "desktop.billing.title": "請求",
+  "desktop.billing.notConfigured": "このサーバーでは請求が設定されていません。",
+  "desktop.billing.signedOut": "プランの確認やアップグレードには、Omnia にサインインしてください。",
+  "desktop.billing.unreachable": "プランを確認するため、Omnia はサーバーに接続できませんでした。",
+
   "command.category.suggested": "おすすめ",
   "command.category.view": "表示",
   "command.category.project": "プロジェクト",

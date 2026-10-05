@@ -98,6 +98,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "В средстве выбора не выбран файл",
   "desktop.picker.error.sizeLimit": "Размер выбранных вложений превышает лимит {{limit}} МБ",
 
+  "desktop.menu.account": "Аккаунт",
+  "desktop.menu.plan": "Тариф: {{plan}}",
+  "desktop.menu.upgradePro": "Перейти на Pro",
+  "desktop.menu.upgradeBusiness": "Перейти на Business",
+  "desktop.menu.manageBilling": "Управление оплатой",
+
+  "desktop.billing.title": "Оплата",
+  "desktop.billing.notConfigured": "Оплата не настроена на этом сервере.",
+  "desktop.billing.signedOut": "Войдите в Omnia, чтобы увидеть свой тариф и перейти на другой план.",
+  "desktop.billing.unreachable": "Omnia не удалось связаться с сервером, чтобы проверить ваш тариф.",
+
   "command.category.suggested": "Предложено",
   "command.category.view": "Просмотр",
   "command.category.project": "Проект",

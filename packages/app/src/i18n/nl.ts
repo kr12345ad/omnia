@@ -91,6 +91,17 @@ export const dict = {
   "desktop.wsl.error.failedPort": "Kan poort niet ophalen",
   "desktop.picker.error.notSelected": "Er is geen bestand geselecteerd in de bestandskiezer",
   "desktop.picker.error.sizeLimit": "De geselecteerde bijlagen overschrijden de limiet van {{limit}} MB",
+
+  "desktop.menu.account": "Account",
+  "desktop.menu.plan": "Abonnement: {{plan}}",
+  "desktop.menu.upgradePro": "Upgraden naar Pro",
+  "desktop.menu.upgradeBusiness": "Upgraden naar Business",
+  "desktop.menu.manageBilling": "Facturering beheren",
+
+  "desktop.billing.title": "Facturering",
+  "desktop.billing.notConfigured": "Facturering is niet geconfigureerd op deze server.",
+  "desktop.billing.signedOut": "Meld je aan bij Omnia om je abonnement te zien en te upgraden.",
+  "desktop.billing.unreachable": "Omnia kon de server niet bereiken om je abonnement te controleren.",
   "command.category.suggested": "Voorgesteld",
   "command.category.view": "Weergave",
   "command.category.project": "Project",

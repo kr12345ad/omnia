@@ -91,6 +91,15 @@ export const dict = {
   "desktop.wsl.error.failedPort": "បរាជ័យក្នុងការទទួលបានច្រក",
   "desktop.picker.error.notSelected": "ឯកសារមិនត្រូវបានជ្រើសរើសដោយអ្នកជ្រើសរើសទេ។",
   "desktop.picker.error.sizeLimit": "ឯកសារភ្ជាប់ដែលបានជ្រើសរើសលើសពីដែនកំណត់ {{limit}} MB",
+  "desktop.menu.account": "Account", // TODO(i18n): needs a native review
+  "desktop.menu.plan": "Plan: {{plan}}", // TODO(i18n): needs a native review
+  "desktop.menu.upgradePro": "Upgrade to Pro", // TODO(i18n): needs a native review
+  "desktop.menu.upgradeBusiness": "Upgrade to Business", // TODO(i18n): needs a native review
+  "desktop.menu.manageBilling": "Manage Billing", // TODO(i18n): needs a native review
+  "desktop.billing.title": "Billing", // TODO(i18n): needs a native review
+  "desktop.billing.notConfigured": "Billing is not configured on this server.", // TODO(i18n): needs a native review
+  "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.", // TODO(i18n): needs a native review
+  "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.", // TODO(i18n): needs a native review
   "command.category.suggested": "បានស្នើ",
   "command.category.view": "មើល",
   "command.category.project": "គម្រោង",

@@ -92,6 +92,17 @@ export const dict = {
   "desktop.wsl.error.failedPort": "Не успеа да се добие порта",
   "desktop.picker.error.notSelected": "Датотеката не беше избрана од избирачот",
   "desktop.picker.error.sizeLimit": "Избраните прилози ја надминуваат границата {{limit}} MB",
+
+  "desktop.menu.account": "Натчина",
+  "desktop.menu.plan": "План: {{plan}}",
+  "desktop.menu.upgradePro": "Надгради на Pro",
+  "desktop.menu.upgradeBusiness": "Надгради на Business",
+  "desktop.menu.manageBilling": "Управувај со фактурирањето",
+
+  "desktop.billing.title": "Фактурирање",
+  "desktop.billing.notConfigured": "Фактурирањето не е конфигурирано на овој сервер.",
+  "desktop.billing.signedOut": "Најавите се во Omnia за да го видите вашиот план и да го надградите.",
+  "desktop.billing.unreachable": "Omnia не можа да го достигне серверот за да го провери вашиот план.",
   "command.category.suggested": "Предложено",
   "command.category.view": "Прикажи",
   "command.category.project": "Проект",

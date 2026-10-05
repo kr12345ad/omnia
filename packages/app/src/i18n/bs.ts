@@ -99,6 +99,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "Datoteka nije odabrana u izborniku",
   "desktop.picker.error.sizeLimit": "Odabrani prilozi premašuju ograničenje od {{limit}} MB",
 
+  "desktop.menu.account": "Nalog",
+  "desktop.menu.plan": "Plan: {{plan}}",
+  "desktop.menu.upgradePro": "Nadogradi na Pro",
+  "desktop.menu.upgradeBusiness": "Nadogradi na Business",
+  "desktop.menu.manageBilling": "Upravljaj naplatom",
+
+  "desktop.billing.title": "Naplata",
+  "desktop.billing.notConfigured": "Naplata nije konfigurirana na ovom serveru.",
+  "desktop.billing.signedOut": "Prijavi se u Omnia da vidiš svoj plan i nadogradiš se.",
+  "desktop.billing.unreachable": "Omnia nije mogao doći do servera da provjeri tvoj plan.",
+
   "command.category.suggested": "Predloženo",
   "command.category.view": "Prikaz",
   "command.category.project": "Projekat",

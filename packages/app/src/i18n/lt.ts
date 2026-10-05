@@ -91,6 +91,15 @@ const desktop = [
   "Nepavyko gauti prievado",
   "Failas nebuvo pasirinktas failų parinkiklyje",
   "Pasirinkti priedai viršija {{limit}} MB ribą",
+  "Paskyra",
+  "Planas: {{plan}}",
+  "Atnaujinti į Pro",
+  "Atnaujinti į Business",
+  "Valdyti sąskaitas",
+  "Sąskaitos",
+  "Sąskaitos nėra nustatytos šiame serveryje.",
+  "Prisijunkite prie „Omnia“, kad pamatytumėte savo planą ir galėtumėte atnaujinti.",
+  "„Omnia“ nepavyko pasiekti serverio, kad patikrintų jūsų planą.",
 ]
 
 export const dict = {

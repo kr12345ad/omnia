@@ -91,6 +91,15 @@ export const dict = {
   "desktop.wsl.error.failedPort": "ລົ້ມເຫລວໃນການເອົາພອດ",
   "desktop.picker.error.notSelected": "ໄຟລ໌ບໍ່ໄດ້ຖືກເລືອກໂດຍຕົວເລືອກ",
   "desktop.picker.error.sizeLimit": "ໄຟລ໌ແນບທີ່ເລືອກເກີນຂີດຈຳກັດ {{limit}} MB",
+  "desktop.menu.account": "Account", // TODO(i18n): needs a native review
+  "desktop.menu.plan": "Plan: {{plan}}", // TODO(i18n): needs a native review
+  "desktop.menu.upgradePro": "Upgrade to Pro", // TODO(i18n): needs a native review
+  "desktop.menu.upgradeBusiness": "Upgrade to Business", // TODO(i18n): needs a native review
+  "desktop.menu.manageBilling": "Manage Billing", // TODO(i18n): needs a native review
+  "desktop.billing.title": "Billing", // TODO(i18n): needs a native review
+  "desktop.billing.notConfigured": "Billing is not configured on this server.", // TODO(i18n): needs a native review
+  "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.", // TODO(i18n): needs a native review
+  "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.", // TODO(i18n): needs a native review
   "command.category.suggested": "ແນະນຳ",
   "command.category.view": "ເບິ່ງ",
   "command.category.project": "ໂຄງການ",

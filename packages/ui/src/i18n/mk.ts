@@ -194,4 +194,22 @@ export const dict = {
   "ui.question.multiHint": "Изберете ги сите одговори што важат",
   "ui.question.singleHint": "Изберете еден одговор",
   "ui.question.custom.placeholder": "Напишете го вашиот одговор...",
+
+  "ui.paywall.capability.remoteShell": "Далечинска школка",
+  "ui.paywall.capability.clipboard": "Синхронизација на табла со исечоци",
+  "ui.paywall.capability.credentialVault": "Трезор за податоци за најава",
+  "ui.paywall.capability.vaultLogin": "Најави во трезорот",
+  "ui.paywall.capability.cloudVision": "Cloud Vision",
+  "ui.paywall.capability.scheduledRuns": "Извршувања без надзор",
+
+  "ui.paywall.fairUse.title": "{{capability}} ја надмина квотата за праведна употреба",
+  "ui.paywall.fairUse.description": "Сè уште работи. Надградбата ја зголемува квотата.",
+  "ui.paywall.usedUp.title": "Квотата за {{capability}} е потрошена",
+  "ui.paywall.usedUp.description": "Надградбата веднаш ја зголемува квотата.",
+  "ui.paywall.locked.title": "Вашиот план не вклучува {{capability}}",
+  "ui.paywall.locked.description": "Надградбата на {{plan}} додава {{capability}}.",
+  "ui.paywall.locked.description.generic": "Платниот план додава {{capability}}.",
+  "ui.paywall.usage": "Користено {{used}} од {{limit}} во овој период",
+  "ui.paywall.upgrade": "Надгради",
+  "ui.paywall.dismiss": "Откажи",
 }

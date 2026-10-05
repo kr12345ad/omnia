@@ -91,6 +91,15 @@ const desktop = [
   "A port lekérése sikertelen",
   "A fájl nem lett kiválasztva a választóban",
   "A kiválasztott mellékletek meghaladják a(z) {{limit}} MB-os korlátot",
+  "Fiók",
+  "Csomag: {{plan}}",
+  "Frissítés a Pro csomagra",
+  "Frissítés a Business csomagra",
+  "Számlázás kezelése",
+  "Számlázás",
+  "A számlázás nincs beállítva ezen a kiszolgálón.",
+  "Jelentkezzen be az Omnia alkalmazásba, hogy lássa a csomagját és frissíthessen.",
+  "Az Omnia nem tudta elérni a kiszolgálót a csomag ellenőrzéséhez.",
 ]
 
 export const dict = {

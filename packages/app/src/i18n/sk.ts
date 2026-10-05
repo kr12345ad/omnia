@@ -91,6 +91,17 @@ export const dict = {
   "desktop.wsl.error.failedPort": "Nepodarilo sa získať port",
   "desktop.picker.error.notSelected": "Súbor nebol vybraný v dialógu",
   "desktop.picker.error.sizeLimit": "Vybrané prílohy presahujú limit {{limit}} MB",
+
+  "desktop.menu.account": "Konto",
+  "desktop.menu.plan": "Plán: {{plan}}",
+  "desktop.menu.upgradePro": "Upgrade na Pro",
+  "desktop.menu.upgradeBusiness": "Upgrade na Business",
+  "desktop.menu.manageBilling": "Spravovať fakturáciu",
+
+  "desktop.billing.title": "Fakturácia",
+  "desktop.billing.notConfigured": "Fakturácia nie je nakonfigurovaná na tomto serveri.",
+  "desktop.billing.signedOut": "Prihláste sa do Omnia, ak chcete vidieť svoj plán a upgradovať.",
+  "desktop.billing.unreachable": "Omnia sa nepodarilo pripojiť k serverom na kontrolu vášho plánu.",
   "command.category.suggested": "Navrhované",
   "command.category.view": "Zobrazenie",
   "command.category.project": "Projekt",

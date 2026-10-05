@@ -93,6 +93,15 @@ export const dict = {
   "desktop.wsl.error.failedPort": "Port olinmadi",
   "desktop.picker.error.notSelected": "Fayl tanlovchi tomonidan tanlanmagan",
   "desktop.picker.error.sizeLimit": "Tanlangan biriktirmalar {{limit}} MB chegarasidan oshib ketadi",
+  "desktop.menu.account": "Hisob",
+  "desktop.menu.plan": "Reja: {{plan}}",
+  "desktop.menu.upgradePro": "Pro ga o'tish",
+  "desktop.menu.upgradeBusiness": "Business ga o'tish",
+  "desktop.menu.manageBilling": "Hisob-kitobni boshqarish",
+  "desktop.billing.title": "Hisob-kitob",
+  "desktop.billing.notConfigured": "Bu serverda hisob-kitob sozlanmagan.",
+  "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.", // TODO(i18n): needs a native review
+  "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.", // TODO(i18n): needs a native review
   "command.category.suggested": "Tavsiya etilgan",
   "command.category.view": "Ko'rish",
   "command.category.project": "Loyiha",

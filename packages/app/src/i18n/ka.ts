@@ -91,6 +91,15 @@ export const dict = {
   "desktop.wsl.error.failedPort": "პორტის მიღება ვერ მოხერხდა",
   "desktop.picker.error.notSelected": "ფაილი არ იყო არჩეული ამომრჩევლის მიერ",
   "desktop.picker.error.sizeLimit": "არჩეული დანართები აღემატება {{limit}} MB ლიმიტს",
+  "desktop.menu.account": "Account", // TODO(i18n): needs a native review
+  "desktop.menu.plan": "Plan: {{plan}}", // TODO(i18n): needs a native review
+  "desktop.menu.upgradePro": "Upgrade to Pro", // TODO(i18n): needs a native review
+  "desktop.menu.upgradeBusiness": "Upgrade to Business", // TODO(i18n): needs a native review
+  "desktop.menu.manageBilling": "Manage Billing", // TODO(i18n): needs a native review
+  "desktop.billing.title": "Billing", // TODO(i18n): needs a native review
+  "desktop.billing.notConfigured": "Billing is not configured on this server.", // TODO(i18n): needs a native review
+  "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.", // TODO(i18n): needs a native review
+  "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.", // TODO(i18n): needs a native review
   "command.category.suggested": "შემოთავაზებულია",
   "command.category.view": "ნახვა",
   "command.category.project": "პროექტი",

@@ -202,4 +202,22 @@ export const dict: Record<string, string> = {
   "ui.question.multiHint": "Vyberte všetky platné odpovede",
   "ui.question.singleHint": "Vyberte jednu odpoveď",
   "ui.question.custom.placeholder": "Napíšte svoju odpoveď...",
+
+  "ui.paywall.capability.remoteShell": "Vzdialený shell",
+  "ui.paywall.capability.clipboard": "Synchronizácia schránky",
+  "ui.paywall.capability.credentialVault": "Trezor na prihlasovacie údaje",
+  "ui.paywall.capability.vaultLogin": "Prihlasovanie do trezoru",
+  "ui.paywall.capability.cloudVision": "Cloud Vision",
+  "ui.paywall.capability.scheduledRuns": "Spustenia bez dozoru",
+
+  "ui.paywall.fairUse.title": "{{capability}} prekročilo kvótu spravodlivého používania",
+  "ui.paywall.fairUse.description": "Stále to funguje. Po upgradovaní sa kvóta zvýši.",
+  "ui.paywall.usedUp.title": "Kvóta pre {{capability}} je vyčerpaná",
+  "ui.paywall.usedUp.description": "Po upgradovaní sa kvóta zvýši okamžite.",
+  "ui.paywall.locked.title": "Váš plán neobsahuje {{capability}}",
+  "ui.paywall.locked.description": "Upgradením na {{plan}} získate {{capability}}.",
+  "ui.paywall.locked.description.generic": "Platený plán pridáva {{capability}}.",
+  "ui.paywall.usage": "V tomto období sa použilo {{used}} z {{limit}}",
+  "ui.paywall.upgrade": "Upgradovať",
+  "ui.paywall.dismiss": "Zavrieť",
 }

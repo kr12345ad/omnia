@@ -97,6 +97,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "ไม่ได้เลือกไฟล์จากตัวเลือกไฟล์",
   "desktop.picker.error.sizeLimit": "ไฟล์แนบที่เลือกมีขนาดเกินขีดจำกัด {{limit}} MB",
 
+  "desktop.menu.account": "บัญชี",
+  "desktop.menu.plan": "แพ็กเกจ: {{plan}}",
+  "desktop.menu.upgradePro": "อัปเกรดเป็น Pro",
+  "desktop.menu.upgradeBusiness": "อัปเกรดเป็น Business",
+  "desktop.menu.manageBilling": "จัดการการเรียกเก็บเงิน",
+
+  "desktop.billing.title": "การเรียกเก็บเงิน",
+  "desktop.billing.notConfigured": "ยังไม่ได้ตั้งค่าการเรียกเก็บเงินบนเซิร์ฟเวอร์นี้",
+  "desktop.billing.signedOut": "เข้าสู่ระบบ Omnia เพื่อดูแพ็กเกจของคุณและอัปเกรด",
+  "desktop.billing.unreachable": "Omnia ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์เพื่อตรวจสอบแพ็กเกจของคุณได้",
+
   "command.category.suggested": "แนะนำ",
   "command.category.view": "มุมมอง",
   "command.category.project": "โปรเจกต์",

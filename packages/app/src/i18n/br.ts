@@ -99,6 +99,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "O arquivo não foi selecionado pelo seletor",
   "desktop.picker.error.sizeLimit": "Os anexos selecionados excedem o limite de {{limit}} MB",
 
+  "desktop.menu.account": "Conta",
+  "desktop.menu.plan": "Plano: {{plan}}",
+  "desktop.menu.upgradePro": "Fazer upgrade para o Pro",
+  "desktop.menu.upgradeBusiness": "Fazer upgrade para o Business",
+  "desktop.menu.manageBilling": "Gerenciar cobrança",
+
+  "desktop.billing.title": "Cobrança",
+  "desktop.billing.notConfigured": "A cobrança não está configurada neste servidor.",
+  "desktop.billing.signedOut": "Faça login no Omnia para ver seu plano e fazer upgrade.",
+  "desktop.billing.unreachable": "O Omnia não conseguiu acessar o servidor para verificar seu plano.",
+
   "command.category.suggested": "Sugerido",
   "command.category.view": "Visualizar",
   "command.category.project": "Projeto",

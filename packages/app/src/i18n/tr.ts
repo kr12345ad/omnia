@@ -103,6 +103,16 @@ export const dict = {
   "desktop.picker.error.notSelected": "Dosya seçici tarafından dosya seçilmedi",
   "desktop.picker.error.sizeLimit": "Seçilen ekler {{limit}} MB sınırını aşıyor",
 
+  "desktop.menu.account": "Hesap",
+  "desktop.menu.plan": "Plan: {{plan}}",
+  "desktop.menu.upgradePro": "Pro sürümüne yükselt",
+  "desktop.menu.upgradeBusiness": "Business sürümüne yükselt",
+  "desktop.menu.manageBilling": "Faturalandırmayı yönet",
+  "desktop.billing.title": "Faturalandırma",
+  "desktop.billing.notConfigured": "Bu sunucuda faturalandırma yapılandırılmamış.",
+  "desktop.billing.signedOut": "Planınızı görmek ve yükseltmek için Omnia'ya giriş yapın.",
+  "desktop.billing.unreachable": "Omnia, planınızı denetlemek için sunucuya ulaşamadı.",
+
   "command.category.suggested": "Önerilen",
   "command.category.view": "Görünüm",
   "command.category.project": "Proje",

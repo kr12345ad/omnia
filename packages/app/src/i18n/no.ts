@@ -101,6 +101,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "Ingen fil ble valgt i filvelgeren",
   "desktop.picker.error.sizeLimit": "De valgte vedleggene overskrider grensen på {{limit}} MB",
 
+  "desktop.menu.account": "Konto",
+  "desktop.menu.plan": "Plan: {{plan}}",
+  "desktop.menu.upgradePro": "Oppgrader til Pro",
+  "desktop.menu.upgradeBusiness": "Oppgrader til Business",
+  "desktop.menu.manageBilling": "Administrer fakturering",
+
+  "desktop.billing.title": "Fakturering",
+  "desktop.billing.notConfigured": "Fakturering er ikke konfigurert på denne serveren.",
+  "desktop.billing.signedOut": "Logg inn på Omnia for å se planen din og oppgradere.",
+  "desktop.billing.unreachable": "Omnia fikk ikke kontakt med serveren for å sjekke planen din.",
+
   "command.category.suggested": "Foreslått",
   "command.category.view": "Visning",
   "command.category.project": "Prosjekt",

@@ -92,6 +92,15 @@ export const dict = {
   "desktop.wsl.error.failedPort": "Dështoi në marrjen e portit",
   "desktop.picker.error.notSelected": "Skedari nuk u zgjodh nga zgjedhësi",
   "desktop.picker.error.sizeLimit": "Bashkëngjitjet e zgjedhura tejkalojnë kufirin {{limit}} MB",
+  "desktop.menu.account": "Llogaria",
+  "desktop.menu.plan": "Plan: {{plan}}",
+  "desktop.menu.upgradePro": "Përmirëso në Pro",
+  "desktop.menu.upgradeBusiness": "Përmirëso në Business",
+  "desktop.menu.manageBilling": "Manage Billing", // TODO(i18n): needs a native review
+  "desktop.billing.title": "Billing", // TODO(i18n): needs a native review
+  "desktop.billing.notConfigured": "Billing is not configured on this server.", // TODO(i18n): needs a native review
+  "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.", // TODO(i18n): needs a native review
+  "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.", // TODO(i18n): needs a native review
   "command.category.suggested": "Sugjeruar",
   "command.category.view": "Shiko",
   "command.category.project": "Projekti",

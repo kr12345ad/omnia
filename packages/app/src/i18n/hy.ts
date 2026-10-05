@@ -93,6 +93,15 @@ export const dict = {
   "desktop.wsl.error.failedPort": "Չհաջողվեց ստանալ միացքը",
   "desktop.picker.error.notSelected": "Ֆայլը ընտրողի կողմից ընտրված չէ",
   "desktop.picker.error.sizeLimit": "Ընտրված հավելվածները գերազանցում են {{limit}} ՄԲ սահմանաչափը",
+  "desktop.menu.account": "Account", // TODO(i18n): needs a native review
+  "desktop.menu.plan": "Plan: {{plan}}", // TODO(i18n): needs a native review
+  "desktop.menu.upgradePro": "Upgrade to Pro", // TODO(i18n): needs a native review
+  "desktop.menu.upgradeBusiness": "Upgrade to Business", // TODO(i18n): needs a native review
+  "desktop.menu.manageBilling": "Manage Billing", // TODO(i18n): needs a native review
+  "desktop.billing.title": "Billing", // TODO(i18n): needs a native review
+  "desktop.billing.notConfigured": "Billing is not configured on this server.", // TODO(i18n): needs a native review
+  "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.", // TODO(i18n): needs a native review
+  "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.", // TODO(i18n): needs a native review
   "command.category.suggested": "Առաջարկված",
   "command.category.view": "Դիտել",
   "command.category.project": "Նախագիծ",

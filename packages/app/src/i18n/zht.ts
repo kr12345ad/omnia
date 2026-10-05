@@ -101,6 +101,16 @@ export const dict = {
   "desktop.picker.error.notSelected": "檔案選擇器未選取檔案",
   "desktop.picker.error.sizeLimit": "所選附件超過 {{limit}} MB 的限制",
 
+  "desktop.menu.account": "帳號",
+  "desktop.menu.plan": "方案：{{plan}}",
+  "desktop.menu.upgradePro": "升級至 Pro",
+  "desktop.menu.upgradeBusiness": "升級至 Business",
+  "desktop.menu.manageBilling": "管理帳單",
+  "desktop.billing.title": "帳單",
+  "desktop.billing.notConfigured": "此伺服器尚未設定帳單功能。",
+  "desktop.billing.signedOut": "登入 Omnia 以查看您的方案並升級。",
+  "desktop.billing.unreachable": "Omnia 無法連線至伺服器以檢查您的方案。",
+
   "command.category.suggested": "建議",
   "command.category.view": "檢視",
   "command.category.project": "專案",

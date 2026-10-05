@@ -99,6 +99,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "Aucun fichier n'a été sélectionné dans le sélecteur",
   "desktop.picker.error.sizeLimit": "Les pièces jointes sélectionnées dépassent la limite de {{limit}} Mo",
 
+  "desktop.menu.account": "Compte",
+  "desktop.menu.plan": "Forfait : {{plan}}",
+  "desktop.menu.upgradePro": "Passer à Pro",
+  "desktop.menu.upgradeBusiness": "Passer à Business",
+  "desktop.menu.manageBilling": "Gérer la facturation",
+
+  "desktop.billing.title": "Facturation",
+  "desktop.billing.notConfigured": "La facturation n'est pas configurée sur ce serveur.",
+  "desktop.billing.signedOut": "Connectez-vous à Omnia pour voir votre forfait et passer à un forfait supérieur.",
+  "desktop.billing.unreachable": "Omnia n'a pas pu joindre le serveur pour vérifier votre forfait.",
+
   "command.category.suggested": "Suggéré",
   "command.category.view": "Affichage",
   "command.category.project": "Projet",

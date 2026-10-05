@@ -98,6 +98,16 @@ export const dict = {
   "desktop.picker.error.notSelected": "पिकर में फ़ाइल नहीं चुनी गई",
   "desktop.picker.error.sizeLimit": "चुने गए अटैचमेंट {{limit}} MB की सीमा से अधिक हैं",
 
+  "desktop.menu.account": "खाता",
+  "desktop.menu.plan": "प्लान: {{plan}}",
+  "desktop.menu.upgradePro": "Pro में अपग्रेड करें",
+  "desktop.menu.upgradeBusiness": "Business में अपग्रेड करें",
+  "desktop.menu.manageBilling": "बिलिंग प्रबंधित करें",
+  "desktop.billing.title": "बिलिंग",
+  "desktop.billing.notConfigured": "इस सर्वर पर बिलिंग कॉन्फ़िगर नहीं की गई है।",
+  "desktop.billing.signedOut": "अपना प्लान देखने और अपग्रेड करने के लिए Omnia में साइन इन करें।",
+  "desktop.billing.unreachable": "Omnia अपना प्लान जाँचने के लिए सर्वर तक नहीं पहुँच सका।",
+
   "command.category.suggested": "सुझाए गए",
   "command.category.view": "दृश्य",
   "command.category.project": "प्रोजेक्ट",

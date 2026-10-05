@@ -94,6 +94,17 @@ export const dict: Record<string, string> = {
   "desktop.wsl.error.failedPort": "འདྲེན་ལམ་ཐོབ་ནི་ལུ་འཐུས་ཤོར་འབྱུང་ཡོདཔ།",
   "desktop.picker.error.notSelected": "ཡིག་སྣོད་འདི་ སེལ་འཐུ་འབད་མི་གིས་ སེལ་འཐུ་མ་འབད་བས།",
   "desktop.picker.error.sizeLimit": "སེལ་འཐུ་འབད་ཡོད་པའི་མཉམ་སྦྲགས་ཚུ་གིས་ {{limit}} ཨེམ་བི་ཚད་ལས་བརྒལཝ་ཨིན།",
+
+  "desktop.menu.account": "Account", // TODO(i18n): needs a native review
+  "desktop.menu.plan": "Plan: {{plan}}", // TODO(i18n): needs a native review
+  "desktop.menu.upgradePro": "Upgrade to Pro", // TODO(i18n): needs a native review
+  "desktop.menu.upgradeBusiness": "Upgrade to Business", // TODO(i18n): needs a native review
+  "desktop.menu.manageBilling": "Manage Billing", // TODO(i18n): needs a native review
+
+  "desktop.billing.title": "Billing", // TODO(i18n): needs a native review
+  "desktop.billing.notConfigured": "Billing is not configured on this server.", // TODO(i18n): needs a native review
+  "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.", // TODO(i18n): needs a native review
+  "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.", // TODO(i18n): needs a native review
   "command.category.suggested": "བསམ་འཆར།",
   "command.category.view": "བསམ༌འཆར",
   "command.category.project": "ལས༌འགུལ",

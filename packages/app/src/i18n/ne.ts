@@ -92,6 +92,15 @@ export const dict: Record<string, string> = {
   "desktop.wsl.error.failedPort": "पोर्ट प्राप्त गर्न असफल भयो",
   "desktop.picker.error.notSelected": "फाइल चयनकर्ता द्वारा चयन गरिएको थिएन",
   "desktop.picker.error.sizeLimit": "चयन गरिएका संलग्नहरू {{limit}} MB सीमा नाघ्छन्",
+  "desktop.menu.account": "Account", // TODO(i18n): needs a native review
+  "desktop.menu.plan": "Plan: {{plan}}", // TODO(i18n): needs a native review
+  "desktop.menu.upgradePro": "Upgrade to Pro", // TODO(i18n): needs a native review
+  "desktop.menu.upgradeBusiness": "Upgrade to Business", // TODO(i18n): needs a native review
+  "desktop.menu.manageBilling": "Manage Billing", // TODO(i18n): needs a native review
+  "desktop.billing.title": "Billing", // TODO(i18n): needs a native review
+  "desktop.billing.notConfigured": "Billing is not configured on this server.", // TODO(i18n): needs a native review
+  "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.", // TODO(i18n): needs a native review
+  "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.", // TODO(i18n): needs a native review
   "command.category.suggested": "सिफारिस गर्नुभयो",
   "command.category.view": "हेर्नुहोस्",
   "command.category.project": "परियोजना",

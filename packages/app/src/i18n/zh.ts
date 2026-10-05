@@ -101,6 +101,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "文件选择器未选择文件",
   "desktop.picker.error.sizeLimit": "所选附件超过 {{limit}} MB 的限制",
 
+  "desktop.menu.account": "账户",
+  "desktop.menu.plan": "套餐：{{plan}}",
+  "desktop.menu.upgradePro": "升级到 Pro",
+  "desktop.menu.upgradeBusiness": "升级到 Business",
+  "desktop.menu.manageBilling": "管理账单",
+
+  "desktop.billing.title": "账单",
+  "desktop.billing.notConfigured": "此服务器未配置账单功能。",
+  "desktop.billing.signedOut": "登录 Omnia 以查看您的套餐并升级。",
+  "desktop.billing.unreachable": "Omnia 无法连接到服务器以检查您的套餐。",
+
   "command.category.suggested": "建议",
   "command.category.view": "视图",
   "command.category.project": "项目",

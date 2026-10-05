@@ -93,6 +93,17 @@ export const dict = {
   "desktop.wsl.error.failedPort": "No s'ha pogut obtenir el port",
   "desktop.picker.error.notSelected": "El selector no ha seleccionat el fitxer",
   "desktop.picker.error.sizeLimit": "Els fitxers adjunts seleccionats superen el límit de {{limit}} MB",
+
+  "desktop.menu.account": "Compte",
+  "desktop.menu.plan": "Pla: {{plan}}",
+  "desktop.menu.upgradePro": "Actualitza a Pro",
+  "desktop.menu.upgradeBusiness": "Actualitza a Business",
+  "desktop.menu.manageBilling": "Gestiona la facturació",
+
+  "desktop.billing.title": "Facturació",
+  "desktop.billing.notConfigured": "La facturació no està configurada en aquest servidor.",
+  "desktop.billing.signedOut": "Inicia la sessió a Omnia per veure el teu pla i actualitzar.",
+  "desktop.billing.unreachable": "Omnia no ha pogut connectar amb el servidor per comprovar el teu pla.",
   "command.category.suggested": "Suggerit",
   "command.category.view": "Veure",
   "command.category.project": "Projecte",

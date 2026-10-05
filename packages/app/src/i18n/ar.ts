@@ -97,6 +97,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "لم يحدد منتقي الملفات ملفًا",
   "desktop.picker.error.sizeLimit": "تتجاوز المرفقات المحددة الحد البالغ {{limit}} MB",
 
+  "desktop.menu.account": "الحساب",
+  "desktop.menu.plan": "الخطة: {{plan}}",
+  "desktop.menu.upgradePro": "الترقية إلى Pro",
+  "desktop.menu.upgradeBusiness": "الترقية إلى Business",
+  "desktop.menu.manageBilling": "إدارة الفوترة",
+
+  "desktop.billing.title": "الفوترة",
+  "desktop.billing.notConfigured": "لم يتم إعداد الفوترة على هذا الخادم.",
+  "desktop.billing.signedOut": "سجّل الدخول إلى Omnia لعرض خطتك والترقية.",
+  "desktop.billing.unreachable": "لم يتمكن Omnia من الوصول إلى الخادم للتحقق من خطتك.",
+
   "command.category.suggested": "مقترح",
   "command.category.view": "عرض",
   "command.category.project": "مشروع",

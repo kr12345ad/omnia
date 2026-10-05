@@ -91,6 +91,15 @@ const desktop = [
   "Nije uspjelo dohvaćanje priključka",
   "Datoteka nije odabrana u izborniku",
   "Odabrani prilozi premašuju ograničenje od {{limit}} MB",
+  "Račun",
+  "Plan: {{plan}}",
+  "Ažuriraj na Pro",
+  "Ažuriraj na Business",
+  "Upravljaj naplatom",
+  "Naplata",
+  "Naplata nije konfigurirana na ovom poslužitelju.",
+  "Prijavite se u Omnia kako biste vidjeli svoj plan i mogli se nadograditi.",
+  "Omnia nije mogla doći do poslužitelja da provjeri vaš plan.",
 ]
 
 export const dict = {

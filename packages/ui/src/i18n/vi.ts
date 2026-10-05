@@ -194,4 +194,22 @@ export const dict: Record<string, string> = {
   "ui.question.multiHint": "Chọn tất cả các câu trả lời phù hợp",
   "ui.question.singleHint": "Chọn một câu trả lời",
   "ui.question.custom.placeholder": "Nhập câu trả lời của bạn...",
+
+  "ui.paywall.capability.remoteShell": "Shell từ xa",
+  "ui.paywall.capability.clipboard": "Đồng bộ bảng tạm",
+  "ui.paywall.capability.credentialVault": "Kho lưu trữ thông tin đăng nhập",
+  "ui.paywall.capability.vaultLogin": "Đăng nhập vào kho",
+  "ui.paywall.capability.cloudVision": "Cloud Vision",
+  "ui.paywall.capability.scheduledRuns": "Lần chạy không giám sát",
+
+  "ui.paywall.fairUse.title": "{{capability}} đã vượt quá hạn mức sử dụng hợp lệ",
+  "ui.paywall.fairUse.description": "Tính năng vẫn hoạt động. Nâng cấp sẽ tăng hạn mức.",
+  "ui.paywall.usedUp.title": "Hạn mức của {{capability}} đã hết",
+  "ui.paywall.usedUp.description": "Nâng cấp sẽ tăng hạn mức ngay lập tức.",
+  "ui.paywall.locked.title": "{{capability}} không có trong gói của bạn",
+  "ui.paywall.locked.description": "Nâng cấp lên {{plan}} sẽ bổ sung {{capability}}.",
+  "ui.paywall.locked.description.generic": "Gói trả phí sẽ bổ sung {{capability}}.",
+  "ui.paywall.usage": "Đã dùng {{used}} trên {{limit}} trong kỳ này",
+  "ui.paywall.upgrade": "Nâng cấp",
+  "ui.paywall.dismiss": "Bỏ qua",
 }

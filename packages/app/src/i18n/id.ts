@@ -99,6 +99,17 @@ export const dict = {
   "desktop.picker.error.notSelected": "Berkas tidak dipilih melalui pemilih",
   "desktop.picker.error.sizeLimit": "Lampiran yang dipilih melebihi batas {{limit}} MB",
 
+  "desktop.menu.account": "Akun",
+  "desktop.menu.plan": "Paket: {{plan}}",
+  "desktop.menu.upgradePro": "Upgrade ke Pro",
+  "desktop.menu.upgradeBusiness": "Upgrade ke Business",
+  "desktop.menu.manageBilling": "Kelola tagihan",
+
+  "desktop.billing.title": "Tagihan",
+  "desktop.billing.notConfigured": "Tagihan tidak dikonfigurasi di server ini.",
+  "desktop.billing.signedOut": "Masuk ke Omnia untuk melihat paket dan melakukan upgrade.",
+  "desktop.billing.unreachable": "Omnia tidak dapat menghubungi server untuk memeriksa paket Anda.",
+
   "command.category.suggested": "Disarankan",
   "command.category.view": "Tampilan",
   "command.category.project": "Proyek",

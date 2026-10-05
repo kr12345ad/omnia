@@ -1149,6 +1149,17 @@ export const dict = {
   "desktop.wsl.error.failedPort": "Portin noutaminen epäonnistui",
   "desktop.picker.error.notSelected": "Tiedostovalitsimessa ei valittu tiedostoa",
   "desktop.picker.error.sizeLimit": "Valitut liitteet ylittävät {{limit}} Mt:n rajan",
+
+  "desktop.menu.account": "Tili",
+  "desktop.menu.plan": "Tilaus: {{plan}}",
+  "desktop.menu.upgradePro": "Siirry Pro-tilaukseen",
+  "desktop.menu.upgradeBusiness": "Siirry Business-tilaukseen",
+  "desktop.menu.manageBilling": "Hallitse laskutusta",
+
+  "desktop.billing.title": "Laskutus",
+  "desktop.billing.notConfigured": "Laskutus ei ole määritetty tälle palvelimelle.",
+  "desktop.billing.signedOut": "Kirjaudu sisään Omniaan nähdäksesi tilauksesi ja päivittääksesi sen.",
+  "desktop.billing.unreachable": "Omnia ei saanut yhteyttä palvelimeen tarkistaakseen tilauksesi.",
   "command.logs.export": "Vie lokit",
   "help.tabs.toast.ariaLabel": "Esittelyssä välilehdet. Järjestä työsi ja aktiiviset istuntosi välilehtien avulla",
   "help.tabs.toast.dismiss": "Sulje välilehtien tiedot",

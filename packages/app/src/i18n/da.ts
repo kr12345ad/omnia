@@ -1228,6 +1228,16 @@ export const dict = {
   "desktop.picker.error.notSelected": "Filen blev ikke valgt i filvælgeren",
   "desktop.picker.error.sizeLimit": "De valgte vedhæftede filer overskrider grænsen på {{limit}} MB",
 
+  "desktop.menu.account": "Konto",
+  "desktop.menu.plan": "Plan: {{plan}}",
+  "desktop.menu.upgradePro": "Opgradér til Pro",
+  "desktop.menu.upgradeBusiness": "Opgradér til Business",
+  "desktop.menu.manageBilling": "Administrer fakturering",
+  "desktop.billing.title": "Fakturering",
+  "desktop.billing.notConfigured": "Fakturering er ikke konfigureret på denne server.",
+  "desktop.billing.signedOut": "Log ind på Omnia for at se din plan og opgradere den.",
+  "desktop.billing.unreachable": "Omnia kunne ikke nå serveren for at kontrollere din plan.",
+
   "command.logs.export": "Eksportér logfiler",
 
   "help.tabs.toast.ariaLabel": "Introduktion til faner. Organiser dit arbejde og dine aktive sessioner med faner",
