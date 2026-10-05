@@ -76,8 +76,10 @@ import { createPromptSubmit } from "./prompt-input/submit"
 import { PromptPopover, type AtOption, type SlashCommand } from "./prompt-input/slash-popover"
 import { PromptContextItems } from "./prompt-input/context-items"
 import { PromptImageAttachments } from "./prompt-input/image-attachments"
+import { RemoteShellNotice } from "./prompt-input/entitlement-notice"
 import { PromptDragOverlay } from "./prompt-input/drag-overlay"
 import { promptPlaceholder } from "./prompt-input/placeholder"
+import { useEntitlement, useEntitlementDecision } from "@/context/entitlement"
 import { useSettings } from "@/context/settings"
 import { resolveSessionMode } from "@/utils/session-mode"
 import { createPromptInputTransientState } from "./prompt-input/transient-state"
@@ -129,6 +131,11 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
   const permission = usePermission()
   const language = useLanguage()
   const platform = usePlatform()
+  // One owner of the entitlement snapshot feeds every capability notice in the
+  // composer, so an image that costs vision explains itself here instead of
+  // rendering nothing for want of a decision.
+  const entitlement = useEntitlement()
+  const vision = useEntitlementDecision("cloud_vision")
   const tabs = () => props.controls.session.tabs
   let editorRef!: HTMLDivElement
   let fileInputRef: HTMLInputElement | undefined
@@ -1519,6 +1526,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
           newLayoutDesigns={false}
           t={(key) => language.t(key as Parameters<typeof language.t>[0])}
         />
+        <RemoteShellNotice />
         <PromptImageAttachments
           attachments={imageAttachments()}
           onOpen={(attachment) =>
@@ -1528,6 +1536,9 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
           removeLabel={language.t("prompt.attachment.remove")}
           fileLabel={language.t("ui.common.file")}
           newLayoutDesigns={false}
+          vision={vision()}
+          visionOffer={entitlement.offer()}
+          onDismissVision={() => entitlement.dismiss("cloud_vision")}
         />
         <div
           class="relative"

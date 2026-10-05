@@ -29,6 +29,7 @@ import {
 } from "../billing/stripe.js"
 import {
   applySubscription,
+  billingStateReadable,
   consume,
   decide,
   readBillingState,
@@ -84,11 +85,15 @@ function billingFile(context: ApiContext): string | undefined {
 /** Reads billing state, reporting whether the read actually succeeded. */
 function loadState(file: string | undefined): { state: BillingState; readable: boolean } {
   if (file === undefined) return { state: readBillingState(undefined), readable: false }
+  // "Readable" has to mean the file actually PARSED. Reporting true for a
+  // corrupt file meant the fail-closed policy never armed, so every paid
+  // capability came back not_entitled instead of unknown - and the next usage
+  // write then rewrote the quarantined data as an empty store, destroying every
+  // paid subscription with no alarm and no way back.
+  if (!billingStateReadable(file)) return { state: readBillingState(undefined), readable: false }
   try {
     return { state: readBillingState(file), readable: true }
   } catch {
-    // An unreadable store is not fatal: free capabilities keep working, and the
-    // hard-metered ones are refused by decide() rather than here.
     return { state: readBillingState(undefined), readable: false }
   }
 }
@@ -120,25 +125,44 @@ async function createCheckoutSession(options: {
   readonly priceId: string
   readonly profileId: string
   readonly publicUrl: string
+  /** Stable per profile+plan so a double-clicked button cannot double-charge. */
+  readonly idempotencyKey: string
 }): Promise<{ readonly url: string } | { readonly error: string }> {
   const form = new URLSearchParams()
   form.set("mode", "subscription")
   form.set("line_items[0][price]", options.priceId)
   form.set("line_items[0][quantity]", "1")
-  // Stripe echoes this back on the subscription, which is how a webhook becomes
-  // attributable to a profile.
+  // The profile id must land ON THE SUBSCRIPTION, not just on the session.
+  // Stripe does NOT copy session metadata onto the subscription it creates, so
+  // setting only metadata[profileId] here produced subscriptions with no profile
+  // and every webhook was silently ignored - checkout appeared to succeed and
+  // granted nothing, forever.
+  form.set("subscription_data[metadata][profileId]", options.profileId)
   form.set("metadata[profileId]", options.profileId)
   form.set("client_reference_id", options.profileId)
   form.set("success_url", `${options.publicUrl}/?checkout=success`)
   form.set("cancel_url", `${options.publicUrl}/?checkout=cancelled`)
-  const response = await fetch(`${STRIPE_API}/checkout/sessions`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${options.secret}`,
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    body: form.toString(),
-  })
+  let response: Response
+  try {
+    response = await fetch(`${STRIPE_API}/checkout/sessions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${options.secret}`,
+        "content-type": "application/x-www-form-urlencoded",
+        // Without this a second click created a second customer and a second
+        // subscription, and "most generous wins" then quietly billed them twice.
+        "Idempotency-Key": options.idempotencyKey,
+      },
+      body: form.toString(),
+      // A hung Stripe call otherwise stalled the request for the runtime's socket
+      // timeout, uncancellable.
+      signal: AbortSignal.timeout(30_000),
+    })
+  } catch {
+    // A DNS, TLS or socket failure must read as a billing failure, not crash the
+    // request into a 500 with a stack trace on a money path.
+    return { error: "Could not reach Stripe." }
+  }
   const text = await response.text()
   if (!response.ok) return { error: `Stripe rejected the checkout session (HTTP ${response.status}).` }
   let parsed: unknown
@@ -147,11 +171,34 @@ async function createCheckoutSession(options: {
   } catch {
     return { error: "Stripe returned a response that was not JSON." }
   }
+  return stripeUrl(parsed, "checkout")
+}
+
+/**
+ * Stripe's own redirect target, or nothing.
+ *
+ * The response is remote input that ends up in a browser, so it is allowlisted
+ * to Stripe's HTTPS hosts. Without this a compromised or spoofed response could
+ * hand the user a javascript: URL or an attacker page from a real-looking flow.
+ */
+function stripeUrl(parsed: unknown, kind: "checkout" | "portal"): { readonly url: string } | { readonly error: string } {
   const url =
     typeof parsed === "object" && parsed !== null && typeof (parsed as { url?: unknown }).url === "string"
       ? (parsed as { url: string }).url
       : undefined
-  return url === undefined ? { error: "Stripe returned no checkout URL." } : { url }
+  if (url === undefined || url.length === 0) return { error: `Stripe returned no ${kind} URL.` }
+  let parsedUrl: URL
+  try {
+    parsedUrl = new URL(url)
+  } catch {
+    return { error: `Stripe returned a ${kind} URL that is not a URL.` }
+  }
+  const host = parsedUrl.hostname.toLowerCase()
+  const allowed = kind === "checkout" ? ["checkout.stripe.com"] : ["billing.stripe.com"]
+  if (parsedUrl.protocol !== "https:" || !allowed.includes(host)) {
+    return { error: `Stripe returned a ${kind} URL on an unexpected host.` }
+  }
+  return { url: parsedUrl.toString() }
 }
 
 async function createPortalSession(options: {
@@ -162,14 +209,20 @@ async function createPortalSession(options: {
   const form = new URLSearchParams()
   form.set("customer", options.customerId)
   form.set("return_url", `${options.publicUrl}/?billing=portal`)
-  const response = await fetch(`${STRIPE_API}/billing_portal/sessions`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${options.secret}`,
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    body: form.toString(),
-  })
+  let response: Response
+  try {
+    response = await fetch(`${STRIPE_API}/billing_portal/sessions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${options.secret}`,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form.toString(),
+      signal: AbortSignal.timeout(30_000),
+    })
+  } catch {
+    return { error: "Could not reach Stripe." }
+  }
   const text = await response.text()
   if (!response.ok) return { error: `Stripe rejected the portal session (HTTP ${response.status}).` }
   let parsed: unknown
@@ -178,11 +231,7 @@ async function createPortalSession(options: {
   } catch {
     return { error: "Stripe returned a response that was not JSON." }
   }
-  const url =
-    typeof parsed === "object" && parsed !== null && typeof (parsed as { url?: unknown }).url === "string"
-      ? (parsed as { url: string }).url
-      : undefined
-  return url === undefined ? { error: "Stripe returned no portal URL." } : { url }
+  return stripeUrl(parsed, "portal")
 }
 
 /** Which Stripe events change what. Anything else is acknowledged and ignored. */
@@ -191,13 +240,21 @@ function planFromEvent(event: StripeEvent): { readonly plan: PlanId } | undefine
     typeof event.data === "object" && event.data !== null
       ? (event.data as { object?: unknown }).object
       : undefined
-  const prices: Readonly<Record<string, PlanId>> = {
-    ...(process.env.STRIPE_PRICE_PRO !== undefined && process.env.STRIPE_PRICE_PRO.length > 0
-      ? { [process.env.STRIPE_PRICE_PRO]: "pro" as const }
-      : {}),
-    ...(process.env.STRIPE_PRICE_BUSINESS !== undefined && process.env.STRIPE_PRICE_BUSINESS.length > 0
-      ? { [process.env.STRIPE_PRICE_BUSINESS]: "business" as const }
-      : {}),
+  // Built so an id can only ever mean ONE plan. The previous object spread let a
+  // later key overwrite an earlier one, so setting the pro and business prices to
+  // the same value collapsed them and handed a paying "pro" customer the whole
+  // business plan, silently, for the pro price.
+  const prices: Record<string, PlanId> = {}
+  for (const [plan, price] of [
+    ["pro", process.env.STRIPE_PRICE_PRO],
+    ["business", process.env.STRIPE_PRICE_BUSINESS],
+  ] as const) {
+    if (price === undefined || price.length === 0) continue
+    if (prices[price] !== undefined) {
+      // Ambiguous configuration refuses rather than guessing which plan wins.
+      return undefined
+    }
+    prices[price] = plan
   }
   const object = priceId as { price?: { id?: unknown } } | undefined
   const id = object?.price?.id
@@ -249,12 +306,23 @@ export async function handleBillingRoute(
       return true
     }
     const file = billingFile(context)
+    if (file === undefined) {
+      // Refusing to acknowledge is the point. A 2xx tells Stripe to stop
+      // retrying, so acknowledging an event we cannot store takes the customer's
+      // money and grants nothing, permanently and with no alarm. A 503 makes
+      // Stripe keep delivering until storage exists.
+      json(response, 503, { ok: false, error: "Billing storage is not configured, so no plan can be granted." })
+      return true
+    }
     const { state } = loadState(file)
     const subscription = subscriptionFromEvent(event)
     const plan = planFromEvent(event)
     if (subscription === undefined || plan === undefined) {
       // Acknowledged on purpose: Stripe retries anything it does not get a 2xx
-      // for, and retrying an event we deliberately ignore is pure noise.
+      // for, and retrying an event we deliberately ignore is pure noise. This is
+      // only safe because the two ways to reach here with a REAL purchase - no
+      // storage, and no profile on the subscription - are handled above and by
+      // the subscription_data metadata respectively.
       json(response, 200, { ok: true, ignored: true })
       return true
     }
@@ -316,7 +384,9 @@ export async function handleBillingRoute(
     const decision = decide(state, who, capability as Capability, { storeReadable: readable })
     if (decision.allowed && decision.code === "granted") {
       const next = consume(state, who, capability as Capability)
-      if (file !== undefined && who !== undefined) {
+      // Never write usage over a store we could not parse: that would overwrite a
+      // quarantined file with an empty one and lose every subscription in it.
+      if (file !== undefined && who !== undefined && readable) {
         try {
           writeBillingState(file, next)
         } catch {
@@ -330,6 +400,13 @@ export async function handleBillingRoute(
   }
 
   if (segments[2] === "checkout" && method === "POST") {
+    // Starting a purchase, and opening the portal that can change the card or
+    // cancel a subscription, must require the operator credential rather than
+    // any token that satisfies isAuthorized - a paired thin client has one.
+    if (!presentsServerToken(context, request)) {
+      json(response, 403, { ok: false, error: "Only the signed-in desktop may manage billing." })
+      return true
+    }
     const secret = stripeSecret()
     if (secret === undefined) {
       json(response, 503, { ok: false, error: "Billing is not configured on this server." })
@@ -354,7 +431,13 @@ export async function handleBillingRoute(
       json(response, 503, { ok: false, error: "This server has no public URL for Stripe to return to." })
       return true
     }
-    const session = await createCheckoutSession({ secret, priceId, profileId: who, publicUrl })
+    const session = await createCheckoutSession({
+      secret,
+      priceId,
+      profileId: who,
+      publicUrl,
+      idempotencyKey: `omnia-checkout-${plan}-${who}`,
+    })
     if ("error" in session) {
       json(response, 502, { ok: false, error: session.error })
       return true
@@ -364,6 +447,10 @@ export async function handleBillingRoute(
   }
 
   if (segments[2] === "portal" && method === "POST") {
+    if (!presentsServerToken(context, request)) {
+      json(response, 403, { ok: false, error: "Only the signed-in desktop may manage billing." })
+      return true
+    }
     const secret = stripeSecret()
     if (secret === undefined) {
       json(response, 503, { ok: false, error: "Billing is not configured on this server." })
@@ -381,6 +468,10 @@ export async function handleBillingRoute(
       return true
     }
     const publicUrl = (process.env.OMNIA_PUBLIC_URL ?? "").replace(/\/+$/, "")
+    if (publicUrl.length === 0) {
+      json(response, 503, { ok: false, error: "This server has no public URL for Stripe to return to." })
+      return true
+    }
     const session = await createPortalSession({ secret, customerId: subscription.customerId, publicUrl })
     if ("error" in session) {
       json(response, 502, { ok: false, error: session.error })
@@ -409,7 +500,18 @@ async function safeJson(request: IncomingMessage): Promise<Record<string, unknow
 
 /** Exposed so the server can report whether billing is wired up at all. */
 export function billingConfigured(): boolean {
-  return stripeSecret() !== undefined && (process.env.STRIPE_WEBHOOK_SECRET ?? "").length > 0
+  // Every variable a purchase needs, not just the two. Reporting "configured"
+  // from the API key and webhook secret alone let a server missing a price id or
+  // a storage path advertise itself healthy, take the money, and grant nothing.
+  const prices = [process.env.STRIPE_PRICE_PRO, process.env.STRIPE_PRICE_BUSINESS]
+  return (
+    stripeSecret() !== undefined &&
+    (process.env.STRIPE_WEBHOOK_SECRET ?? "").length > 0 &&
+    (process.env.OMNIA_PUBLIC_URL ?? "").length > 0 &&
+    prices.every((price) => (price ?? "").length > 0) &&
+    process.env.STRIPE_PRICE_PRO !== process.env.STRIPE_PRICE_BUSINESS &&
+    billingFile({} as never) !== undefined
+  )
 }
 
 export { entitles, presentsServerToken, isTrustedDesktopRequest }

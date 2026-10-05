@@ -66,6 +66,31 @@ function boundedCount(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.min(Math.floor(value), 1e12) : 0
 }
 
+/**
+ * Whether a billing file exists AND parsed.
+ *
+ * Callers need this because returning EMPTY_STATE for a corrupt file is
+ * indistinguishable from "no subscriptions" - which made a corrupt file report
+ * itself readable, so the fail-closed path never armed and the very next usage
+ * write replaced the quarantined data with an empty store, destroying every
+ * paid subscription with no alarm.
+ */
+export function billingStateReadable(file: string | undefined): boolean {
+  // A missing file is not "unreadable": there is no subscription data, which is a
+  // perfectly well understood state meaning the free plan. Treating it as a read
+  // failure armed fail-closed on every fresh install and refused the very first
+  // vault login for every new user.
+  if (file === undefined || !existsSync(file)) return true
+  // A symlink is refused outright, same as on the write path.
+  if (lstatIsSymlink(file)) return false
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"))
+    return isRecord(parsed)
+  } catch {
+    return false
+  }
+}
+
 export function currentPeriod(now: number = Date.now()): string {
   return new Date(now).toISOString().slice(0, 7)
 }

@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http"
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { handleBillingRoute } from "./billing-api"
+import { failsClosed, isPlanId, type Capability } from "../billing/plans"
 import type { EventBus, ServerEvent } from "./events"
 import type { ComputerManager, DragEndpoint, ServerActionRequest, ServerBatchStep } from "./computers"
 import { OMNIA_ACTION_CATALOG } from "./catalog"
@@ -563,6 +564,154 @@ function operatorDenied(
   return {
     status: 403,
     payload: { ok: false, error: "Only the desktop operator can manage models, runtimes, and sign-in." },
+  }
+}
+
+// Billing enforcement for this route table.
+//
+// The plan matrix in ../billing/plans is the only source of truth for what a
+// plan may do, and the control plane (POST /v1/billing/check) is the only
+// authority that can answer it. These gates run BEFORE the work they guard: a
+// refusal that arrives after the grab is installed is not a refusal, it is
+// somebody's keyboard held until they pay.
+//
+// The failure policy is inherited from the plan table rather than re-decided
+// here, and the two directions are deliberately opposite:
+//
+//   - A CONFIGURED control plane that cannot be reached means the usage counters
+//     are unknown, so a hard-metered capability fails closed and a soft-metered
+//     one keeps working. That is failsClosed(), not a judgement call made here.
+//   - An install with NO control plane configured has no billing relationship at
+//     all, so there is nothing to enforce and the gate is inert. Refusing there
+//     would break every local and self-hosted install that never opted into
+//     billing, which is the same split computers.ts makes.
+//
+// Every call carries an AbortSignal.timeout because a hung control plane must
+// never become the user's latency; past the deadline the failure policy above
+// decides.
+export const CAPABILITY_CHECK_TIMEOUT_MS = 5_000
+
+/** How a capability is named to the person who just got refused. */
+const CAPABILITY_LABELS: Readonly<Partial<Record<Capability, string>>> = {
+  input_freeze: "Freezing physical input",
+}
+
+function billingControlPlane(): { readonly base: string; readonly token: string } | undefined {
+  // The same resolution the browser, CUA and driver gates use: OMNIA_SERVER_URL
+  // wins, OMNIA_PUBLIC_URL is the fallback, and no token means inert. A host with
+  // no usable port is deliberately NOT guessed into port 80 - shipping the bearer
+  // somewhere unintended is worse than having no gate at all.
+  const token = process.env.OMNIA_SERVER_TOKEN ?? ""
+  if (token.length === 0) return undefined
+  const configured = process.env.OMNIA_SERVER_URL ?? process.env.OMNIA_PUBLIC_URL
+  if (configured === undefined || configured.length === 0) return undefined
+  return { base: configured.replace(/\/+$/, ""), token }
+}
+
+/**
+ * Asks the control plane whether this plan may use `capability`, before the
+ * caller does anything with it. Returns undefined when the request may proceed.
+ *
+ * A refusal is a typed, descriptive failure that names the capability and the
+ * plan the customer is actually on. It is deliberately never an empty result: a
+ * caller handed `{ frozen: false }` or an empty list cannot tell "you are not
+ * allowed to do this" from "there was nothing to do", so it retries forever or
+ * reports a bogus success - both of which turn a paid capability into a free one.
+ */
+async function capabilityDenied(
+  context: Pick<ApiContext, "auth">,
+  capability: Capability,
+): Promise<{ status: number; payload: Record<string, unknown> } | undefined> {
+  const controlPlane = billingControlPlane()
+  if (controlPlane === undefined) return undefined
+  // Entitlements are per profile, so a signed-in customer has to be checked
+  // against THEIR plan rather than against the anonymous free one. Only the
+  // server's own signed-in profile is forwarded: a caller-supplied
+  // x-omnia-profile header is not an identity, and the control plane only
+  // honours that header from a caller that presented the server token anyway.
+  const profile = context.auth.status().profile
+  let body: unknown
+  try {
+    const response = await fetch(`${controlPlane.base}/v1/billing/check`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${controlPlane.token}`,
+        "content-type": "application/json",
+        ...(profile === undefined ? {} : { "x-omnia-profile": String(profile.id) }),
+      },
+      // The body is the capability and nothing else: no computer id, no reason,
+      // nothing that would have to be redacted before it is sent or logged.
+      body: JSON.stringify({ capability }),
+      signal: AbortSignal.timeout(CAPABILITY_CHECK_TIMEOUT_MS),
+    })
+    // 402 is a decision and is parsed below. Any other status - a 5xx, a 401
+    // from a rotated token - is the control plane failing rather than deciding.
+    // Reading that as "not included in your plan" both lies to the customer and
+    // applies free-plan policy to someone who paid.
+    if (response.status !== 200 && response.status !== 402) {
+      return unconfirmed(capability, `the billing service answered HTTP ${response.status}`)
+    }
+    body = await response.json().catch(() => undefined)
+  } catch {
+    return unconfirmed(capability, "the billing service could not be reached")
+  }
+  // The reply is untrusted: an `allowed: true` is honoured only when the shape
+  // also agrees which capability it is talking about, so a replayed or proxied
+  // answer for a different capability cannot grant this one.
+  if (!isRecord(body) || typeof body.allowed !== "boolean" || body.capability !== capability) {
+    return unconfirmed(capability, "the billing service returned an unreadable answer")
+  }
+  if (body.allowed) return undefined
+  const plan = isPlanId(body.plan) ? body.plan : "free"
+  const reason =
+    typeof body.reason === "string" && body.reason.length > 0
+      ? body.reason
+      : `${capability} is not included in the ${plan} plan.`
+  return {
+    status: 402,
+    payload: {
+      ok: false,
+      error: {
+        code: "capability_not_entitled",
+        // The capability and the plan are both named on purpose: a refusal the
+        // user cannot act on is a support ticket instead of an upgrade.
+        message: `${reason} (${capability}, plan: ${plan})`,
+        capability,
+        plan,
+        // Upgrading fixes this one. Retrying does not.
+        retryable: false,
+      },
+    },
+  }
+}
+
+/**
+ * The refusal for a capability whose allowance could not be established.
+ *
+ * `failsClosed` picks the direction, so this is not a policy decision made at the
+ * call site: a hard allowance cannot be honoured with an unknown counter and is
+ * refused as retryable (waiting fixes it), while a soft allowance keeps working
+ * so a billing outage never takes a capability away from someone entitled to it.
+ * Returns undefined in the fail-open case, which lets the caller proceed.
+ */
+function unconfirmed(
+  capability: Capability,
+  cause: string,
+): { status: number; payload: Record<string, unknown> } | undefined {
+  if (!failsClosed(capability)) return undefined
+  const label = CAPABILITY_LABELS[capability] ?? capability
+  return {
+    status: 503,
+    payload: {
+      ok: false,
+      error: {
+        code: "entitlement_unavailable",
+        message: `${label} could not be confirmed because ${cause}, so it is refused rather than served unmetered. Nothing was performed.`,
+        capability,
+        plan: "free",
+        retryable: true,
+      },
+    },
   }
 }
 
@@ -1776,6 +1925,20 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
     if (parsed.method === "POST" && (segments[2] === "freeze" || segments[2] === "release")) {
       const raw = await readBoundBody(context, request)
       const body = isRecord(raw) ? raw : {}
+      // Plan before permission: there is no point asking an operator to approve a
+      // freeze that billing is about to refuse.
+      //
+      // Release is deliberately NOT gated. It is the way out of a grab this gate
+      // may have allowed, so making the escape hatch conditional on money would
+      // leave a customer's input disabled until somebody upgraded - refusing the
+      // way out is strictly worse than never allowing the way in.
+      if (segments[2] === "freeze") {
+        const unbilled = await capabilityDenied(context, "input_freeze")
+        if (unbilled !== undefined) {
+          json(response, unbilled.status, unbilled.payload)
+          return true
+        }
+      }
       const denied = inputControlPermission(context, request, body)
       if (denied !== undefined) {
         json(response, denied.status, { ok: false, error: denied.error })

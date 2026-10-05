@@ -319,6 +319,17 @@ export const DESKTOP_NATIVE_ENGLISH = {
 
   "desktop.picker.error.notSelected": "File was not selected by the picker",
   "desktop.picker.error.sizeLimit": "Selected attachments exceed the {{limit}} MB limit",
+
+  "desktop.menu.account": "Account",
+  "desktop.menu.plan": "Plan: {{plan}}",
+  "desktop.menu.upgradePro": "Upgrade to Pro",
+  "desktop.menu.upgradeBusiness": "Upgrade to Business",
+  "desktop.menu.manageBilling": "Manage Billing",
+
+  "desktop.billing.title": "Billing",
+  "desktop.billing.notConfigured": "Billing is not configured on this server.",
+  "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.",
+  "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.",
 } as const
 
 export type DesktopNativeKey = keyof typeof DESKTOP_NATIVE_ENGLISH
