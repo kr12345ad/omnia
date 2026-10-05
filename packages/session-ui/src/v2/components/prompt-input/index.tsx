@@ -22,6 +22,7 @@ import type {
   PromptInputV2Suggestion,
 } from "./types"
 import type { PromptInputV2Interaction, PromptInputV2SelectControl } from "./interaction"
+import { PromptInputV2Paywall, PromptInputV2ShellPaywall, promptInputV2VisionOwed, type PromptInputV2Paywalls } from "./paywall"
 import "./attachments.css"
 
 export type {
@@ -34,6 +35,8 @@ export type {
 
 export type PromptInputV2Mode = "normal" | "shell"
 
+export type { PromptInputV2Capability, PromptInputV2Paywalls } from "./paywall"
+
 export type PromptInputV2Props = {
   controller: PromptInputV2Interaction
   disabled?: boolean
@@ -44,6 +47,11 @@ export type PromptInputV2Props = {
   variantControlVisible?: boolean
   attachKeybind?: string[]
   attachShortcut?: string
+  /**
+   * Entitlement answers for the capabilities this composer can surface.
+   * Omitted means this composer has no billing context and draws no notice.
+   */
+  paywalls?: PromptInputV2Paywalls
 }
 
 export function PromptInputV2(props: PromptInputV2Props) {
@@ -140,7 +148,33 @@ export function PromptInputV2(props: PromptInputV2Props) {
             onAttachmentRemove={(attachment) => props.controller.removeAttachment(attachment.id)}
             onCommentClick={(comment) => props.controller.toggleContext(comment.key)}
             onCommentRemove={(comment) => props.controller.removeContext(comment.key)}
+            vision={
+              <Show when={props.paywalls}>
+                {(paywalls) => (
+                  <PromptInputV2Paywall
+                    capability="cloud_vision"
+                    decision={paywalls().cloudVision}
+                    offer={paywalls().offer}
+                    onDismiss={() => paywalls().onDismiss("cloud_vision")}
+                  />
+                )}
+              </Show>
+            }
           />
+        </Show>
+
+        {/* The shell runs in this composer rather than in a side panel, so its
+            refusal is explained where the user is already looking. */}
+        <Show when={props.paywalls}>
+          {(paywalls) => (
+            <PromptInputV2ShellPaywall
+              decision={paywalls().remoteShell}
+              offer={paywalls().offer}
+              opened={state.mode === "shell"}
+              onDismiss={() => paywalls().onDismiss("remote_shell")}
+              class="mx-2 mt-2"
+            />
+          )}
         </Show>
 
         <div class="relative min-h-[60px]">
@@ -384,6 +418,8 @@ export function PromptInputV2Attachments(props: {
   onAttachmentRemove: (attachment: PromptInputV2Attachment) => void
   onCommentClick?: (comment: PromptInputV2Comment) => void
   onCommentRemove?: (comment: PromptInputV2Comment) => void
+  /** Only the images in `attachments` cost vision, so this is drawn for them alone. */
+  vision?: JSX.Element
 }) {
   const i18n = useI18n()
   return (
@@ -463,6 +499,9 @@ export function PromptInputV2Attachments(props: {
           class="pointer-events-none absolute inset-y-0 end-0 z-10 w-6 bg-[linear-gradient(to_left,var(--v2-background-bg-base),transparent)] rtl:bg-[linear-gradient(to_right,var(--v2-background-bg-base),transparent)]"
         />
       </div>
+      <Show when={promptInputV2VisionOwed(props.attachments)}>
+        <div class="px-2 pb-2">{props.vision}</div>
+      </Show>
     </Show>
   )
 }

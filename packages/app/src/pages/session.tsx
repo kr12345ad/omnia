@@ -54,6 +54,7 @@ import { usePlatform } from "@/context/platform"
 import { SDKProvider, useSDK } from "@/context/sdk"
 import { useServerSDK } from "@/context/server-sdk"
 import { ServerConnection, serverName, useServer } from "@/context/server"
+import { useEntitlement } from "@/context/entitlement"
 import { useSettings } from "@/context/settings"
 import { useSync } from "@/context/sync"
 import { useTabs } from "@/context/tabs"
@@ -367,6 +368,10 @@ export default function Page() {
   const comments = useComments()
   const command = useCommand()
   const terminal = useTerminal()
+  // The terminal panels render the remote-shell refusal from the one entitlement
+  // snapshot, so a panel and the composer-side notice can never disagree about
+  // whether the account may open a shell.
+  const entitlement = useEntitlement()
   const [searchParams, setSearchParams] = useSearchParams<{ prompt?: string }>()
   const location = useLocation()
   const navigate = useNavigate()
@@ -463,6 +468,20 @@ export default function Page() {
   const desktopReviewOpen = createMemo(() => isDesktop() && view().reviewPanel.opened())
   const desktopV2ReviewOpen = createMemo(() => newSessionDesign() && desktopReviewOpen() && !!params.id)
   const terminalOpen = createMemo(() => view().terminal.opened())
+  // Asked only once the panel has been opened, so mounting a session does not
+  // spend a billing read on a shell nobody asked for. While the panel is closed
+  // it is inert and aria-hidden anyway, which is why the composer carries the
+  // copy that is readable; withholding the decision here is the same trick
+  // `Paywall` already renders nothing for, so there is no half-drawn notice.
+  const remoteShell = createMemo(() => {
+    if (!terminalOpen()) return undefined
+    if (entitlement.dismissed("remote_shell")) return undefined
+    return entitlement.decision("remote_shell")
+  })
+  createEffect(() => {
+    if (!terminalOpen()) return
+    void entitlement.check("remote_shell")
+  })
   const desktopTerminalOpen = createMemo(() => isDesktop() && terminalOpen())
   const desktopInlineTerminalOnlyOpen = createMemo(
     () => newSessionDesign() && desktopTerminalOpen() && !desktopV2ReviewOpen(),
@@ -2388,7 +2407,12 @@ export default function Page() {
                     "min-h-0 flex-1": !desktopV2PanelLayout().stacked,
                   }}
                 >
-                  <TerminalPanelV2 stacked={desktopV2PanelLayout().stacked} />
+                  <TerminalPanelV2
+                    stacked={desktopV2PanelLayout().stacked}
+                    shell={remoteShell()}
+                    shellOffer={entitlement.offer()}
+                    onDismissShell={() => entitlement.dismiss("remote_shell")}
+                  />
                 </div>
               </Show>
             </div>
@@ -2397,7 +2421,11 @@ export default function Page() {
       </div>
 
       <Show when={!newSessionDesign()}>
-        <TerminalPanel />
+        <TerminalPanel
+          shell={remoteShell()}
+          shellOffer={entitlement.offer()}
+          onDismissShell={() => entitlement.dismiss("remote_shell")}
+        />
       </Show>
     </SessionRouteFrame>
   )
