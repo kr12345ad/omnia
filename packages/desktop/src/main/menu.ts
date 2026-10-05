@@ -39,7 +39,17 @@ let account = UNKNOWN_ACCOUNT
 let accountHooked = false
 
 export function createMenu(deps: Deps) {
-  if (process.platform !== "darwin") return
+  // Account was macOS-only, which left Windows and Linux users with no way to
+  // see their plan, upgrade, or be told billing is unconfigured. The Account
+  // group is now appended to the existing menu on every platform; only the
+  // native application menu itself stays macOS-shaped.
+  if (process.platform !== "darwin") {
+    const menu = Menu.getApplicationMenu()
+    if (menu === null) return
+    const withAccount = [...accountSubmenu(deps)]
+    if (withAccount.length > 0) Menu.setApplicationMenu(Menu.buildFromTemplate([...applicationTemplate(deps), { label: accountLabel("desktop.menu.account"), submenu: withAccount }]))
+    return
+  }
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(applicationTemplate(deps)))
   // Upgrading happens in a browser tab, so the window gaining focus back is the

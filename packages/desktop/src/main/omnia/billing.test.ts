@@ -85,6 +85,7 @@ describe("billing routes", () => {
       plan: "pro",
       computers: 5,
       billingConfigured: true,
+      monthlyUsd: 0,
       capabilities: { input_freeze: { allowed: true, code: "granted", used: 2, limit: 99 } },
     })
     expect(requests).toHaveLength(1)

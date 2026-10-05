@@ -2623,16 +2623,35 @@ export class ComputerManager {
   private async denyUnentitled(
     capability: "vault_login" | "browser_automation",
   ): Promise<{ readonly httpStatus: number; readonly result: ActionResult } | undefined> {
+    const base = this.controlPlaneUrl()
+    const token = this.controlPlaneToken()
+    // No control plane configured means billing was never enabled here, so the
+    // gate is inert: refusing every credential on a self-hosted install that
+    // never opted into billing would break the product for everyone using it
+    // locally. This is distinct from a CONFIGURED control plane being
+    // unreachable, which is a failure and fails closed.
+    if (base === undefined || token.length === 0) return undefined
     let json: Record<string, unknown>
     try {
-      const response = await fetch(`${this.controlPlaneUrl()}/v1/billing/check`, {
+      const response = await fetch(`${base}/v1/billing/check`, {
         method: "POST",
-        headers: { authorization: `Bearer ${this.controlPlaneToken()}`, "content-type": "application/json" },
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
         body: JSON.stringify({ capability }),
+        // Without a deadline a hung control plane hung the action forever, which
+        // reads to the user as Omnia being broken rather than billing being slow.
+        signal: AbortSignal.timeout(5_000),
       })
-      json = (await response.json()) as Record<string, unknown>
+      // A 5xx is a FAILURE, not a decision. Reporting it as "not included in your
+      // plan" both lied to the customer and applied free-plan policy to someone
+      // who had paid.
+      if (response.status >= 500) {
+        return this.entitlementUnavailable(capability)
+      }
+      json = (await response.json().catch(() => undefined)) as Record<string, unknown> | undefined ?? {}
     } catch {
-      return undefined
+      // Both capabilities gated here are HARD metered on free, so a transport
+      // failure must refuse rather than hand out unmetered use.
+      return this.entitlementUnavailable(capability)
     }
     if (json.allowed === true) return undefined
     const reason = typeof json.reason === "string" ? json.reason : `${capability} is not available on your plan.`
@@ -2649,6 +2668,22 @@ export class ComputerManager {
           code: "capability_not_entitled",
           message: `${reason} (${capability}, plan: ${typeof json.plan === "string" ? json.plan : "free"})`,
         },
+      },
+    }
+  }
+
+  /** Refusal used when billing itself could not be reached. */
+  private entitlementUnavailable(
+    capability: "vault_login" | "browser_automation",
+  ): { readonly httpStatus: number; readonly result: ActionResult } {
+    const message = `Billing could not be reached, so ${capability} is unavailable right now. This is our problem, not yours - try again shortly.`
+    return {
+      httpStatus: 503,
+      result: {
+        success: false,
+        status: "rejected",
+        message,
+        error: { code: "entitlement_unavailable", message, retryable: true },
       },
     }
   }

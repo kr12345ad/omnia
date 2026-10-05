@@ -82,6 +82,10 @@ function counterKey(capability: Capability, period: string): string {
  */
 export function readBillingState(file: string | undefined, now: number = Date.now()): BillingState {
   if (file === undefined || !existsSync(file)) return EMPTY_STATE
+  // Refuse to follow a symlink on read as well as on write. Reading through a
+  // link would let anything that can write into the directory choose which file
+  // becomes the billing state.
+  if (lstatIsSymlink(file)) return EMPTY_STATE
   let parsed: unknown
   try {
     parsed = JSON.parse(readFileSync(file, "utf8"))
@@ -136,6 +140,9 @@ export function readBillingState(file: string | undefined, now: number = Date.no
           sessionSeconds[key] = Math.min(boundedCount(seconds), 7 * 24 * 3600)
         }
       }
+      // A crafted state file must not be able to reach Object.prototype through
+      // a profile id, or decide() would read inherited counters.
+      if (profileId === "__proto__" || profileId === "constructor" || profileId === "prototype") continue
       usage[profileId] = { counters, sessionSeconds, updatedAt: boundedCount(value.updatedAt) }
     }
   }
@@ -214,7 +221,9 @@ export function resolvePlan(state: BillingState, profileId: string | undefined, 
   for (const subscription of state.subscriptions) {
     if (subscription.profileId !== profileId) continue
     if (!entitles(subscription.status)) continue
-    if (subscription.currentPeriodEnd !== 0 && subscription.currentPeriodEnd <= now) continue
+    // 0 means "unknown period", not "eternal": an unknown period must not
+    // entitle. Only a real future timestamp counts.
+    if (!Number.isFinite(subscription.currentPeriodEnd) || subscription.currentPeriodEnd <= now) continue
     const candidate = planFor(subscription.plan)
     if (candidate.monthlyUsd >= best.monthlyUsd || rank(candidate) > rank(best)) best = candidate
   }
@@ -231,6 +240,21 @@ function rank(plan: Plan): number {
  * `storeReadable` is passed in rather than inferred so a caller that hit an I/O
  * error can say so; that is what separates fail-closed from fail-open here.
  */
+/**
+ * Reads a profile's usage without ever walking the prototype chain.
+ *
+ * `usage["__proto__"]` on a plain object returns Object.prototype, whose
+ * `counters` is undefined - so a caller-supplied profile id of "__proto__" threw
+ * a TypeError inside decide() instead of being treated as no usage. Both lookups
+ * go through here.
+ */
+function usageFor(state: BillingState, profileId: string | undefined): UsageRecord | undefined {
+  if (profileId === undefined || profileId.length === 0) return undefined
+  if (!Object.hasOwn(state.usage, profileId)) return undefined
+  const record = state.usage[profileId]
+  return record === undefined || record === null ? undefined : record
+}
+
 export function decide(
   state: BillingState,
   profileId: string | undefined,
@@ -242,8 +266,8 @@ export function decide(
   const plan = resolvePlan(state, profileId, now)
   const rule = plan.capabilities[capability]
   const period = currentPeriod(now)
-  const record = profileId === undefined ? undefined : state.usage[profileId]
-  const used = record?.counters[counterKey(capability, period)] ?? 0
+  const record = usageFor(state, profileId)
+  const used = record === undefined ? 0 : (record.counters[counterKey(capability, period)] ?? 0)
 
   if (rule.limit === 0) {
     return {
@@ -257,7 +281,7 @@ export function decide(
       reason: `${capability} is not included in the ${plan.id} plan.`,
     }
   }
-  if (!storeReadable && failsClosed(capability)) {
+  if (!storeReadable && failsClosed(capability, plan.id)) {
     return {
       allowed: false,
       code: "unknown",
@@ -266,7 +290,7 @@ export function decide(
       used,
       limit: rule.limit,
       metering: rule.metering,
-      reason: `Billing state is unavailable, so ${capability} cannot be confirmed.`,
+      reason: `Billing state is unavailable, so ${capability} cannot be confirmed on the ${plan.id} plan.`,
     }
   }
   if (used >= rule.limit && Number.isFinite(rule.limit)) {
@@ -307,9 +331,10 @@ export function consume(
   const now = options.now ?? Date.now()
   const period = currentPeriod(now)
   const key = counterKey(capability, period)
-  const previous = state.usage[profileId]
+  const previous = usageFor(state, profileId)
   const counters = { ...(previous?.counters ?? {}) }
   counters[key] = (counters[key] ?? 0) + 1
+  if (profileId === "__proto__" || profileId === "constructor" || profileId === "prototype") return state
   const usage = {
     ...state.usage,
     [profileId]: { counters, sessionSeconds: previous?.sessionSeconds ?? {}, updatedAt: now },

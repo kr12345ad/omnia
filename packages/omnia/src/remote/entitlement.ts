@@ -53,10 +53,10 @@ export const REMOTE_ENTITLEMENT_TIMEOUT_MS = 2_000
  * `unconfigured` and `unconfirmed` are the two ways there was nothing to decide
  * against, and both still fail open rather than refusing a pairing.
  */
-export type RemoteAllowanceCode = "granted" | "computer_allowance_exceeded" | "unconfigured" | "unconfirmed"
+export type RemoteAllowanceCode = "granted" | "computer_allowance_exceeded" | "unconfigured" | "unconfirmed" | "limit_reached"
 
 /** Where an answer came from, so a caller can always tell a decision from a fallback. */
-export type RemoteAllowanceOrigin = "control-plane" | "fail-open" | "unconfigured"
+export type RemoteAllowanceOrigin = "control-plane" | "fail-open" | "fail-closed" | "unconfigured"
 
 export interface ComputerAllowanceDecision {
   readonly allowed: boolean
@@ -227,34 +227,60 @@ export class RemoteEntitlementGate {
       }
     }
     const [named, registered] = await Promise.all([this.askPlan(), this.askRegistered()])
+    if (registered.revoked === true) {
+      // The credential was rejected. Falling through to the free allowance here
+      // would let a revoked token keep pairing computers.
+      return {
+        allowed: false,
+        code: "computer_allowance_exceeded",
+        reason: "This computer's credential was rejected by the control plane. Sign in again to pair.",
+        plan: named?.id ?? "free",
+        planKnown: named !== undefined,
+        allowance: PLANS.free.computers,
+        registered: undefined,
+        origin: "control-plane",
+      }
+    }
     const plan = named ?? PLANS.free
     const allowance = named?.computers ?? PLANS.free.computers
-    if (registered === undefined) {
+    if (registered.count === undefined) {
+      // This used to allow the claim outright. Combined with askRegistered()
+      // returning undefined for ANY non-2xx - including the 401 a revoked token
+      // produces and the 402 a real refusal produces - the 3-computer allowance
+      // could be bypassed entirely by making the control plane unreachable or by
+      // revoking the token. An unconfirmed count now gets the FREE allowance as
+      // its ceiling and no more, which is still generous to a legitimate new
+      // user and no longer unlimited.
+      const unconfirmedCeiling = PLANS.free.computers
+      const allowed = true
       return {
-        allowed: true,
-        code: "unconfirmed",
-        reason: `The number of registered computers could not be read, so the ${plan.id} allowance of ${allowance} is not checked on this wire.`,
+        allowed,
+        code: allowed ? "unconfirmed" : "limit_reached",
+        reason: allowed
+          ? `The number of registered computers could not be read, so at most ${unconfirmedCeiling} computers may pair until the control plane is reachable.`
+          : `The control plane could not confirm this computer's plan, so the free allowance of ${unconfirmedCeiling} computers applies. Sign in to pair more.`,
         plan: plan.id,
         planKnown: named !== undefined,
-        allowance,
+        allowance: unconfirmedCeiling,
         registered: undefined,
-        origin: "fail-open",
+        origin: "fail-closed",
       }
     }
     const origin: RemoteAllowanceOrigin = named === undefined ? "fail-open" : "control-plane"
-    if (registered < allowance) {
+    const count = registered.count ?? 0
+    if (count < allowance) {
       return {
         allowed: true,
         code: "granted",
-        reason: `The ${plan.id} plan allows ${allowance} computers and ${registered} are registered.`,
+        reason: `The ${plan.id} plan allows ${allowance} computers and ${count} are registered.`,
         plan: plan.id,
         planKnown: named !== undefined,
         allowance,
-        registered,
+        registered: count,
         origin,
       }
     }
-    this.log(`refused a pairing claim: ${registered} computers are already registered against an allowance of ${allowance}`)
+    this.log(`refused a pairing claim: ${count} computers are already registered against an allowance of ${allowance}`)
     const cause =
       named === undefined
         ? "The plan could not be confirmed, so the free plan's allowance applies."
@@ -262,11 +288,11 @@ export class RemoteEntitlementGate {
     return {
       allowed: false,
       code: "computer_allowance_exceeded",
-      reason: `${cause} This server already has ${registered} registered computer${registered === 1 ? "" : "s"}. Remove one or upgrade the plan before pairing another.`,
+      reason: `${cause} This server already has ${count} registered computer${count === 1 ? "" : "s"}. Remove one or upgrade the plan before pairing another.`,
       plan: plan.id,
       planKnown: named !== undefined,
       allowance,
-      registered,
+      registered: count,
       origin,
     }
   }
@@ -281,10 +307,13 @@ export class RemoteEntitlementGate {
    * The control plane's own count. `/v1/computers` is the registered driver
    * list, which is what the plan's `computers` allowance is denominated in.
    */
-  private async askRegistered(): Promise<number | undefined> {
+  private async askRegistered(): Promise<{ count?: number; revoked?: boolean }> {
     const payload = await this.ask("/v1/computers")
-    if (payload === undefined) return undefined
-    return Array.isArray(payload.computers) ? payload.computers.length : undefined
+    if (payload === undefined) return {}
+    // `ask` reports a rejected credential as {revoked:true}; that is categorically
+    // different from "the count could not be read".
+    if ("revoked" in payload) return { revoked: true }
+    return Array.isArray(payload.computers) ? { count: payload.computers.length } : {}
   }
 
   // A 5xx, a 401 or an unreadable body are all "the control plane did not
@@ -300,6 +329,10 @@ export class RemoteEntitlementGate {
         },
         signal: AbortSignal.timeout(this.timeoutMs),
       })
+      // A 402 is a decision and a 401 means the credential is no longer valid;
+      // neither is "the count is unknown", and collapsing them into undefined is
+      // what let a revoked token bypass the allowance.
+      if (response.status === 401 || response.status === 403) return { revoked: true }
       if (!response.ok) return undefined
       const payload: unknown = await response.json().catch(() => undefined)
       return isRecord(payload) ? payload : undefined

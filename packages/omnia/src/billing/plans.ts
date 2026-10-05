@@ -180,14 +180,18 @@ export function planFor(value: unknown): Plan {
 /**
  * Whether a capability must be refused when the billing store cannot be read.
  *
- * Keyed off `hard` metering rather than off whether the free plan includes it:
- * an unreadable store means the usage counters are unknown, so a hard allowance
- * cannot be enforced, and handing the request out anyway would make a disk error
- * an unlimited-usage bug. Soft allowances keep working on purpose, because
- * "past its fair-use allowance" is still a working product.
+ * This MUST be evaluated against the plan the customer is actually on, not
+ * against the free plan. Keying it off `free` meant a Pro or Business customer
+ * whose store was unreadable had every paid capability refused, so our own disk
+ * error silently stripped features from people who had paid for them - the exact
+ * inverse of the policy, and the fastest way to lose a customer and a refund.
+ *
+ * On a paid plan an allowance is either unlimited or soft, so this returns false
+ * and the feature keeps working. On free, a hard allowance is genuinely
+ * unenforceable without the counters, so it is refused.
  */
-export function failsClosed(capability: Capability): boolean {
-  return PLANS.free.capabilities[capability].metering === "hard"
+export function failsClosed(capability: Capability, plan: PlanId = "free"): boolean {
+  return planFor(plan).capabilities[capability].metering === "hard"
 }
 
 /** Scopes a capability implies, so enforcement can reuse the permission model. */

@@ -21,6 +21,12 @@ export interface PaywallDecision {
   readonly metering?: PaywallMetering
   readonly used?: number
   readonly limit?: number
+  /**
+   * The server's own sentence. Without it a refusal had no explanation at all:
+   * the decision object carried a code and two numbers, so a user whose feature
+   * stopped working during our outage was shown nothing and left to guess.
+   */
+  readonly reason?: string
 }
 
 /**
@@ -156,6 +162,12 @@ export function Paywall(props: PaywallProps) {
               </Switch>
             </span>
             <span data-slot="paywall-description">
+              {/* The server's sentence wins when there is one: it is the only
+                  part that can explain an outage ("billing could not be reached")
+                  rather than implying the customer did something wrong. */}
+              <Show when={local.decision?.reason !== undefined && local.decision.reason.length > 0}>
+                <span data-slot="paywall-reason">{local.decision?.reason}</span>
+              </Show>
               <Switch>
                 <Match when={current() === "fair-use"}>{i18n.t("ui.paywall.fairUse.description")}</Match>
                 <Match when={current() === "used-up"}>{i18n.t("ui.paywall.usedUp.description")}</Match>

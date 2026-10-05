@@ -130,6 +130,14 @@ export type FatalRendererError = {
 }
 
 export type ElectronAPI = {
+  /** Plan, allowance and per-capability decisions. Absent meant the renderer
+   *  could never learn its entitlements, so the paywall rendered nothing. */
+  billing: {
+    entitlement: () => Promise<unknown>
+    check: (capability: string) => Promise<unknown>
+    checkout: (plan: string) => Promise<unknown>
+    portal: () => Promise<unknown>
+  }
   omnia: OmniaAPI
   superskills: SuperskillPlatform
   memory: MemoryPlatform

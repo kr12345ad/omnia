@@ -222,6 +222,10 @@ export function setDefaultEntitlementGate(gate: EntitlementGate | undefined): vo
 
 function parseDecision(capability: Capability, body: unknown): EntitlementDecision | undefined {
   if (!isRecord(body) || typeof body.allowed !== "boolean") return undefined
+  // The answer must be about the capability we asked about. Without this check a
+  // single granted answer could be replayed for any capability, which matters
+  // because the gate falls back to the plaintext http://host:port default.
+  if (typeof body.capability === "string" && body.capability !== capability) return undefined
   return {
     capability,
     allowed: body.allowed,

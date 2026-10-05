@@ -22,6 +22,14 @@ const omniaIpc = {
 } as const
 
 const api: ElectronAPI = {
+  // Billing went missing here entirely, which is why the paywall component
+  // rendered nothing in the shipping app: no call site could reach a decision.
+  billing: {
+    entitlement: () => ipcRenderer.invoke("billing-entitlement"),
+    check: (capability: string) => ipcRenderer.invoke("billing-check", capability),
+    checkout: (plan: string) => ipcRenderer.invoke("billing-checkout", plan),
+    portal: () => ipcRenderer.invoke("billing-portal"),
+  },
   superskills: {
     list: () => ipcRenderer.invoke("superskills-list"),
     get: (id: string) => ipcRenderer.invoke("superskills-get", id),

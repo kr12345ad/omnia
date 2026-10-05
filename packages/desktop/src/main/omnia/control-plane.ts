@@ -38,7 +38,7 @@ export type ControlPlaneRequestInit = {
    * answers a refusal with 402, so the default "any non-2xx throws" rule would
    * turn a metered refusal into an exception.
    */
-  readonly accept?: (status: number) => boolean
+  readonly accept?: (status: number, ok: boolean) => boolean
 }
 
 /**
@@ -75,8 +75,12 @@ export async function controlPlaneRequest(
   } catch {
     json = {}
   }
-  const accept = init.accept ?? (() => response.ok && json.ok === true)
-  if (!accept(response.status))
+  const ok = response.ok && json.ok === true
+  // The predicate is told whether the response was already ok, so an override
+  // can widen what is accepted (a 402 refusal is a decision) instead of
+  // silently replacing the ok-check and rejecting every successful response.
+  const accept = init.accept ?? (() => ok)
+  if (!accept(response.status, ok))
     throw new ControlPlaneRequestError(errorMessage(json, text, response.status), response.status)
   return { status: response.status, json }
 }

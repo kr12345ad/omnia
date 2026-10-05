@@ -154,12 +154,27 @@ export class BrowserEntitlementGate {
   static fromEnv(env: Record<string, string | undefined> = process.env): BrowserEntitlementGate {
     const token = env.OMNIA_SERVER_TOKEN ?? ""
     if (token.length === 0) return new BrowserEntitlementGate()
+    // OMNIA_SERVER_URL wins, exactly as the CUA, remote and driver gates do.
+    //
+    // This used to build the endpoint from OMNIA_SERVER_HOST and only append a
+    // port when OMNIA_SERVER_PORT was set. The desktop sidecar sets URL and
+    // TOKEN but no PORT, so the gate POSTed to http://127.0.0.1 - port 80 - and
+    // sent the bearer in cleartext to whatever happened to be listening there,
+    // while every hard-metered capability came back "unreachable" and was
+    // refused. A host:port guess must never be the fallback for a configured
+    // URL, and an unset port must never silently mean port 80.
+    const configured = env.OMNIA_SERVER_URL ?? env.OMNIA_PUBLIC_URL
+    if (configured !== undefined && configured.length > 0) {
+      return new BrowserEntitlementGate({ token, endpoint: configured })
+    }
     const host = env.OMNIA_SERVER_HOST ?? "127.0.0.1"
     const port = env.OMNIA_SERVER_PORT
-    return new BrowserEntitlementGate({
-      token,
-      endpoint: port === undefined || port.length === 0 ? `http://${host}` : `http://${host}:${port}`,
-    })
+    if (port === undefined || port.length === 0 || !/^\d{1,5}$/.test(port)) {
+      // No URL and no usable port: there is no control plane to ask. Inert beats
+      // guessing a port and shipping the bearer somewhere unintended.
+      return new BrowserEntitlementGate()
+    }
+    return new BrowserEntitlementGate({ token, endpoint: `http://${host}:${port}` })
   }
 
   /** True when a control plane was configured at all. */

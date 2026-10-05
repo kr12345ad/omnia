@@ -34,10 +34,12 @@ export interface BillingCapabilityState {
 }
 
 export interface BillingEntitlement {
+  /** Server-supplied price so the UI never hardcodes one. */
   readonly plan: PlanId
   readonly computers: number
   readonly capabilities: Readonly<Record<string, BillingCapabilityState>>
   readonly billingConfigured: boolean
+  readonly monthlyUsd: number
 }
 
 /** The metered decision. A refusal is an answer, not a failure. */
@@ -91,18 +93,28 @@ export async function readBillingEntitlement(): Promise<BillingEntitlement> {
     computers: typeof json.computers === "number" ? json.computers : 0,
     capabilities: capabilityStates(json.capabilities),
     billingConfigured: json.billingConfigured === true,
+    // Carried so the UI can show what the plan costs instead of hardcoding it.
+    monthlyUsd: typeof json.monthlyUsd === "number" ? json.monthlyUsd : 0,
   }
 }
 
 export async function checkBillingCapability(capability: Capability): Promise<BillingCheck> {
   // 402 is the server's way of answering a refusal, so it is accepted here and
   // returned as a decision; only a genuine failure throws.
-  const { json } = await billingRequest("POST", "/v1/billing/check", { capability }, (status) => status === 402)
+  // A refusal is a 402 and must come back as a DECISION, not a thrown error. The
+  // accept predicate used to be `status === 402`, which REPLACED the default
+  // ok-check rather than adding to it - so a granted 200 threw
+  // ControlPlaneRequestError("HTTP 200") and every soft or free capability was
+  // reported as a failure in the desktop app.
+  const { json } = await billingRequest("POST", "/v1/billing/check", { capability }, (status: number, ok: boolean) => ok || status === 402)
   return {
     ...capabilityState(json),
     plan: isPlanId(json.plan) ? json.plan : "free",
     capability,
-    metering: json.metering === "hard" ? "hard" : "soft",
+    // Default to "hard" when the server does not say: a refusal must never be
+    // rendered as a soft fair-use notice, because that tells the user a feature
+    // still works when it does not.
+    metering: json.metering === "soft" ? "soft" : "hard",
     reason: typeof json.reason === "string" ? json.reason : "",
   }
 }
@@ -168,7 +180,7 @@ function profileHeaders(): Record<string, string> {
   return profileId === undefined ? {} : { "x-omnia-profile": profileId }
 }
 
-function billingRequest(method: "GET" | "POST", path: string, body?: unknown, accept?: (status: number) => boolean) {
+function billingRequest(method: "GET" | "POST", path: string, body?: unknown, accept?: (status: number, ok: boolean) => boolean) {
   return controlPlaneRequest(path, method, { body, headers: profileHeaders(), accept })
 }
 
