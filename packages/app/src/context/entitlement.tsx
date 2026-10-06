@@ -341,3 +341,25 @@ function reportBillingFailure(language: ReturnType<typeof useLanguage>, error?: 
     description: friendlyErrorMessage(error, language.t, "desktop.billing.unreachable"),
   })
 }
+
+/**
+ * Starts checkout for the plan a menu names.
+ *
+ * The paywall's own CTA uses `offer` because it offers one thing; a menu names
+ * two plans, so it needs the direct form. Same request, same error reporting.
+ */
+export function checkoutPlan(
+  platform: ReturnType<typeof usePlatform>,
+  language: ReturnType<typeof useLanguage>,
+  plan: "pro" | "business",
+): void {
+  openBilling(platform, language, (billing) => billing.checkout(plan))
+}
+
+/** Opens the billing portal for the current subscriber. */
+export function openBillingPortal(
+  platform: ReturnType<typeof usePlatform>,
+  language: ReturnType<typeof useLanguage>,
+): void {
+  openBilling(platform, language, (billing) => billing.portal())
+}
