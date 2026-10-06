@@ -51,6 +51,20 @@ describe("memory store", () => {
     expect(memory.stats().total).toBe(2)
   })
 
+  test("a lapsed record leaves read results without a later write", () => {
+    let now = 1_000_000
+    const memory = store(() => now)
+    memory.write({ scope: "session", text: "one-off note about supplier pricing", expiresInDays: 1 })
+    expect(memory.search({ query: "supplier" })).toHaveLength(1)
+
+    // The read path honours the expiry itself instead of waiting for the next
+    // write to run prune().
+    now += 2 * 86400000
+    expect(memory.search({ query: "supplier" })).toHaveLength(0)
+    expect(memory.list()).toHaveLength(0)
+    expect(memory.search({ query: "supplier", includeExpired: true })).toHaveLength(1)
+  })
+
   test("forgets by query and removes by id", () => {
     const memory = store()
     const record = memory.write({ scope: "task", text: "obsolete plan" })
