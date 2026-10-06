@@ -1,6 +1,7 @@
 import { plugin } from "bun"
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { EventEmitter } from "node:events"
+import { tmpdir } from "node:os"
 import type { MenuItemConstructorOptions } from "electron"
 import { createDesktopNativeBundle, DESKTOP_NATIVE_ENGLISH } from "@opencode-ai/app/i18n/desktop-native"
 
@@ -17,21 +18,28 @@ class TestMenu extends EventEmitter {
   }
 }
 
-const app = new EventEmitter()
+// getPath is part of the boundary other main-process modules read through
+// electron-store, which imports the default binding.
+const app = Object.assign(new EventEmitter(), { getPath: () => tmpdir() })
 const installed: TestMenu[] = []
+// This module registers its electron substitution process-wide, so it must
+// expose a default export as well as the named members: electron-store imports
+// the default, and without it every later file that reaches ./store fails with
+// "Missing 'default' export in module 'electron'" from load order alone.
+const electron = {
+  app,
+  BrowserWindow: { getFocusedWindow: () => undefined },
+  Menu: {
+    buildFromTemplate: (template: MenuItemConstructorOptions[]) => new TestMenu(template),
+    setApplicationMenu: (menu: TestMenu) => installed.push(menu),
+  },
+}
 plugin({
   name: "native-account-navigation-electron",
   setup(build) {
     build.module("electron", () => ({
       loader: "object",
-      exports: {
-        app,
-        BrowserWindow: { getFocusedWindow: () => undefined },
-        Menu: {
-          buildFromTemplate: (template: MenuItemConstructorOptions[]) => new TestMenu(template),
-          setApplicationMenu: (menu: TestMenu) => installed.push(menu),
-        },
-      },
+      exports: { ...electron, default: electron },
     }))
   },
 })
