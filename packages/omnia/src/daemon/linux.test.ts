@@ -516,7 +516,7 @@ describe("paid primitive enforcement", () => {
     expect(existsSync(probe)).toBe(false)
   })
 
-  test("refuses a free paired computer before the clipboard is read", async () => {
+  test("the clipboard is FREE on a paired computer, so it is not refused", async () => {
     const calls: string[] = []
     const host = new LinuxHostDriver({
       access: { surface: "paired", plan: "free" },
@@ -526,15 +526,14 @@ describe("paid primitive enforcement", () => {
       },
     })
     const result = await host.readClipboard()
-    expect(result.success).toBe(false)
-    expect(result.text).toBeUndefined()
-    expect(result.error).toMatchObject({ code: "capability_not_entitled" })
-    expect(result.message).toContain("clipboard")
-    // Not even the python interpreter probe: the clipboard was never touched.
-    expect(calls).toEqual([])
+    // Free tier: reading the clipboard is allowed and actually reaches the helper.
+    expect(result.success).toBe(true)
+    expect(result.text).toBe("secret")
+    expect(result.error).toBeUndefined()
+    expect(calls.length).toBeGreaterThan(0)
   })
 
-  test("refuses a free paired computer before the clipboard is written", async () => {
+  test("the clipboard is free to write too", async () => {
     const calls: string[] = []
     const host = new LinuxHostDriver({
       access: { surface: "paired", plan: "free" },
@@ -544,12 +543,12 @@ describe("paid primitive enforcement", () => {
       },
     })
     const written = await host.writeClipboard("secret")
-    expect(written.success).toBe(false)
-    expect(written.error).toMatchObject({ code: "capability_not_entitled" })
+    expect(written.success).toBe(true)
+    expect(written.error).toBeUndefined()
     const image = await host.writeClipboardImage("/tmp/whatever.png")
-    expect(image.success).toBe(false)
-    expect(image.error).toMatchObject({ code: "capability_not_entitled" })
-    expect(calls).toEqual([])
+    expect(image.success).toBe(true)
+    expect(image.error).toBeUndefined()
+    expect(calls.length).toBeGreaterThan(0)
   })
 
   test("refuses a paired computer whose plan nobody resolved", async () => {
@@ -606,16 +605,19 @@ describe("paid primitive enforcement", () => {
     const info = await host.info()
     expect(info.id).toBe("linux-host")
     expect(calls.length).toBeGreaterThan(0)
-    const denial = allowCapability({ surface: "paired", plan: "free" }, "input_freeze")
-    expect(denial?.error).toMatchObject({ code: "capability_not_entitled" })
+    // Input freeze is free: the whole point of the halo is that a human can take
+    // the machine back, so charging for it made the free tier unusable.
+    expect(allowCapability({ surface: "paired", plan: "free" }, "input_freeze")).toBeUndefined()
   })
 
   test("allowCapability names the capability and the plan it refused", () => {
     expect(allowCapability({ surface: "local", plan: "free" }, "remote_shell")).toBeUndefined()
     expect(allowCapability({ surface: "paired", plan: "pro" }, "remote_shell")).toBeUndefined()
     expect(allowCapability({ surface: "paired", plan: "pro" }, "clipboard")).toBeUndefined()
-    const denial = allowCapability({ surface: "paired", plan: "free" }, "clipboard")
-    expect(denial?.message).toContain("clipboard")
+    // The clipboard is free now, so the capability that still names itself in a
+    // refusal is the remote shell.
+    const denial = allowCapability({ surface: "paired", plan: "free" }, "remote_shell")
+    expect(denial?.message).toContain("remote_shell")
     expect(denial?.message).toContain("free")
     expect(denial?.error).toMatchObject({ code: "capability_not_entitled" })
     expect(refusedCapability("remote_shell", "free")).toMatchObject({

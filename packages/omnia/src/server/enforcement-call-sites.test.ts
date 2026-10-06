@@ -1,16 +1,16 @@
-// Enforcement at the two call sites that refuse a paid capability BEFORE the work
+// Enforcement at the two call sites that refuse a capability BEFORE the work
 // happens, pinned as an enforcement contract rather than as a restatement of the
 // plan table.
 //
 // There are two of them and the contract is the same for both:
 //
 //   1. THE DECISION PRECEDES THE OPERATION. A refusal that arrives after the grab
-//      is installed is not a refusal, it is somebody's keyboard held until they
-//      pay. A refusal that arrives after the credential is read is a secret
-//      already in memory for a request nobody was entitled to make. So every test
-//      below asserts the driver call count, not just the status code - the
-//      difference between "the route refused" and "the route refused before
-//      touching the machine or the vault".
+//      is installed is somebody's keyboard held until they pay. A refusal that
+//      arrives after the credential is read is a secret already in memory for a
+//      request nobody was entitled to make. So every test below asserts the
+//      driver call count, not just the status code - the difference between "the
+//      route refused" and "the route refused before touching the machine or the
+//      vault".
 //
 //   2. THE STATUS SAYS WHICH OF TWO THINGS HAPPENED. 402 is a DECISION: this plan
 //      does not include the capability, and paying fixes it. 503 is OUR outage:
@@ -19,23 +19,36 @@
 //      outage as "not included in your plan" both lies to the customer and
 //      applies free-plan policy to somebody who paid.
 //
-//   3. THE ESCAPE HATCH IS NEVER GATED. POST /v1/input/release is the way back out
-//      of a grab, so it has to work while the freeze route is refusing - which
-//      means it has to work during a 402 AND during our own outage.
+//   3. input_freeze IS NOT ONE OF THOSE CAPABILITIES ANY MORE. It is a safety
+//      basic and unlimited on every plan, because the whole point of a freeze is
+//      that a human can take the machine back: an agent that can click but whose
+//      owner cannot safely reclaim the mouse is a hostage situation, not a
+//      pricing tier. So the freeze route fails OPEN - allowed on free, allowed
+//      during a 5xx, allowed after its own check deadline expires - and the
+//      decision contract above is pinned on vault_login, which is still hard
+//      metered on free and still refuses. What each gate does when it cannot
+//      reach billing is asserted per gate below, because the two gates genuinely
+//      disagree: api.ts judges the failure against a plan and can fail open,
+//      computers.ts holds no plan at all and fails closed for everyone.
+//
+//   4. THE ESCAPE HATCH IS NEVER GATED. POST /v1/input/release is the way back
+//      out of a grab, so it has to work while the freeze route is refusing, and
+//      it has to work during our own outage. It asks billing nothing at all.
 //
 // The gate in api.ts and the gate in computers.ts do not agree about which
 // question to ask the control plane, and the tests here pin what each of them
 // actually does, including the two places where that difference costs something.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { startOmniaServer } from "./server"
 import { EventBus } from "./events"
-import { PermissionManager } from "./permissions"
+import { PermissionManager, type ApprovalPolicy, type OmniaScope, type PermissionState } from "./permissions"
 import { ComputerManager, type BrowserController, type ServerComputerDriver } from "./computers"
 import { CredentialStore } from "../credentials"
-import { EMPTY_STATE, applySubscription, writeBillingState } from "../billing/store"
+import { EMPTY_STATE, applySubscription, readBillingState, writeBillingState } from "../billing/store"
 import type { PlanId } from "../billing/plans"
 import type { ActionResult, ComputerAction, Observation } from "../protocol"
 
@@ -112,6 +125,32 @@ function createInputDriver(): { driver: ServerComputerDriver; calls: { grabs: nu
   return { driver, calls }
 }
 
+/** A control plane that only ever answers one way, however it is asked. */
+interface StubControlPlane {
+  readonly url: string
+  readonly stop: () => void
+}
+
+function answeringControlPlane(payload: Record<string, unknown>, status: number): StubControlPlane {
+  const server = Bun.serve({ port: 0, fetch: () => Response.json(payload, { status }) })
+  return { url: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) }
+}
+
+/**
+ * A control plane that accepts the connection and then never says anything.
+ *
+ * Distinct from an unreachable one on purpose: here the request reaches a host
+ * and dies waiting, so the only thing that can end the wait is the call site's
+ * own deadline. That is the timeout case, and it cannot be faked with a 5xx.
+ */
+async function silentControlPlane(): Promise<StubControlPlane> {
+  const listener = createServer(() => undefined)
+  await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", resolve))
+  const address = listener.address()
+  const port = typeof address === "object" && address !== null ? address.port : 0
+  return { url: `http://127.0.0.1:${port}`, stop: () => void listener.close() }
+}
+
 /** The control plane, with a signed-in profile only when asked for one. */
 async function startControlPlane(options: { signedIn?: boolean } = {}): Promise<Server> {
   const authFile = join(dir, options.signedIn === true ? "cp-signed-in.json" : "cp-nobody.json")
@@ -169,35 +208,42 @@ async function post(
   return { status: response.status, body: (await response.json()) as Record<string, unknown> }
 }
 
-describe("POST /v1/input/freeze: the decision comes before the grab", () => {
-  test("a free plan is refused with a 402 naming the capability and the plan, and no grab happens", async () => {
+describe("POST /v1/input/freeze: billing is consulted before the grab, and cannot take it away", () => {
+  test("a free plan is allowed and the grab happens: reclaiming the mouse is a basic, not a feature", async () => {
     const controlPlane = await startControlPlane()
     try {
       const { driver, calls } = createInputDriver()
       const server = await startGated(controlPlane, driver)
       try {
-        const refused = await post(server, "/v1/input/freeze", { computerId: "local", reason: "agent task" })
-        expect(refused.status).toBe(402)
-        expect(refused.body).toEqual({
-          ok: false,
-          error: {
-            code: "capability_not_entitled",
-            message: expect.stringContaining("input_freeze") as unknown as string,
-            capability: "input_freeze",
-            plan: "free",
-            // Upgrading fixes this one. Retrying does not, and a client that
-            // retries a 402 forever is a support ticket instead of an upgrade.
-            retryable: false,
-          },
+        // The gate really was asked, and the answer it got is the one a free
+        // customer is entitled to. Read without consuming, so this probe is not
+        // itself the usage the freeze below records.
+        const answered = await post(
+          controlPlane,
+          "/v1/billing/check",
+          { capability: "input_freeze", consume: false },
+          { "x-omnia-profile": PROFILE },
+        )
+        expect(answered.status).toBe(200)
+        expect(answered.body).toMatchObject({
+          allowed: true,
+          code: "granted",
+          capability: "input_freeze",
+          plan: "free",
+          metering: "soft",
         })
-        expect((refused.body.error as { message: string }).message).toContain("plan: free")
-        // The assertion that separates a gate from a check: the machine was
-        // never touched, and nothing is reported as frozen.
-        expect(calls.grabs).toBe(0)
+        const allowed = await post(server, "/v1/input/freeze", { computerId: "local", reason: "agent task" })
+        expect(allowed.status).toBe(200)
+        expect(allowed.body).toEqual({ ok: true, frozen: true, mode: "x11" })
+        // The assertion that still has teeth in the other direction: the machine
+        // WAS touched. A refusal that arrives after the grab is installed is a
+        // keyboard held until somebody pays, so this route must be the last
+        // thing that decides, and on free it decides yes.
+        expect(calls.grabs).toBe(1)
         const state = await fetch(`${server.url}/v1/input/state?computerId=local`, {
           headers: { authorization: `Bearer ${server.token}` },
         })
-        expect(await state.json()).toMatchObject({ ok: true, frozen: false })
+        expect(await state.json()).toMatchObject({ ok: true, frozen: true })
       } finally {
         await server.stop()
       }
@@ -206,10 +252,140 @@ describe("POST /v1/input/freeze: the decision comes before the grab", () => {
     }
   })
 
-  test("billing is consulted before the operator is asked to approve anything", async () => {
-    // An agent-originated freeze with UI_CONTROL unapproved is 428 at the
-    // permission gate. With a free plan it must be 402 instead: no operator is
-    // ever asked to approve a freeze that billing is about to refuse.
+  test("a control plane that answers 5xx is not a decision, and a safety basic is served anyway", async () => {
+    // The same distinction as before, with the answer it now has to give. The
+    // gate reads anything but 200/402 as OUR failure, and what it does with a
+    // failure is plans.ts's call: input_freeze is a soft allowance on every plan,
+    // so it fails open. A hard allowance in the same 500 is still refused as
+    // 503 - pinned on vault_login below, which is exactly the case this route
+    // used to be standing in for.
+    const broken = answeringControlPlane({ ok: false, error: "upstream is unwell" }, 500)
+    const { driver, calls } = createInputDriver()
+    writeFileSync(join(dir, "auth.json"), JSON.stringify({ profile: { id: PROFILE_ID, login: "tester" }, token: "", signedInAt: 0 }))
+    process.env.OMNIA_SERVER_URL = broken.url
+    process.env.OMNIA_SERVER_TOKEN = "token"
+    const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
+    try {
+      const allowed = await post(server, "/v1/input/freeze", { computerId: "local" })
+      expect(allowed.status).toBe(200)
+      expect(calls.grabs).toBe(1)
+    } finally {
+      await server.stop()
+      broken.stop()
+    }
+  })
+
+  test("a paid plan does not lose the capability when the control plane is unreachable", async () => {
+    // THE GAP, and it now points the other way. This gate holds no memory of
+    // which plan the customer is on - `lastKnownPlan` is a local of a single
+    // call - so a failure is judged against `free`. That used to be the reason a
+    // pro customer was refused input_freeze during our own outage, with `plan:
+    // "free"` in the body telling them they were on the free plan. With
+    // input_freeze unlimited on free it is the reason everybody's freeze
+    // survives one: a soft allowance on free fails open, and the 503 that used to
+    // name the wrong plan is unreachable here, because only a capability that is
+    // hard on free can arm it and this route gates none.
+    subscribe("pro")
+    const { driver, calls } = createInputDriver()
+    writeFileSync(join(dir, "auth.json"), JSON.stringify({ profile: { id: PROFILE_ID, login: "tester" }, token: "", signedInAt: 0 }))
+    process.env.OMNIA_SERVER_URL = "http://127.0.0.1:1"
+    process.env.OMNIA_SERVER_TOKEN = "token"
+    const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
+    try {
+      const allowed = await post(server, "/v1/input/freeze", { computerId: "local" })
+      expect(allowed.status).toBe(200)
+      expect(allowed.body).toEqual({ ok: true, frozen: true, mode: "x11" })
+      expect(calls.grabs).toBe(1)
+    } finally {
+      await server.stop()
+    }
+  })
+
+  test("a control plane that never answers cannot hold a safety basic hostage", async () => {
+    // The timeout rather than the transport failure. The gate's own deadline
+    // (CAPABILITY_CHECK_TIMEOUT_MS) is the only thing that can end this wait,
+    // and what it answers when the deadline passes is still yes: a hung billing
+    // service must not be able to freeze the route that hands the machine back.
+    const silent = await silentControlPlane()
+    const { driver, calls } = createInputDriver()
+    writeFileSync(join(dir, "auth.json"), JSON.stringify({ profile: { id: PROFILE_ID, login: "tester" }, token: "", signedInAt: 0 }))
+    process.env.OMNIA_SERVER_URL = silent.url
+    process.env.OMNIA_SERVER_TOKEN = "token"
+    const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
+    try {
+      const asked = Date.now()
+      const allowed = await post(server, "/v1/input/freeze", { computerId: "local" })
+      expect(allowed.status).toBe(200)
+      expect(calls.grabs).toBe(1)
+      // The wait really happened, so the 200 above is a deadline that expired
+      // rather than a control plane that happened to answer.
+      expect(Date.now() - asked).toBeGreaterThanOrEqual(4_000)
+    } finally {
+      await server.stop()
+      silent.stop()
+    }
+  }, 30_000)
+
+  test("a 402 from the control plane IS a decision, and it still comes before the grab", async () => {
+    // The free plan can no longer produce this answer for input_freeze, so the
+    // stub does. What is under test is the gate's shape, which the matrix change
+    // does not touch: a decision is honoured, it names the capability and the
+    // plan, and the machine is left alone. The same wire contract is what a real
+    // paid capability gets - see vault_login below.
+    const refusing = answeringControlPlane(
+      {
+        ok: false,
+        allowed: false,
+        code: "not_entitled",
+        capability: "input_freeze",
+        plan: "free",
+        used: 0,
+        limit: 0,
+        metering: "hard",
+        reason: "input_freeze is not included in the free plan.",
+      },
+      402,
+    )
+    const { driver, calls } = createInputDriver()
+    writeFileSync(join(dir, "auth.json"), JSON.stringify({ profile: { id: PROFILE_ID, login: "tester" }, token: "", signedInAt: 0 }))
+    process.env.OMNIA_SERVER_URL = refusing.url
+    process.env.OMNIA_SERVER_TOKEN = "token"
+    const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
+    try {
+      const refused = await post(server, "/v1/input/freeze", { computerId: "local", reason: "agent task" })
+      expect(refused.status).toBe(402)
+      expect(refused.body).toEqual({
+        ok: false,
+        error: {
+          code: "capability_not_entitled",
+          message: expect.stringContaining("input_freeze") as unknown as string,
+          capability: "input_freeze",
+          plan: "free",
+          // Upgrading fixes this one. Retrying does not, and a client that
+          // retries a 402 forever is a support ticket instead of an upgrade.
+          retryable: false,
+        },
+      })
+      expect((refused.body.error as { message: string }).message).toContain("plan: free")
+      expect(calls.grabs).toBe(0)
+      const state = await fetch(`${server.url}/v1/input/state?computerId=local`, {
+        headers: { authorization: `Bearer ${server.token}` },
+      })
+      expect(await state.json()).toMatchObject({ ok: true, frozen: false })
+    } finally {
+      await server.stop()
+      refusing.stop()
+    }
+  })
+
+  test("billing no longer refusing leaves the permission gate as the last word on the grab", async () => {
+    // With free included, the ordering this route documents is no longer
+    // observable here: nothing about this request can produce a billing refusal,
+    // so the permission gate is the only thing left between it and the machine.
+    // That is still worth pinning - an agent-originated freeze with UI_CONTROL
+    // unapproved is 428 and grabs nothing, while the desktop's own freeze is
+    // allowed through. The "billing before approval" ordering itself is pinned
+    // against vault_login in the driver gate below, where a refusal still exists.
     const controlPlane = await startControlPlane()
     try {
       const { driver, calls } = createInputDriver()
@@ -223,63 +399,10 @@ describe("POST /v1/input/freeze: the decision comes before the grab", () => {
       })
       try {
         const asAgent = await post(server, "/v1/input/freeze", { computerId: "local" }, { "x-omnia-origin": "agent" })
-        expect(asAgent.status).toBe(402)
-        expect((asAgent.body.error as { code: string }).code).toBe("capability_not_entitled")
+        expect(asAgent.status).toBe(428)
         expect(calls.grabs).toBe(0)
-        // With the capability included, the same request now reaches the
-        // permission gate, which is what proves the 402 above was billing's
-        // answer and not a permission answer in disguise.
-        subscribe("pro")
-        const agentOnPro = await post(server, "/v1/input/freeze", { computerId: "local" }, { "x-omnia-origin": "agent" })
-        expect(agentOnPro.status).toBe(428)
-        expect(calls.grabs).toBe(0)
-      } finally {
-        await server.stop()
-      }
-    } finally {
-      await controlPlane.stop()
-    }
-  })
-
-  test("a control plane that answers 5xx is OUR outage: 503, retryable, and no grab", async () => {
-    // The distinction a 402 cannot carry. A 500 is the billing service failing,
-    // not deciding, and reporting it as "not included in your plan" applies free
-    // policy to whoever asked.
-    const broken = Bun.serve({ port: 0, fetch: () => new Response("upstream is unwell", { status: 500 }) })
-    const { driver, calls } = createInputDriver()
-    writeFileSync(join(dir, "auth.json"), JSON.stringify({ profile: { id: PROFILE_ID, login: "tester" }, token: "", signedInAt: 0 }))
-    process.env.OMNIA_SERVER_URL = `http://127.0.0.1:${broken.port}`
-    process.env.OMNIA_SERVER_TOKEN = "token"
-    const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
-    try {
-      const refused = await post(server, "/v1/input/freeze", { computerId: "local" })
-      expect(refused.status).toBe(503)
-      expect(refused.body).toMatchObject({
-        ok: false,
-        error: { code: "entitlement_unavailable", capability: "input_freeze", retryable: true },
-      })
-      expect((refused.body.error as { message: string }).message).toContain("HTTP 500")
-      expect(calls.grabs).toBe(0)
-    } finally {
-      await server.stop()
-      broken.stop(true)
-    }
-  })
-
-  test("the asking profile is forwarded, so a paying customer is answered on THEIR plan", async () => {
-    // The control plane here has nobody signed in - the shape of a shared
-    // control plane serving many desktops. Entitlements are per profile, so the
-    // gate has to name whose plan it is asking about; if it did not, every
-    // desktop on the host would be answered for the anonymous free plan.
-    const controlPlane = await startControlPlane()
-    try {
-      subscribe("pro")
-      const { driver, calls } = createInputDriver()
-      const server = await startGated(controlPlane, driver)
-      try {
-        const allowed = await post(server, "/v1/input/freeze", { computerId: "local" })
-        expect(allowed.status).toBe(200)
-        expect(allowed.body).toEqual({ ok: true, frozen: true, mode: "x11" })
+        const asOperator = await post(server, "/v1/input/freeze", { computerId: "local" })
+        expect(asOperator.status).toBe(200)
         expect(calls.grabs).toBe(1)
       } finally {
         await server.stop()
@@ -289,60 +412,31 @@ describe("POST /v1/input/freeze: the decision comes before the grab", () => {
     }
   })
 
-  test("a paid plan loses the capability when the control plane is unreachable, and says it is on free", async () => {
-    // THE GAP, pinned as observed. This gate holds no memory of which plan the
-    // customer is on, so it evaluates the failure policy against `free`, where
-    // input_freeze is hard-metered, and refuses. Two consequences, both real:
+  test("the asking profile is forwarded, so the usage is charged to THAT plan", async () => {
+    // The control plane here has nobody signed in - the shape of a shared
+    // control plane serving many desktops. Entitlements are per profile, so the
+    // gate has to name whose plan it is asking about; if it did not, every
+    // desktop on the host would be answered for the anonymous free plan.
     //
-    //   - a paying customer is refused a capability they bought during our own
-    //     outage, which is the exact inverse of the policy in plans.ts; and
-    //   - the refusal names plan "free" in its body, so the message tells a pro
-    //     customer they are on the free plan.
-    //
-    // The canonical client (../billing/client, which the browser and CUA gates
-    // use) answers the same outage for the same customer with allowed=true,
-    // because it remembers the plan the control plane last named. Two gates, one
-    // outage, opposite answers - pinned here so the disagreement is visible
-    // rather than discovered. See enforcement-contract.test.ts for the client
-    // half.
-    const { driver, calls } = createInputDriver()
-    writeFileSync(join(dir, "auth.json"), JSON.stringify({ profile: { id: PROFILE_ID, login: "tester" }, token: "", signedInAt: 0 }))
-    process.env.OMNIA_SERVER_URL = "http://127.0.0.1:1"
-    process.env.OMNIA_SERVER_TOKEN = "token"
-    const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
-    try {
-      const refused = await post(server, "/v1/input/freeze", { computerId: "local" })
-      expect(refused.status).toBe(503)
-      expect(refused.body).toMatchObject({
-        ok: false,
-        error: {
-          code: "entitlement_unavailable",
-          capability: "input_freeze",
-          // The plan in the body is hardcoded, so it is `free` even for the
-          // paying customer this gate is refusing.
-          plan: "free",
-          retryable: true,
-        },
-      })
-      expect(calls.grabs).toBe(0)
-    } finally {
-      await server.stop()
-    }
-  })
-})
-
-describe("POST /v1/input/release: never gated, including during our own outage", () => {
-  test("a 402 freeze does not trap the caller: release reaches the driver", async () => {
+    // input_freeze is unlimited on every plan, so the status code can no longer
+    // tell the two answers apart - and a 200 that proves nothing is worse than
+    // no assertion. The billing store can: the counter lands under the forwarded
+    // profile, and `consume` declines to record anything at all when there is no
+    // profile, so this is empty if the header is not sent.
     const controlPlane = await startControlPlane()
     try {
+      subscribe("pro")
       const { driver, calls } = createInputDriver()
       const server = await startGated(controlPlane, driver)
       try {
-        expect((await post(server, "/v1/input/freeze", { computerId: "local" })).status).toBe(402)
-        const released = await post(server, "/v1/input/release", { computerId: "local" })
-        expect(released.status).toBe(200)
-        expect(released.body).toMatchObject({ ok: true, frozen: false })
-        expect(calls.releases).toBe(1)
+        const allowed = await post(server, "/v1/input/freeze", { computerId: "local" })
+        expect(allowed.status).toBe(200)
+        expect(calls.grabs).toBe(1)
+        const usage = readBillingState(join(dir, "billing.json")).usage
+        expect(Object.keys(usage)).toEqual([PROFILE])
+        const counters = usage[PROFILE]?.counters ?? {}
+        expect(Object.keys(counters).filter((key) => key.startsWith("input_freeze:"))).toHaveLength(1)
+        expect(Object.values(counters)).toEqual([1])
       } finally {
         await server.stop()
       }
@@ -350,19 +444,60 @@ describe("POST /v1/input/release: never gated, including during our own outage",
       await controlPlane.stop()
     }
   })
+})
+
+describe("POST /v1/input/release: never gated, including during our own outage", () => {
+  test("a refused freeze does not trap the caller: release reaches the driver", async () => {
+    // The freeze above that the free plan can no longer produce, so the stub
+    // refuses. Release asks billing nothing, and the way out has to work while
+    // the way in is being refused - refusing the way out is strictly worse than
+    // never allowing the way in.
+    const refusing = answeringControlPlane(
+      {
+        ok: false,
+        allowed: false,
+        code: "not_entitled",
+        capability: "input_freeze",
+        plan: "free",
+        used: 0,
+        limit: 0,
+        metering: "hard",
+        reason: "input_freeze is not included in the free plan.",
+      },
+      402,
+    )
+    const { driver, calls } = createInputDriver()
+    writeFileSync(join(dir, "auth.json"), JSON.stringify({ profile: { id: PROFILE_ID, login: "tester" }, token: "", signedInAt: 0 }))
+    process.env.OMNIA_SERVER_URL = refusing.url
+    process.env.OMNIA_SERVER_TOKEN = "token"
+    const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
+    try {
+      expect((await post(server, "/v1/input/freeze", { computerId: "local" })).status).toBe(402)
+      expect(calls.grabs).toBe(0)
+      const released = await post(server, "/v1/input/release", { computerId: "local" })
+      expect(released.status).toBe(200)
+      expect(released.body).toMatchObject({ ok: true, frozen: false })
+      expect(calls.releases).toBe(1)
+    } finally {
+      await server.stop()
+      refusing.stop()
+    }
+  })
 
   test("release works while billing is completely unreachable", async () => {
     // The case that is easy to get wrong: gating release "for symmetry" with
-    // freeze. During our own outage the freeze route answers 503, and a customer
-    // whose grab is already installed needs the way out more urgently than
-    // ever, not less.
+    // freeze. During our own outage the freeze route fails OPEN and installs the
+    // grab anyway, so a customer whose grab is already installed needs the way
+    // out more urgently than ever, not less - and the route serving the way in
+    // is exactly the route that cannot be trusted to serve the way out.
     const { driver, calls } = createInputDriver()
     writeFileSync(join(dir, "auth.json"), JSON.stringify({ profile: { id: PROFILE_ID, login: "tester" }, token: "", signedInAt: 0 }))
     process.env.OMNIA_SERVER_URL = "http://127.0.0.1:1"
     process.env.OMNIA_SERVER_TOKEN = "token"
     const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
     try {
-      expect((await post(server, "/v1/input/freeze", { computerId: "local" })).status).toBe(503)
+      expect((await post(server, "/v1/input/freeze", { computerId: "local" })).status).toBe(200)
+      expect(calls.grabs).toBe(1)
       const released = await post(server, "/v1/input/release", { computerId: "local" })
       expect(released.status).toBe(200)
       expect(released.body).toMatchObject({ ok: true, frozen: false, releasedBy: "request" })
@@ -460,7 +595,12 @@ function createBrowser(): BrowserController {
   }
 }
 
-function createDriverHarness(): {
+function createDriverHarness(
+  options: {
+    readonly permissions?: Partial<Record<OmniaScope, PermissionState>>
+    readonly approvalPolicy?: ApprovalPolicy
+  } = {},
+): {
   manager: ComputerManager
   credentials: CountingCredentials
   credentialId: string
@@ -483,7 +623,10 @@ function createDriverHarness(): {
   const credentials = new CountingCredentials({ file: join(dir, "driver-credentials.json") })
   const manager = new ComputerManager({
     events: new EventBus({ serverId: "test" }),
-    permissions: new PermissionManager({ SECRETS: "prompt" }, "fully_autonomous"),
+    permissions: new PermissionManager(
+      options.permissions ?? { SECRETS: "prompt" },
+      options.approvalPolicy ?? "fully_autonomous",
+    ),
     credentials,
     browser: {
       ...createBrowser(),
@@ -505,6 +648,11 @@ const APPROVAL = {
   approvedScopes: ["UI_CONTROL", "BROWSER", "KEYBOARD", "SECRETS"],
 } as const
 
+/** A browser_login the way an agent asks for one: nothing pre-approved. */
+function agentLogin(harness: ReturnType<typeof createDriverHarness>): Parameters<ComputerManager["execute"]>[1] {
+  return { action: "browser_login", credential: harness.credentialId, origin: "agent" }
+}
+
 /** Spends the free vault_login allowance the way a real caller would. */
 async function spendVaultLogin(controlPlane: Server, times: number): Promise<void> {
   for (let index = 0; index < times; index += 1) {
@@ -514,6 +662,8 @@ async function spendVaultLogin(controlPlane: Server, times: number): Promise<voi
 
 describe("the driver gate refuses a stored-credential login before the vault is read", () => {
   test("a spent hard allowance is a 402 naming the capability and the plan, with zero vault reads", async () => {
+    // vault_login is the capability this file's decision contract is pinned on:
+    // still hard metered on free (three a month), so a decision still exists.
     // The control plane has the profile signed in, so the gate's question
     // resolves against this customer's own allowance.
     const controlPlane = await startControlPlane({ signedIn: true })
@@ -550,6 +700,44 @@ describe("the driver gate refuses a stored-credential login before the vault is 
     }
   })
 
+  test("billing is consulted before the operator is asked to approve anything", async () => {
+    // Moved here from the freeze route, which can no longer produce the
+    // contrast: input_freeze is included on free, so nothing about an
+    // unapproved agent freeze can show which of the two gates ran first. A
+    // browser_login is the case that has both - it needs the SECRETS approval
+    // AND the entitlement, so an operator must never be asked to approve a
+    // login that billing is about to refuse.
+    const controlPlane = await startControlPlane({ signedIn: true })
+    try {
+      process.env.OMNIA_SERVER_URL = controlPlane.url
+      process.env.OMNIA_SERVER_TOKEN = controlPlane.token
+      await spendVaultLogin(controlPlane, 3)
+      const harness = createDriverHarness({
+        permissions: { BROWSER: "prompt", SECRETS: "prompt" },
+        approvalPolicy: "ask_destructive",
+      })
+      harness.credentials.reads = 0
+      const refused = await harness.manager.execute("local", agentLogin(harness))
+      // 402, not 428: the entitlement was settled first, and the vault was not
+      // read and the browser not driven to reach that answer.
+      expect(refused.httpStatus).toBe(402)
+      expect(refused.result.error).toMatchObject({ code: "capability_not_entitled" })
+      expect(harness.credentials.reads).toBe(0)
+      expect(harness.navigations()).toBe(0)
+      // Pro's vault_login is a soft monthly allowance, so this customer is
+      // entitled again and the very same unapproved request now stops at the
+      // permission gate - which is what proves the 402 above was billing's
+      // answer and not a permission answer in disguise.
+      subscribe("pro")
+      const unapproved = await harness.manager.execute("local", agentLogin(harness))
+      expect(unapproved.httpStatus).toBe(428)
+      expect(unapproved.result.error).toMatchObject({ code: "permission_required" })
+      expect(harness.navigations()).toBe(0)
+    } finally {
+      await controlPlane.stop()
+    }
+  })
+
   test("an unreachable control plane is a retryable 503, and still reads nothing", async () => {
     process.env.OMNIA_SERVER_URL = "http://127.0.0.1:1"
     process.env.OMNIA_SERVER_TOKEN = "token"
@@ -568,6 +756,107 @@ describe("the driver gate refuses a stored-credential login before the vault is 
     expect((outcome.result.error as { message: string }).message).toContain("vault_login")
     expect(harness.credentials.reads).toBe(0)
     expect(harness.navigations()).toBe(0)
+  })
+
+  test("a control plane that answers 5xx is OUR outage too: 503, retryable, and still reads nothing", async () => {
+    // Ported from the freeze route, which can no longer fail closed for anything.
+    // A hard allowance has no counter to be trusted, so a 500 is refused as ours
+    // rather than reported as a decision the customer has to pay to change.
+    const broken = answeringControlPlane({ ok: false, error: "upstream is unwell" }, 500)
+    try {
+      process.env.OMNIA_SERVER_URL = broken.url
+      process.env.OMNIA_SERVER_TOKEN = "token"
+      const harness = createDriverHarness()
+      harness.credentials.reads = 0
+      const outcome = await harness.manager.execute("local", {
+        action: "browser_login",
+        credential: harness.credentialId,
+        ...APPROVAL,
+        approvedScopes: [...APPROVAL.approvedScopes],
+      })
+      expect(outcome.httpStatus).toBe(503)
+      expect(outcome.result.error).toMatchObject({ code: "entitlement_unavailable", retryable: true })
+      expect((outcome.result.error as { message: string }).message).toContain("This is our problem, not yours")
+      expect(harness.credentials.reads).toBe(0)
+      expect(harness.navigations()).toBe(0)
+    } finally {
+      broken.stop()
+    }
+  })
+
+  test("a control plane that never answers is OUR outage at the gate's own deadline", async () => {
+    // The timeout rather than the transport failure, and the reason this gate
+    // carries its own five second ceiling: a hung billing service must not hang
+    // the action. Same 503 as any other unconfirmed allowance, because the cause
+    // is the same - the counter cannot be established.
+    const silent = await silentControlPlane()
+    try {
+      process.env.OMNIA_SERVER_URL = silent.url
+      process.env.OMNIA_SERVER_TOKEN = "token"
+      const harness = createDriverHarness()
+      harness.credentials.reads = 0
+      const asked = Date.now()
+      const outcome = await harness.manager.execute("local", {
+        action: "browser_login",
+        credential: harness.credentialId,
+        ...APPROVAL,
+        approvedScopes: [...APPROVAL.approvedScopes],
+      })
+      expect(Date.now() - asked).toBeGreaterThanOrEqual(4_000)
+      expect(outcome.httpStatus).toBe(503)
+      expect(outcome.result.error).toMatchObject({ code: "entitlement_unavailable", retryable: true })
+      expect(harness.credentials.reads).toBe(0)
+      expect(harness.navigations()).toBe(0)
+    } finally {
+      silent.stop()
+    }
+  }, 30_000)
+
+  test("a paying customer is refused an allowance they are entitled to, because this gate holds no plan", async () => {
+    // THE GAP, one layer down from where the api.ts gate used to hold it and
+    // still open. Pro entitles its holder to 300 soft vault_logins a month, and
+    // the control plane says so while it is reachable; this gate answers the same
+    // outage for the same customer with 503, because it holds no plan at all
+    // rather than judging the failure against one. api.ts's `unconfirmed` fails
+    // open for a soft allowance on a paid plan - which is why input_freeze
+    // survives an outage above and this login does not. The canonical client
+    // (../billing/client, which the browser and CUA gates use) remembers the plan
+    // the control plane last named and fails open as well; see
+    // enforcement-contract.test.ts for the client half.
+    const controlPlane = await startControlPlane({ signedIn: true })
+    try {
+      subscribe("pro")
+      const entitled = await post(
+        controlPlane,
+        "/v1/billing/check",
+        { capability: "vault_login", consume: false },
+        { "x-omnia-profile": PROFILE },
+      )
+      expect(entitled.body).toMatchObject({
+        allowed: true,
+        code: "granted",
+        plan: "pro",
+        capability: "vault_login",
+        limit: 300,
+        metering: "soft",
+      })
+      process.env.OMNIA_SERVER_URL = "http://127.0.0.1:1"
+      process.env.OMNIA_SERVER_TOKEN = controlPlane.token
+      const harness = createDriverHarness()
+      harness.credentials.reads = 0
+      const outcome = await harness.manager.execute("local", {
+        action: "browser_login",
+        credential: harness.credentialId,
+        ...APPROVAL,
+        approvedScopes: [...APPROVAL.approvedScopes],
+      })
+      expect(outcome.httpStatus).toBe(503)
+      expect(outcome.result.error).toMatchObject({ code: "entitlement_unavailable", retryable: true })
+      expect(harness.credentials.reads).toBe(0)
+      expect(harness.navigations()).toBe(0)
+    } finally {
+      await controlPlane.stop()
+    }
   })
 
   test("no control plane configured leaves a local install working", async () => {
@@ -670,9 +959,10 @@ describe("what the driver gate does not cover", () => {
     // The third gap, and the largest: this gate fires only for actions carrying
     // a `credential`, so agent-originated browser work that drives the embedded
     // browser without one - navigate, click, read - is never metered at this call
-    // site even though browser_automation is a hard 250-a-day allowance on free.
-    // The control plane here would refuse every browser action; it is never
-    // asked, which is the proof.
+    // site even though browser_automation is a hard 500-a-day allowance on free.
+    // The control plane here would refuse every capability it is asked about -
+    // including the ones free no longer refuses, since it is not reading the plan
+    // table - and it is never asked, which is the proof.
     const asked: string[] = []
     const controlPlane = Bun.serve({
       port: 0,

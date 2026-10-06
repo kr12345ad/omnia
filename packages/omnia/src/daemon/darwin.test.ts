@@ -43,13 +43,18 @@ describe("macOS paid primitive enforcement", () => {
     expect(command.error).toMatchObject({ code: "capability_not_entitled", retryable: false })
     expect(command.message).toContain("remote_shell")
     expect(command.message).toContain("free")
-    const read = await host.readClipboard()
-    expect(read.success).toBe(false)
-    expect(read.text).toBeUndefined()
-    expect(read.error).toMatchObject({ code: "capability_not_entitled" })
-    const written = await host.writeClipboard("secret")
-    expect(written.success).toBe(false)
-    expect(written.error).toMatchObject({ code: "capability_not_entitled" })
+  })
+
+  // The clipboard is free on every platform now, so asserting it means actually
+  // dispatching pbpaste/pbcopy - which only exist on macOS. The refusal half
+  // above stays platform-independent because it never spawns anything.
+  describeShell("macOS free clipboard", () => {
+    test("the clipboard is free on a paired computer", async () => {
+      const host = new DarwinHostDriver({ shell: "/bin/sh", access: { surface: "paired", plan: "free" } })
+      const read = await host.readClipboard()
+      expect(read.success).toBe(true)
+      expect(read.error).toBeUndefined()
+    })
   })
 })
 

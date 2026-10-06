@@ -50,16 +50,15 @@ describe("windows clipboard safety", () => {
 })
 
 describe("windows paid primitive enforcement", () => {
-  test("refuses the clipboard before the PowerShell source is built", async () => {
+  test("the clipboard is free, so PowerShell is allowed to run", async () => {
     const { calls, runner } = captureInputRunner()
     const host = new WindowsHostDriver({ inputRunner: runner, access: { surface: "paired", plan: "free" } })
     const result = await host.writeClipboard("secret")
-    expect(result.success).toBe(false)
-    expect(result.error).toMatchObject({ code: "capability_not_entitled", retryable: false })
-    expect(result.message).toContain("clipboard")
-    expect(result.message).toContain("free")
-    // The recorded runner is the only thing that can reach the clipboard.
-    expect(calls).toEqual([])
+    expect(result.success).toBe(true)
+    expect(result.error).toBeUndefined()
+    // The clipboard is free, so the PowerShell that reaches it is actually built
+    // and dispatched. The REMOTE SHELL is what still refuses.
+    expect(calls.length).toBeGreaterThan(0)
   })
 
   test("refuses remote_shell before PowerShell is spawned", async () => {
