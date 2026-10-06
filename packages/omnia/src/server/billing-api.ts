@@ -431,28 +431,56 @@ export async function handleBillingRoute(
       json(response, 401, { ok: false, error: "Sign in to see your plan." })
       return true
     }
-    const plan = decide(state, who, "local_computer", { storeReadable: readable }).plan
+    const now = context.now()
+    const plan = decide(state, who, "local_computer", { storeReadable: readable, now }).plan
     const capabilities = Object.fromEntries(
       (Object.keys(PLANS[plan].capabilities) as Capability[]).map((capability) => {
-        const decision = decide(state, who, capability, { storeReadable: readable })
+        const decision = decide(state, who, capability, { storeReadable: readable, now })
+        const rule = PLANS[plan].capabilities[capability]
+        const date = new Date(now)
+        const resetsAt = rule.period === "day"
+          ? Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1)
+          : Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1)
         // Always false, and said out loud: this route is a snapshot of what the
         // account has, and asking it what you have must never be what takes it
         // away. The field is here so a caller can tell from the reply alone that
         // nothing was charged, without having to know which route it called.
         return [
           capability,
-          { allowed: decision.allowed, code: decision.code, used: decision.used, limit: decision.limit, consumed: false },
+          {
+            allowed: decision.allowed,
+            code: decision.code,
+            used: decision.used,
+            limit: decision.limit,
+            metering: rule.metering,
+            period: rule.period,
+            resetsAt: Number.isFinite(rule.limit) && rule.limit > 0 ? resetsAt : null,
+            ...(rule.sessionMinutes === undefined ? {} : { sessionMinutes: rule.sessionMinutes }),
+            consumed: false,
+          },
         ]
       }),
     )
+    const presented = bearerToken(request)
+    const profile = presented === undefined ? undefined : context.auth.clientTokenProfile(presented)
+    const accountProfile = profile ?? (presentsServerToken(context, request) ? context.auth.status().profile : undefined)
     json(response, 200, {
       ok: true,
       plan,
       computers: PLANS[plan].computers,
+      computersUsed: (await context.computers.list()).length,
+      ...(accountProfile === undefined ? {} : {
+        profile: { login: accountProfile.login, ...(accountProfile.avatarUrl ? { avatarUrl: accountProfile.avatarUrl } : {}) },
+      }),
       // Both halves matter: a server with an API key but no webhook secret can
       // take a payment and then never grant the plan, so reporting "configured"
       // on the strength of the key alone is how a customer pays for nothing.
       monthlyUsd: PLANS[plan].monthlyUsd,
+      offers: ["pro", "business"].map((id) => ({
+        id,
+        monthlyUsd: PLANS[id as PlanId].monthlyUsd,
+        computers: PLANS[id as PlanId].computers,
+      })),
       capabilities,
       billingConfigured: billingConfigured(),
     })

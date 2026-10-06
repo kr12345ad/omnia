@@ -6,7 +6,6 @@ import { IconButtonV2 } from "@opencode-ai/ui/v2/icon-button-v2"
 import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
 
 import { useCommand } from "@/context/command"
-import { checkoutPlan, openBillingPortal, useEntitlement } from "@/context/entitlement"
 import { DESKTOP_MENU, desktopMenuVisible, type DesktopMenuAction, type DesktopMenuEntry } from "@/desktop-menu"
 import { usePlatform } from "@/context/platform"
 import { useLanguage } from "@/context/language"
@@ -18,7 +17,6 @@ export function WindowsAppMenu(props: {
 }) {
   let lastFocused: HTMLElement | undefined
   const language = useLanguage()
-  const entitlement = useEntitlement()
 
   const rememberFocus = () => {
     const active = document.activeElement
@@ -51,14 +49,7 @@ export function WindowsAppMenu(props: {
   }
 
   return (
-    <DropdownMenu
-      gutter={4}
-      modal={false}
-      placement="bottom-start"
-      onOpenChange={(open) => {
-        if (open) void entitlement.reload()
-      }}
-    >
+    <DropdownMenu gutter={4} modal={false} placement="bottom-start">
       {props.variant === "v2" ? (
         <div
           data-component="desktop-icon-button"
@@ -109,76 +100,14 @@ export function WindowsAppMenu(props: {
                   )}
               </DesktopMenuSubmenu>
             ))}
-            {/* Account lives here and not only in the native menu because on
-                Linux and Windows this hamburger IS the menu bar: the native one
-                hides behind autoHideMenuBar, so a native-only Account meant no
-                upgrade path was ever visible. Same rules as the native menu -
-                nothing offered until the entitlement confirms it. */}
-            <AccountSubmenu platform={props.platform} entitlement={entitlement} />
+            <DesktopMenuItem
+              label={language.t("desktop.menu.account")}
+              onSelect={() => props.command.trigger("settings.account")}
+            />
           </DropdownMenu.Group>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu>
-  )
-}
-
-function AccountSubmenu(props: {
-  platform: ReturnType<typeof usePlatform>
-  entitlement: ReturnType<typeof useEntitlement>
-}) {
-  const language = useLanguage()
-  const entitlement = props.entitlement
-  const plan = () => entitlement.account()?.plan
-  // An upgrade is offered only for a plan the server confirmed and that sits
-  // below the target. Until the read answers, everything stays disabled rather
-  // than offering an upgrade the server would refuse.
-  const configured = () => entitlement.account()?.billingConfigured === true
-  const canUpgradeToPro = () => configured() && plan() === "free"
-  const canUpgradeToBusiness = () => configured() && (plan() === "free" || plan() === "pro")
-  const canManage = () => configured() && plan() !== undefined && plan() !== "free"
-
-  return (
-    <DesktopMenuSubmenu label={language.t("desktop.menu.account")}>
-      <Show when={plan()}>
-        {(current) => (
-          <>
-            <DesktopMenuItem
-              label={language.t("desktop.menu.plan", { plan: current() })}
-              disabled
-              onSelect={() => undefined}
-            />
-            <DropdownMenu.Separator />
-          </>
-        )}
-      </Show>
-      <DesktopMenuItem
-        label={language.t("desktop.menu.upgradePro")}
-        disabled={!canUpgradeToPro()}
-        onSelect={() => checkoutPlan(props.platform, language, "pro")}
-      />
-      <DesktopMenuItem
-        label={language.t("desktop.menu.upgradeBusiness")}
-        disabled={!canUpgradeToBusiness()}
-        onSelect={() => checkoutPlan(props.platform, language, "business")}
-      />
-      <DesktopMenuItem
-        label={language.t("desktop.menu.manageBilling")}
-        disabled={!canManage()}
-        onSelect={() => openBillingPortal(props.platform, language)}
-      />
-      <Show when={entitlement.accountNotice()}>
-        <DropdownMenu.Separator />
-        <DesktopMenuItem
-          label={language.t(
-            entitlement.accountNotice() === "unconfigured"
-              ? "desktop.billing.notConfigured"
-              : "desktop.billing.unreachable",
-          )}
-          disabled
-          onSelect={() => undefined}
-        />
-      </Show>
-    </DesktopMenuSubmenu>
   )
 }
 

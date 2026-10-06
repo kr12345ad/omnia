@@ -24,9 +24,10 @@ export interface UsageLimit {
   /**
    * What the server has counted against the allowance, when it counts anything.
    *
-   * Undefined for the computer allowance: that is a ceiling on how many
-   * computers may be registered and no counter is kept against it, so this
-   * surface shows the ceiling rather than a used count it had to invent.
+   * The computer row carries the registered count the server reported, when it
+   * reported one; capabilities carry their counters. Undefined means uncounted,
+   * never zero: a 0 is a spent allowance, and an uncounted one shown as spent is
+   * the lie this surface exists to prevent.
    */
   readonly used?: number
   /**
@@ -43,6 +44,8 @@ export interface UsageLimit {
    * mistake this surface exists to prevent.
    */
   readonly period?: MeteringPeriod
+  /** UTC millis the current allowance resets, when the server named one. */
+  readonly resetsAt?: number
   /** Wall-clock ceiling for one uninterrupted remote session, in minutes. */
   readonly sessionMinutes?: number
 }
@@ -61,14 +64,17 @@ export function usageLimits(entitlement: unknown): UsageLimit[] | undefined {
   const rows = [
     // The computer allowance leads, because it is the first ceiling a new
     // account meets.
-    ...(computers === undefined || computers === 0 ? [] : [{ id: COMPUTERS, limit: computers ?? undefined }]),
+    ...(computers === undefined || computers === 0
+      ? []
+      : [{ id: COMPUTERS, used: count(entitlement.computersUsed), limit: computers ?? undefined }]),
     ...Object.entries(capabilities).flatMap(([id, state]) => {
       if (!record(state)) return []
       const limit = ceiling(state.limit)
-      // A ceiling of 0 is a capability the plan does not include, not an
-      // allowance that is spent. The paywall explains a refusal where it
-      // happens, and a settings list of zeroes reads as a broken product.
-      if (limit === undefined || limit === 0) return []
+      // Null is unlimited and 0 is not included: neither is a limit, so neither
+      // gets a row. A page full of "Unlimited" rows buries the actual ceilings,
+      // and a settings list of zeroes reads as a broken product. The paywall
+      // explains a refusal where it happens.
+      if (limit === undefined || limit === null || limit === 0) return []
       const rule = ruleOf(entitlement.plan, id)
       return [
         {
@@ -76,6 +82,7 @@ export function usageLimits(entitlement: unknown): UsageLimit[] | undefined {
           used: count(state.used),
           limit: limit ?? undefined,
           period: rule?.period,
+          resetsAt: resetAt(state.resetsAt),
           sessionMinutes: rule?.sessionMinutes,
         },
       ]
@@ -99,6 +106,11 @@ function ceiling(value: unknown): number | null | undefined {
 /** A used counter, or undefined when the response counted nothing. */
 function count(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/** A reset instant off the wire, or undefined when the server named none. */
+function resetAt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined
 }
 
 /**

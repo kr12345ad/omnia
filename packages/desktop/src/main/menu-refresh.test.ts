@@ -2,18 +2,16 @@ import { plugin } from "bun"
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { EventEmitter } from "node:events"
 import type { MenuItemConstructorOptions } from "electron"
-import { DESKTOP_NATIVE_ENGLISH } from "@opencode-ai/app/i18n/desktop-native"
-import type { BillingAccount } from "./omnia/billing"
+import { createDesktopNativeBundle, DESKTOP_NATIVE_ENGLISH } from "@opencode-ai/app/i18n/desktop-native"
 
-// Electron's menu/focus events and the account read are the external boundaries.
-// The installed native menus and their refresh handlers are the shipped code.
+// Exercise installed Electron-style menus and focus events. Account state is
+// refreshed by Settings now; the native entry remains usable across rebuilds.
 class TestMenu extends EventEmitter {
-  items: { label?: string; enabled?: boolean; submenu?: TestMenu }[]
+  items: (Omit<MenuItemConstructorOptions, "submenu"> & { submenu?: TestMenu })[]
   constructor(template: MenuItemConstructorOptions[]) {
     super()
     this.items = template.map((item) => ({
-      label: item.label,
-      enabled: item.enabled,
+      ...item,
       submenu: Array.isArray(item.submenu) ? new TestMenu(item.submenu) : undefined,
     }))
   }
@@ -22,14 +20,13 @@ class TestMenu extends EventEmitter {
 const app = new EventEmitter()
 const installed: TestMenu[] = []
 plugin({
-  name: "native-account-refresh-electron",
+  name: "native-account-navigation-electron",
   setup(build) {
     build.module("electron", () => ({
       loader: "object",
       exports: {
         app,
         BrowserWindow: { getFocusedWindow: () => undefined },
-        dialog: { showMessageBox: async () => ({ response: 0 }) },
         Menu: {
           buildFromTemplate: (template: MenuItemConstructorOptions[]) => new TestMenu(template),
           setApplicationMenu: (menu: TestMenu) => installed.push(menu),
@@ -38,142 +35,78 @@ plugin({
     }))
   },
 })
-
-let account: BillingAccount
-let read: () => Promise<BillingAccount>
-let reads = 0
-mock.module("./omnia/billing", () => ({
-  readBillingAccount: () => {
-    reads++
-    return read()
-  },
-  // Deliberately permissive: menu.ts must independently enforce configuration.
-  canUpgradeTo: () => true,
-  canManageBilling: () => true,
-  startBillingCheckout: async () => "https://checkout.example/pro",
-  startBillingPortal: async () => "https://billing.example/portal",
-}))
-mock.module("./omnia/control-plane", () => ({ ControlPlaneRequestError: class extends Error {} }))
 mock.module("./desktop-menu-actions", () => ({ runDesktopMenuAction: () => undefined }))
 mock.module("./windows", () => ({ openExternalURL: () => undefined }))
-mock.module("./logging", () => ({ write: () => undefined }))
-mock.module("./native-translations", () => ({
-  nativeT: (key: keyof typeof DESKTOP_NATIVE_ENGLISH) => DESKTOP_NATIVE_ENGLISH[key],
-}))
 
-const deps = { trigger: () => undefined, checkForUpdates: () => undefined, relaunch: () => undefined }
+const { createMenu } = await import("./menu?account-navigation-refresh")
+const { setNativeTranslations } = await import("./native-translations")
 const platform = process.platform
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
-let cases = 0
+const english = createDesktopNativeBundle("en", (key) => DESKTOP_NATIVE_ENGLISH[key])
+const calls: string[] = []
+const deps = { trigger: (id: string) => calls.push(id), checkForUpdates: () => undefined, relaunch: () => undefined }
 
-async function mount(os: string) {
-  Object.defineProperty(process, "platform", { value: os, configurable: true })
-  const menu = await import(`./menu?refresh-case=${cases++}`)
-  menu.createMenu(deps)
-  await settle()
-  return menu
+function accountItem(menu = installed.at(-1)!, label = DESKTOP_NATIVE_ENGLISH["desktop.menu.account"] as string) {
+  const group = menu.items.find((item) => item.label === label)
+  if (group) return group.submenu?.items[0] ?? group
+  const application = menu.items.find((item) => item.label === DESKTOP_NATIVE_ENGLISH["desktop.menu.app"])
+  const item = application?.submenu?.items.find((item) => item.label === label)
+  if (!item) throw new Error("Account action missing")
+  return item
 }
 
-function accountMenu(menu = installed.at(-1)!): TestMenu {
-  for (const item of menu.items) {
-    if (item.label === DESKTOP_NATIVE_ENGLISH["desktop.menu.account"] && item.submenu) return item.submenu
-    if (item.label === DESKTOP_NATIVE_ENGLISH["desktop.menu.app"] && item.submenu) return accountMenu(item.submenu)
-  }
-  throw new Error("Account menu missing")
-}
-
-function deferred() {
-  let resolve!: (value: BillingAccount) => void
-  const promise = new Promise<BillingAccount>((done) => (resolve = done))
-  return { promise, resolve }
+function clickAccount() {
+  const item = accountItem()
+  expect(item.enabled).toBe(true)
+  expect(item.submenu).toBeUndefined()
+  if (!item.click) throw new Error("Account action missing")
+  item.click(undefined as never, undefined as never, undefined as never)
 }
 
 beforeEach(() => {
   app.removeAllListeners()
   installed.length = 0
-  reads = 0
-  account = { plan: "free", billingConfigured: false, notice: "unconfigured" }
-  read = async () => account
+  calls.length = 0
+  setNativeTranslations(english)
 })
 afterEach(() => {
   Object.defineProperty(process, "platform", { value: platform, configurable: true })
 })
 
-describe("native account refresh", () => {
+describe("native Account navigation across refreshes", () => {
   for (const os of ["darwin", "win32", "linux"]) {
-    test(`focus picks up backend configuration and sign-in on ${os}`, async () => {
-      const menu = await mount(os)
-      expect(app.listenerCount("browser-window-focus")).toBe(1)
-      expect(
-        accountMenu().items.find((item) => item.label === DESKTOP_NATIVE_ENGLISH["desktop.menu.upgradePro"])?.enabled,
-      ).toBe(false)
-      account = { plan: "free", billingConfigured: true, notice: undefined }
+    test(`focus and opening menus keep Account available without menu-side account refreshes on ${os}`, async () => {
+      Object.defineProperty(process, "platform", { value: os, configurable: true })
+      createMenu(deps)
+      clickAccount()
+      expect(app.listenerCount("browser-window-focus")).toBe(0)
       app.emit("browser-window-focus")
-      await settle()
-      expect(reads).toBe(2)
-      expect(
-        accountMenu().items.find((item) => item.label === DESKTOP_NATIVE_ENGLISH["desktop.menu.upgradePro"])?.enabled,
-      ).toBe(true)
-      account = { plan: undefined, billingConfigured: false, notice: "signed_out" }
-      app.emit("browser-window-focus")
-      await settle()
-      expect(accountMenu().items.map((item) => item.label)).toContain(
-        DESKTOP_NATIVE_ENGLISH["desktop.billing.signedOut"],
-      )
-      account = { plan: "pro", billingConfigured: true, notice: undefined }
-      menu.createMenu(deps)
-      await settle()
-      expect(app.listenerCount("browser-window-focus")).toBe(1)
-      expect(reads).toBe(4)
-      expect(accountMenu().items.map((item) => item.label)).toContain("Plan: pro")
+      for (const item of installed[0].items) item.submenu?.emit("menu-will-show")
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(installed).toHaveLength(1)
+      clickAccount()
+      expect(calls).toEqual(["settings.account", "settings.account"])
+    })
+
+    test(`a rebuilt ${os} menu routes Account through the latest command handler`, () => {
+      Object.defineProperty(process, "platform", { value: os, configurable: true })
+      createMenu(deps)
+      clickAccount()
+      const next = mock((_id: string) => undefined)
+      createMenu({ ...deps, trigger: next })
+      clickAccount()
+      expect(installed).toHaveLength(2)
+      expect(calls).toEqual(["settings.account"])
+      expect(next.mock.calls).toEqual([["settings.account"]])
     })
   }
 
-  test("opening Account reloads false -> true without a recursive rebuild fetch", async () => {
-    await mount("darwin")
-    expect(reads).toBe(1)
-    account = { plan: "free", billingConfigured: true, notice: undefined }
-    accountMenu().emit("menu-will-show")
-    await settle()
-    expect(reads).toBe(2)
-    expect(
-      accountMenu().items.find((item) => item.label === DESKTOP_NATIVE_ENGLISH["desktop.menu.upgradePro"])?.enabled,
-    ).toBe(true)
-    expect(accountMenu().items.map((item) => item.label)).not.toContain(
-      DESKTOP_NATIVE_ENGLISH["desktop.billing.notConfigured"],
-    )
-  })
-
-  test("coalesces focus/menu events and discards a stale response", async () => {
-    await mount("darwin")
-    const old = deferred()
-    const latest = deferred()
-    read = () => (reads === 2 ? old.promise : latest.promise)
-    app.emit("browser-window-focus")
-    for (let i = 0; i < 20; i++) accountMenu().emit("menu-will-show")
-    expect(reads).toBe(2)
-    old.resolve({ plan: "free", billingConfigured: true, notice: undefined })
-    await settle()
-    expect(reads).toBe(3)
-    expect(accountMenu().items.map((item) => item.label)).toContain(
-      DESKTOP_NATIVE_ENGLISH["desktop.billing.notConfigured"],
-    )
-    latest.resolve({ plan: "pro", billingConfigured: true, notice: undefined })
-    await settle()
-    expect(reads).toBe(3)
-    expect(accountMenu().items.map((item) => item.label)).toContain("Plan: pro")
-  })
-
-  test("billingConfigured alone disables actions and explains the unavailable configuration", async () => {
-    account = { plan: "free", billingConfigured: false, notice: undefined }
-    await mount("darwin")
-    const items = accountMenu().items
-    for (const key of [
-      "desktop.menu.upgradePro",
-      "desktop.menu.upgradeBusiness",
-      "desktop.menu.manageBilling",
-    ] as const)
-      expect(items.find((item) => item.label === DESKTOP_NATIVE_ENGLISH[key])?.enabled).toBe(false)
-    expect(items.map((item) => item.label)).toContain(DESKTOP_NATIVE_ENGLISH["desktop.billing.notConfigured"])
+  test("a translation refresh updates Account navigation and its submenu together", () => {
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true })
+    createMenu(deps)
+    setNativeTranslations({ locale: "de", messages: { ...english.messages, "desktop.menu.account": "Konto" } })
+    createMenu(deps)
+    expect(installed.at(-1)?.items.at(-1)?.label).toBe("Konto")
+    expect(accountItem(installed.at(-1), "Konto").label).toBe("Konto")
+    expect(accountItem(installed.at(-1), "Konto").enabled).toBe(true)
   })
 })

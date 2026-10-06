@@ -39,6 +39,10 @@ export interface BillingCapabilityState {
    * unlimited allowance ends up displayed as a spent one.
    */
   readonly limit: number | null
+  readonly metering?: "hard" | "soft"
+  readonly period?: "day" | "month"
+  readonly resetsAt?: number
+  readonly sessionMinutes?: number
 }
 
 export interface BillingEntitlement {
@@ -49,6 +53,9 @@ export interface BillingEntitlement {
   readonly capabilities: Readonly<Record<string, BillingCapabilityState>>
   readonly billingConfigured: boolean
   readonly monthlyUsd: number
+  readonly computersUsed?: number
+  readonly profile?: { readonly login: string; readonly avatarUrl?: string }
+  readonly offers?: readonly { readonly id: "pro" | "business"; readonly monthlyUsd: number; readonly computers: number | null }[]
 }
 
 /** The metered decision. A refusal is an answer, not a failure. */
@@ -113,6 +120,15 @@ export async function readBillingEntitlement(): Promise<BillingEntitlement> {
     billingConfigured: json.billingConfigured === true,
     // Carried so the UI can show what the plan costs instead of hardcoding it.
     monthlyUsd: typeof json.monthlyUsd === "number" ? json.monthlyUsd : 0,
+    ...(typeof json.computersUsed === "number" ? { computersUsed: json.computersUsed } : {}),
+    ...(isRecord(json.profile) && typeof json.profile.login === "string" ? {
+      profile: { login: json.profile.login, ...(typeof json.profile.avatarUrl === "string" ? { avatarUrl: json.profile.avatarUrl } : {}) },
+    } : {}),
+    ...(Array.isArray(json.offers) ? { offers: json.offers.flatMap((offer) =>
+      isRecord(offer) && (offer.id === "pro" || offer.id === "business") && typeof offer.monthlyUsd === "number"
+        ? [{ id: offer.id, monthlyUsd: offer.monthlyUsd, computers: typeof offer.computers === "number" ? offer.computers : null }]
+        : []
+    ) } : {}),
   }
 }
 
@@ -235,5 +251,13 @@ function capabilityState(value: unknown): BillingCapabilityState {
     // than becoming a 0, because a 0 is a refusal the UI would then have to
     // explain and an absent ceiling has nothing to refuse.
     limit: typeof state.limit === "number" && Number.isFinite(state.limit) ? state.limit : null,
+    ...(state.metering === "hard" || state.metering === "soft" ? { metering: state.metering } : {}),
+    ...(state.period === "day" || state.period === "month" ? { period: state.period } : {}),
+    ...(typeof state.resetsAt === "number" && Number.isFinite(state.resetsAt) ? { resetsAt: state.resetsAt } : {}),
+    ...(typeof state.sessionMinutes === "number" && Number.isFinite(state.sessionMinutes) ? { sessionMinutes: state.sessionMinutes } : {}),
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }

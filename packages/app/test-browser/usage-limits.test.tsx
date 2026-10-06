@@ -110,14 +110,14 @@ const FREE = {
   capabilities: {
     local_computer: { allowed: true, code: "granted", used: 1, limit: null },
     remote_computer: { allowed: true, code: "granted", used: 0, limit: null },
-    input_freeze: { allowed: false, code: "not_entitled", used: 0, limit: 0 },
+    input_freeze: { allowed: true, code: "granted", used: 0, limit: null },
     remote_shell: { allowed: false, code: "not_entitled", used: 0, limit: 0 },
-    clipboard: { allowed: false, code: "not_entitled", used: 0, limit: 0 },
-    browser_automation: { allowed: true, code: "granted", used: 12, limit: 250 },
-    credential_vault: { allowed: true, code: "granted", used: 1, limit: 1 },
+    clipboard: { allowed: true, code: "granted", used: 0, limit: null },
+    browser_automation: { allowed: true, code: "granted", used: 12, limit: 500 },
+    credential_vault: { allowed: true, code: "granted", used: 2, limit: 5 },
     vault_login: { allowed: true, code: "granted", used: 1, limit: 3 },
-    live_view: { allowed: true, code: "granted", used: 4, limit: 20 },
-    subagents: { allowed: true, code: "granted", used: 1, limit: 2 },
+    live_view: { allowed: true, code: "granted", used: 4, limit: 500 },
+    subagents: { allowed: true, code: "granted", used: 1, limit: null },
   },
 }
 
@@ -174,11 +174,14 @@ afterAll(() => {
 })
 
 describe.skipIf(isServer)("usage limits in settings", () => {
-  test("an unlimited allowance reads as unlimited, never as 0 and never as null", async () => {
+  test("unlimited allowances get no row at all, never a full bar or a zero", async () => {
     const surface = await mount(FREE)
 
-    expect(surface.value("Local computer")).toBe("Unlimited")
-    expect(surface.value("Remote computer")).toBe("Unlimited")
+    // No ceiling means no row: a full bar would read as spent and an empty one
+    // as broken, and a page of "Unlimited" rows buries the actual limits.
+    expect(surface.row("Local computer")).toBeUndefined()
+    expect(surface.row("Remote computer")).toBeUndefined()
+    expect(surface.text()).not.toContain("Unlimited")
     // The one case with no ceiling at all must not read as a spent allowance.
     expect(surface.text()).not.toContain("null")
     expect(surface.rows().map((row) => row.querySelector("dd")!.textContent)).not.toContain("0")
@@ -190,20 +193,21 @@ describe.skipIf(isServer)("usage limits in settings", () => {
 
     // browser_automation is the one daily rule in the free matrix, and the
     // wording for it must not be the monthly one every other allowance uses.
-    expect(surface.value("Browser automation")).toBe("12 of 250 used per day")
+    expect(surface.value("Browser automation")).toBe("12 of 500 used per day")
     expect(surface.value("Vault sign-ins")).toBe("1 of 3 used this month")
     // The same capability is a monthly budget on other plans, so the period is
     // never a property of the capability id.
-    expect(surface.value("Credential vault")).toBe("1 of 1 used this month")
+    expect(surface.value("Credential vault")).toBe("2 of 5 used this month")
     surface.unmount()
   })
 
   test("the used count and the limit are both shown against each other", async () => {
     const surface = await mount(FREE)
 
-    expect(surface.value("Browser automation")).toContain("12 of 250")
-    expect(surface.value("Live view")).toBe("4 of 20 used this month")
-    expect(surface.value("Subagents")).toBe("1 of 2 used this month")
+    expect(surface.value("Browser automation")).toContain("12 of 500")
+    expect(surface.value("Live view")).toBe("4 of 500 used this month")
+    // Unlimited allowances get no row at all, so there is no value to read.
+    expect(surface.row("Subagents")).toBeUndefined()
     surface.unmount()
   })
 
@@ -216,20 +220,22 @@ describe.skipIf(isServer)("usage limits in settings", () => {
     surface.unmount()
   })
 
-  test("the remote session ceiling is disclosed next to the capability it caps", async () => {
+  test("an unlimited capability has no row, so its session ceiling is not shown either", async () => {
     const surface = await mount(FREE)
 
-    const term = surface.row("Remote computer")!.querySelector("dt")!.textContent ?? ""
-    expect(term).toContain("120 minutes per remote session")
+    // remote_computer is unlimited, so it gets no row - and the 120 minute
+    // session ceiling that rode on it is not shown here. A ceiling that needs
+    // disclosing belongs on the surface that enforces it, not on a list whose
+    // contract is finite allowances only.
+    expect(surface.row("Remote computer")).toBeUndefined()
     surface.unmount()
   })
 
   test("a capability the plan does not include is not listed as a zero", async () => {
     const surface = await mount(FREE)
 
-    expect(surface.row("Input freeze")).toBeUndefined()
-    expect(surface.row("Clipboard sync")).toBeUndefined()
-    expect(surface.rows().length).toBe(8)
+    expect(surface.row("Remote shell")).toBeUndefined()
+    expect(surface.rows().length).toBe(5)
     surface.unmount()
   })
 

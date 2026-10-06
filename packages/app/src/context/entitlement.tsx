@@ -32,6 +32,10 @@ export interface EntitlementCapability {
    * they have no allowance left on every capability they bought without limit.
    */
   readonly limit: number | undefined
+  readonly metering?: "hard" | "soft"
+  readonly period?: "day" | "month"
+  readonly resetsAt?: number
+  readonly sessionMinutes?: number
 }
 
 /** What the entitlement read answered about the account itself. */
@@ -51,6 +55,12 @@ export interface Entitlement {
   readonly monthlyUsd: number
   /** Computers the plan covers, or undefined for unlimited. See `EntitlementCapability`. */
   readonly computers: number | undefined
+  /** Computers registered against the allowance, when the server counted them. */
+  readonly computersUsed?: number
+  /** Who the server resolved, when it named anyone. */
+  readonly profile?: { readonly login: string; readonly avatarUrl?: string }
+  /** Purchasable plans with the server's own prices. */
+  readonly offers?: readonly { readonly id: "pro" | "business"; readonly monthlyUsd: number; readonly computers?: number }[]
   readonly capabilities: Readonly<Record<string, EntitlementCapability>>
 }
 
@@ -169,6 +179,15 @@ function entitlementState(value: unknown): Entitlement | undefined {
     monthlyUsd: num(value.monthlyUsd) ?? 0,
     computers: num(value.computers),
     capabilities: capabilityStates(value.capabilities),
+    ...(num(value.computersUsed) === undefined ? {} : { computersUsed: num(value.computersUsed) }),
+    ...(record(value.profile) && typeof value.profile.login === "string" ? {
+      profile: { login: value.profile.login, ...(typeof value.profile.avatarUrl === "string" ? { avatarUrl: value.profile.avatarUrl } : {}) },
+    } : {}),
+    ...(Array.isArray(value.offers) ? { offers: value.offers.flatMap((offer) =>
+      record(offer) && (offer.id === "pro" || offer.id === "business") && num(offer.monthlyUsd) !== undefined
+        ? [{ id: offer.id, monthlyUsd: num(offer.monthlyUsd)!, computers: num(offer.computers) }]
+        : []
+    ) } : {}),
   }
 }
 
@@ -201,6 +220,10 @@ function capabilityState(value: unknown): EntitlementCapability {
     code: decision?.code ?? "unknown",
     used: decision?.used ?? 0,
     limit: decision?.limit,
+    ...(record(value) && (value.metering === "hard" || value.metering === "soft") ? { metering: value.metering } : {}),
+    ...(record(value) && (value.period === "day" || value.period === "month") ? { period: value.period } : {}),
+    ...(record(value) && num(value.resetsAt) !== undefined ? { resetsAt: num(value.resetsAt) } : {}),
+    ...(record(value) && num(value.sessionMinutes) !== undefined ? { sessionMinutes: num(value.sessionMinutes) } : {}),
   }
 }
 
@@ -352,23 +375,28 @@ function formatUsd(amount: number, locale: string) {
  * and a request that is refused are the same thing to the person who clicked,
  * and swallowing either is what made this button do nothing at all.
  */
-function openBilling(
+async function openBilling(
   platform: ReturnType<typeof usePlatform>,
   language: ReturnType<typeof useLanguage>,
   request: (billing: BillingBridge) => Promise<unknown>,
-) {
+): Promise<boolean> {
   const billing = bridge()
-  if (!billing) return
-  void request(billing).then(
-    (url) => {
-      if (typeof url === "string" && url.length > 0) {
-        platform.openExternal(url)
-        return
-      }
+  if (!billing) {
+    reportBillingFailure(language)
+    return false
+  }
+  try {
+    const url = await request(billing)
+    if (typeof url !== "string" || url.length === 0) {
       reportBillingFailure(language)
-    },
-    (error) => reportBillingFailure(language, error),
-  )
+      return false
+    }
+    await platform.openExternal(url)
+    return true
+  } catch (error) {
+    reportBillingFailure(language, error)
+    return false
+  }
 }
 
 /**
@@ -397,14 +425,14 @@ export function checkoutPlan(
   platform: ReturnType<typeof usePlatform>,
   language: ReturnType<typeof useLanguage>,
   plan: "pro" | "business",
-): void {
-  openBilling(platform, language, (billing) => billing.checkout(plan))
+): Promise<boolean> {
+  return openBilling(platform, language, (billing) => billing.checkout(plan))
 }
 
 /** Opens the billing portal for the current subscriber. */
 export function openBillingPortal(
   platform: ReturnType<typeof usePlatform>,
   language: ReturnType<typeof useLanguage>,
-): void {
-  openBilling(platform, language, (billing) => billing.portal())
+): Promise<boolean> {
+  return openBilling(platform, language, (billing) => billing.portal())
 }
