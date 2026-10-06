@@ -32,3 +32,11 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+# GitHub OAuth app credentials (never commit)
+github-oauth.json
+
+# Model runtime binaries: 150MB of llama/ggml shared objects pulled in by a
+# download step, not source. GitHub rejects files over 100MB and these are
+# reproducible from the model install.
+packages/desktop/resources/llama/

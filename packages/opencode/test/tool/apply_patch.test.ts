@@ -318,7 +318,7 @@ describe("tool.apply_patch freeform", () => {
     }),
   )
 
-  it.instance("adds file overwriting existing file", () =>
+  it.instance("refuses to add a file that already exists and leaves it intact", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
       const { ctx } = makeCtx()
@@ -327,8 +327,8 @@ describe("tool.apply_patch freeform", () => {
 
       const patchText = "*** Begin Patch\n*** Add File: duplicate.txt\n+new content\n*** End Patch"
 
-      yield* execute({ patchText }, ctx)
-      expect(yield* readText(target)).toBe("new content\n")
+      yield* expectFailure(execute({ patchText }, ctx), "already exists")
+      expect(yield* readText(target)).toBe("old content\n")
     }),
   )
 

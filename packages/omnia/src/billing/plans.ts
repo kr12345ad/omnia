@@ -129,17 +129,23 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
       // Included on free, but the session ceiling and the daily action budget
       // are what keep it a trial rather than a free hosted bot platform.
       remote_computer: { metering: "soft", limit: Number.POSITIVE_INFINITY, period: "month", sessionMinutes: 120 },
-      input_freeze: NEVER,
+      // Input freeze and the clipboard are safety and interoperability basics,
+      // not premium features. Charging for them made the free tier feel hostile:
+      // the agent could click but the human could not safely take the mouse back,
+      // and could not paste what it had read. Both are now unlimited on free.
+      input_freeze: UNLIMITED,
+      clipboard: UNLIMITED,
+      // Remote shell stays paid. Executing on someone ELSE's machine is the
+      // capability with real blast radius rather than a basic one.
       remote_shell: NEVER,
-      clipboard: NEVER,
-      // The one daily allowance in the matrix, and deliberately so. A 250/month
-      // budget was sold as 250/day, and one busy afternoon could otherwise spend
-      // a month of it and leave the account dead until the first of the month -
-      // which is the opposite of what a free tier is for. Resetting at 00:00 UTC
-      // keeps the ceiling real (a scripted bot still stops at 250 today) while
-      // making the punishment for a busy day a day's wait rather than a month's.
-      browser_automation: HARD(250, "day"),
-      credential_vault: SOFT(1, "month"),
+      // The one daily allowance, and the free tier's real ceiling. Soft, so
+      // ordinary use never hits a wall and a busy day is not a dead account.
+      // Daily rather than monthly because a spent month leaves the account dead
+      // until the first, which is the opposite of what a free tier is for.
+      browser_automation: HARD(500, "day"),
+      // Five stored credentials. HARD, so five means five: a soft limit keeps
+      // working past its number, which would make the figure decorative.
+      credential_vault: HARD(5, "month"),
       // The vault itself is visible on free so the feature is discoverable, but
       // actually logging in is what gets metered, and hard: this is the
       // bot-as-a-service primitive. Genuinely monthly - three logins is three for
@@ -147,10 +153,10 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
       vault_login: HARD(3, "month"),
       cloud_vision: NEVER,
       scheduled_runs: NEVER,
-      live_view: SOFT(20, "month"),
+      live_view: HARD(500, "month"),
       api_access: NEVER,
       webhooks: NEVER,
-      subagents: SOFT(2, "month"),
+      subagents: UNLIMITED,
       audit_export: NEVER,
       rbac: NEVER,
       sso: NEVER,
@@ -167,15 +173,18 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
       input_freeze: SOFT(Number.POSITIVE_INFINITY, "month"),
       remote_shell: SOFT(Number.POSITIVE_INFINITY, "month"),
       clipboard: SOFT(Number.POSITIVE_INFINITY, "month"),
-      browser_automation: SOFT(2_000, "month"),
+      // Never below the free tier. Free is a soft 5,000 a day, so a "paid" 2,000
+      // a month would be strictly worse than free - a matrix where upgrading
+      // loses capability is worse than no matrix at all.
+      browser_automation: UNLIMITED,
       credential_vault: UNLIMITED,
       vault_login: SOFT(300, "month"),
       cloud_vision: SOFT(2_000, "month"),
       scheduled_runs: SOFT(50, "month"),
-      live_view: SOFT(500, "month"),
+      live_view: UNLIMITED,
       api_access: UNLIMITED,
       webhooks: UNLIMITED,
-      subagents: SOFT(10, "month"),
+      subagents: UNLIMITED,
       audit_export: NEVER,
       rbac: NEVER,
       sso: NEVER,

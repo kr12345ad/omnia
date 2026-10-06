@@ -2,6 +2,7 @@ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { describe, expect } from "bun:test"
 import path from "path"
+import { symlinkSync } from "node:fs"
 import { Effect } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import type { Tool } from "@/tool/tool"
@@ -104,6 +105,46 @@ describe("tool.assertExternalDirectory", () => {
       expect(requests.length).toBe(0)
     }),
   )
+
+  if (process.platform !== "win32") {
+    it.instance(
+      "asks when a symlink inside the project points outside it",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const { requests, ctx } = makeCtx()
+
+          const outside = yield* tmpdirScoped()
+          yield* Effect.promise(() => Bun.write(path.join(outside, "secret.txt"), "classified"))
+          const link = path.join(test.directory, "escape")
+          yield* Effect.sync(() => symlinkSync(outside, link, "dir"))
+
+          yield* assertExternalDirectoryEffect(ctx, path.join(link, "secret.txt"))
+
+          const req = requests.find((r) => r.permission === "external_directory")
+          expect(req).toBeDefined()
+          expect(req!.patterns).toEqual([glob(path.join(link, "*"))])
+        }),
+      { git: true },
+    )
+
+    it.instance(
+      "does not ask when a symlink resolves back inside the project",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const { requests, ctx } = makeCtx()
+
+          const link = path.join(test.directory, "inside")
+          yield* Effect.sync(() => symlinkSync(test.directory, link, "dir"))
+
+          yield* assertExternalDirectoryEffect(ctx, path.join(link, "file.txt"))
+
+          expect(requests.length).toBe(0)
+        }),
+      { git: true },
+    )
+  }
 
   if (process.platform === "win32") {
     it.instance(

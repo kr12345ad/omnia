@@ -474,6 +474,30 @@ it.instance("default permission includes doom_loop and external_directory as ask
   }),
 )
 
+it.instance("computer control asks by default instead of falling through the allow wildcard", () =>
+  Effect.gen(function* () {
+    const build = yield* load((svc) => svc.get("build"))
+    // The computer tools ask with this permission; the "*": "allow" default
+    // would otherwise approve PROCESS_EXECUTE and SECRETS with no prompt.
+    expect(evalPerm(build, "computer")).toBe("ask")
+    for (const pattern of ["act:run_command:*", "do:type:*", "superskill:call:*", "read:*"]) {
+      expect(Permission.evaluate("computer", pattern, build!.permission).action).toBe("ask")
+    }
+  }),
+)
+
+it.instance(
+  "user config can still set the computer permission explicitly",
+  () =>
+    Effect.gen(function* () {
+      const build = yield* load((svc) => svc.get("build"))
+      expect(evalPerm(build, "computer")).toBe("allow")
+    }),
+  {
+    config: { permission: { computer: "allow" } },
+  },
+)
+
 it.instance("webfetch is allowed by default", () =>
   Effect.gen(function* () {
     const build = yield* load((svc) => svc.get("build"))
@@ -752,4 +776,24 @@ it.instance(
       },
     },
   },
+)
+
+it.instance("ships the five discussion room agents", () =>
+  Effect.gen(function* () {
+    const agents = yield* load((svc) => svc.list())
+    const byName = new Map(agents.map((agent) => [agent.name, agent]))
+    const manager = byName.get("discussion-manager")
+    expect(manager?.mode).toBe("primary")
+    expect(manager?.native).toBe(true)
+    expect(manager?.hidden).toBe(true)
+    expect(manager?.prompt).toContain("manager of a five-agent discussion room")
+    for (const name of ["discussion-strategist", "discussion-builder", "discussion-researcher", "discussion-critic"]) {
+      const specialist = byName.get(name)
+      expect(specialist?.mode).toBe("subagent")
+      expect(specialist?.native).toBe(true)
+      expect(evalPerm(specialist, "task")).toBe("allow")
+      expect(evalPerm(specialist, "todowrite")).toBe("allow")
+      expect(specialist?.prompt?.length).toBeGreaterThan(0)
+    }
+  }),
 )

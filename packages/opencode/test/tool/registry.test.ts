@@ -150,6 +150,36 @@ describe("tool.registry", () => {
     }),
   )
 
+  it.instance("filters the tool surface by session mode", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agents = yield* Agent.Service
+      const agent = yield* agents.defaultInfo()
+
+      const work = (yield* registry.tools({
+        providerID: ProviderV2.ID.opencode,
+        modelID: ModelV2.ID.make("test"),
+        agent,
+        mode: "work",
+      })).map((tool) => tool.id)
+      expect(work).toContain("read")
+      expect(work).not.toContain("edit")
+      expect(work).not.toContain("write")
+
+      const code = (yield* registry.tools({
+        providerID: ProviderV2.ID.opencode,
+        modelID: ModelV2.ID.make("test"),
+        agent,
+        mode: "code",
+      })).map((tool) => tool.id)
+      expect(code).toContain("read")
+      expect(code).toContain("edit")
+      expect(code).toContain("write")
+      expect(code).not.toContain("superskill")
+      expect(code).not.toContain("memory")
+    }),
+  )
+
   it.instance("hides task background parameter unless experimental background subagents are enabled", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service

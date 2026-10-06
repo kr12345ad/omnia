@@ -13,7 +13,8 @@
   },
   "scripts": {
     "typecheck": "tsgo --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "standalone": "bun ./src/server/standalone.ts"
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",

@@ -4,6 +4,14 @@
 - The default branch in this repo is `dev`.
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
 
+## Versioning
+
+The product has two version numbers, and they are intentionally different:
+
+- **UI seasonal version**: `packages/desktop/package.json` `version` (for example `26.9.0`, displayed as `v26.9`). This is the release identity users see. Bump it when a new seasonal release is scaffolded (26.10 → `26.10.0`).
+- **Provider broadcast version**: `packages/opencode/package.json` `version` (currently `1.18.32`). Development builds of the server bundle report this in `opencode/<channel>/<version>` request headers, because providers such as the Console free tier reject clients older than 1.18.0. `packages/opencode/script/build-node.ts` substitutes it whenever the build version is a `0.0.0-` preview.
+- When the 26.10 scaffold starts (or upstream moves to the 2.x line), bump `packages/opencode/package.json` to the current 2.x release, rebuild the server bundle with `bun script/build-node.ts` from `packages/opencode`, then rebuild the desktop app. Do not change the `opencode` name in headers; only the version line moves.
+
 ## Branch Names
 
 Use a short branch name of at most three words, separated by hyphens. Do not use slashes or type prefixes such as `feat/` or `fix/`.

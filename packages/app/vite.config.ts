@@ -19,15 +19,30 @@ const sentry =
       })
     : false
 
+const sourcemaps = Boolean(sentry) || process.env.OMNIA_SOURCEMAPS === "1"
+
 export default defineConfig({
+  // Hosted deployments serve the pages under a path prefix (e.g., /test1/);
+  // desktop renderer builds leave this unset and keep the default base.
+  base: process.env.OMNIA_WEB_BASE ?? undefined,
   plugins: [desktopPlugin, sentry] as any,
   server: {
     host: "0.0.0.0",
     allowedHosts: true,
     port: 3000,
   },
+  esbuild: {
+    // Demo builds ship without console chatter or debugger traps.
+    drop: ["console", "debugger"],
+  },
   build: {
     target: "esnext",
-    sourcemap: true,
+    sourcemap: sourcemaps,
+    minify: "esbuild",
+    cssMinify: "esbuild",
+    reportCompressedSize: false,
+    assetsInlineLimit: 8192,
+    chunkSizeWarningLimit: 8192,
+    modulePreload: { polyfill: false },
   },
 })

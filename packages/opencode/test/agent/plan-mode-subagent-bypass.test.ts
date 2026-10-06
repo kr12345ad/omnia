@@ -158,3 +158,53 @@ it.effect("subagent inherits parent session deny rules as hard runtime ceilings"
     expect(Permission.evaluate("bash", "git status", effective).action).toBe("deny")
   }),
 )
+
+it.effect("an explicit parent allow for todowrite or task survives instead of becoming a hard deny", () =>
+  Effect.sync(() => {
+    const executor = testAgent({
+      name: "executor",
+      mode: "subagent",
+      permission: {
+        bash: "allow",
+      },
+    })
+    const effective = Permission.merge(
+      executor.permission,
+      deriveSubagentSessionPermission({
+        parentSessionPermission: Permission.fromConfig({ todowrite: "allow", task: "allow" }),
+        subagent: executor,
+      }),
+    )
+
+    expect(Permission.evaluate("todowrite", "*", effective).action).toBe("allow")
+    expect(Permission.evaluate("task", "general", effective).action).toBe("allow")
+  }),
+)
+
+it.effect("a parent deny still beats an earlier parent allow for the same permission", () =>
+  Effect.sync(() => {
+    const executor = testAgent({
+      name: "executor",
+      mode: "subagent",
+      permission: {
+        bash: "allow",
+        task: "allow",
+      },
+    })
+    const effective = Permission.merge(
+      executor.permission,
+      deriveSubagentSessionPermission({
+        // Last match wins, so carrying the rules over in their original order
+        // keeps a parent deny above its own earlier allow.
+        parentSessionPermission: [
+          { permission: "task", pattern: "general", action: "allow" },
+          { permission: "task", pattern: "general", action: "deny" },
+        ],
+        subagent: executor,
+      }),
+    )
+
+    expect(Permission.evaluate("task", "general", effective).action).toBe("deny")
+    expect(Permission.evaluate("task", "other", effective).action).toBe("allow")
+  }),
+)

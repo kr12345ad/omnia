@@ -256,11 +256,11 @@ describe("plan resolution", () => {
     expect(PLANS.free.computers).toBe(3)
     expect(PLANS.free.capabilities.vault_login.limit).toBe(3)
     expect(PLANS.free.capabilities.remote_computer.sessionMinutes).toBe(120)
-    expect(PLANS.free.capabilities.browser_automation.limit).toBe(250)
-    // Free includes remote control; the shell, the clipboard and unattended runs
-    // do not come with it.
+    expect(PLANS.free.capabilities.browser_automation.limit).toBe(500)
+    // Free includes remote control, the clipboard, and unlimited subagents; the
+    // remote shell and unattended runs do not come with it.
     expect(PLANS.free.capabilities.remote_shell.limit).toBe(0)
-    expect(PLANS.free.capabilities.clipboard.limit).toBe(0)
+    expect(PLANS.free.capabilities.clipboard.limit).toBe(Number.POSITIVE_INFINITY)
     expect(PLANS.free.capabilities.scheduled_runs.limit).toBe(0)
   })
 
@@ -275,10 +275,11 @@ describe("plan resolution", () => {
     expect(daily).toEqual(["free:browser_automation"])
   })
 
-  test("a paid browser allowance is still a monthly one", () => {
-    // The period change was for the free daily budget only; a paid allowance is
-    // billed monthly and must not refill every midnight.
-    expect(PLANS.pro.capabilities.browser_automation).toMatchObject({ metering: "soft", limit: 2_000, period: "month" })
+  test("a paid browser allowance is unlimited, so no longer period-bound", () => {
+    // It was 2,000/month, which was LOWER than the free tier's 500/day - a paid
+    // plan must never be worse than free. It is now unlimited, so it has no
+    // period to refill.
+    expect(PLANS.pro.capabilities.browser_automation).toMatchObject({ metering: "soft", limit: Number.POSITIVE_INFINITY })
     expect(PLANS.pro.capabilities.vault_login.period).toBe("month")
   })
 

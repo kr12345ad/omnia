@@ -1,9 +1,9 @@
 {
-  "name": "@opencode-ai/desktop",
+  "name": "@omnisciens-technologies/omnia",
   "private": true,
-  "version": "1.18.32",
+  "version": "26.10.0-devel-5",
   "type": "module",
-  "license": "MIT",
+  "license": "UNLICENSED",
   "homepage": "https://opencode.ai",
   "author": {
     "name": "OpenCode",
@@ -51,7 +51,7 @@
     "@valibot/to-json-schema": "1.6.0",
     "electron": "42.3.3",
     "electron-builder": "26.15.2",
-    "electron-vite": "^5",
+    "electron-vite": "6.0.0-beta.5",
     "solid-js": "catalog:",
     "sury": "11.0.0-alpha.4",
     "typescript": "~5.6.2",

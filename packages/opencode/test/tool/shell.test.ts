@@ -1197,3 +1197,75 @@ describe("tool.shell truncation", () => {
     ),
   )
 })
+
+describe("tool.shell environment", () => {
+  // The child only inherits allowlisted names, so a model-authored command
+  // cannot read the server tokens or provider keys out of its own environment.
+  const withSecrets = <A, E, R>(self: Effect.Effect<A, E, R>) =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const names = [
+          "OPENCODE_SERVER_PASSWORD",
+          "OPENCODE_CONSOLE_TOKEN",
+          "OMNIA_SERVER_TOKEN",
+          "OMNIA_COMPUTER_ID",
+          "ANTHROPIC_API_KEY",
+          "OPENAI_API_KEY",
+          "AWS_SECRET_ACCESS_KEY",
+          "GITHUB_TOKEN",
+          "OPENCODE_UNLISTED_SETTING",
+          "SOME_RANDOM_VAR",
+        ]
+        const previous = names.map((name) => [name, process.env[name]] as const)
+        process.env.OPENCODE_SERVER_PASSWORD = "server-secret"
+        process.env.OPENCODE_CONSOLE_TOKEN = "console-secret"
+        process.env.OMNIA_SERVER_TOKEN = "omnia-secret"
+        process.env.OMNIA_COMPUTER_ID = "computer-1"
+        process.env.ANTHROPIC_API_KEY = "anthropic-secret"
+        process.env.OPENAI_API_KEY = "openai-secret"
+        process.env.AWS_SECRET_ACCESS_KEY = "aws-secret"
+        process.env.GITHUB_TOKEN = "github-secret"
+        process.env.OPENCODE_UNLISTED_SETTING = "flag"
+        process.env.SOME_RANDOM_VAR = "noise"
+        return previous
+      }),
+      () => self,
+      (previous) =>
+        Effect.sync(() => {
+          for (const [name, value] of previous) {
+            if (value === undefined) delete process.env[name]
+            else process.env[name] = value
+          }
+        }),
+    )
+
+  it.live("omits server tokens and provider keys from the child environment", () =>
+    runIn(
+      projectRoot,
+      withSecrets(
+        Effect.gen(function* () {
+          const result = yield* run({
+            command:
+              'for name in OPENCODE_SERVER_PASSWORD OPENCODE_CONSOLE_TOKEN OMNIA_SERVER_TOKEN OMNIA_COMPUTER_ID ANTHROPIC_API_KEY OPENAI_API_KEY AWS_SECRET_ACCESS_KEY GITHUB_TOKEN OPENCODE_UNLISTED_SETTING SOME_RANDOM_VAR; do printenv "$name" >/dev/null && echo "leaked:$name"; done; echo clean',
+          })
+          expect(result.metadata.exit).toBe(0)
+          expect(result.output).not.toContain("leaked:")
+          expect(result.output.trim()).toBe("clean")
+        }),
+      ),
+    ),
+  )
+
+  it.live("still passes the allowlisted variables the shell needs", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const result = yield* run({
+          command: 'test -n "$PATH" && test -d "$HOME" && printf "ok:%s\\n" "${LANG-unset}"',
+        })
+        expect(result.metadata.exit).toBe(0)
+        expect(result.output).toContain("ok:")
+      }),
+    ),
+  )
+})

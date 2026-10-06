@@ -230,14 +230,21 @@ describe("credential_vault", () => {
     expect(used("vault_login", other)).toBe(1)
   })
 
-  test("fails open on a transport error because its free allowance is soft", async () => {
+  test("fails closed on a transport error because its free allowance is hard", async () => {
     let listed = 0
-    const listing = await gate(PROFILE, { url: UNREACHABLE }).vaultListing(() => {
-      listed += 1
-      return vault.summaries("local")
-    })
-    expect(listed).toBe(1)
-    expect(listing.length).toBe(1)
+    await gate(PROFILE, { url: UNREACHABLE })
+      .vaultListing(() => {
+        listed += 1
+        return vault.summaries("local")
+      })
+      .then(
+        () => expect.unreachable("an unreachable control plane must not serve a hard allowance"),
+        (failure: unknown) => {
+          expect((failure as BrowserEntitlementError).entitlement.code).toBe("unreachable")
+          expect(browserFailureStatus((failure as BrowserEntitlementError).code)).toBe(503)
+        },
+      )
+    expect(listed).toBe(0)
   })
 })
 

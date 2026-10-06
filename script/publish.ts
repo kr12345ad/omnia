@@ -14,7 +14,13 @@ const pkgjsons = await Array.fromAsync(
   new Bun.Glob("**/package.json").scan({
     absolute: true,
   }),
-).then((arr) => arr.filter((x) => !x.includes("node_modules") && !x.includes("dist")))
+).then((arr) =>
+  arr
+    .filter((x) => !x.includes("node_modules") && !x.includes("dist"))
+    // packages/desktop carries the UI seasonal version (26.9.0), which is a
+    // release identity of its own and is not the broadcast version.
+    .filter((x) => !x.endsWith("/packages/desktop/package.json")),
+)
 
 async function prepareReleaseFiles() {
   for (const file of pkgjsons) {
