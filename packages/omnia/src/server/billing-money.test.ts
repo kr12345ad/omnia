@@ -163,6 +163,39 @@ describe("a real purchase grants a real plan", () => {
     })
   })
 
+  test("the signed-in desktop reaches checkout and the portal; an agent token does not", async () => {
+    await withServer(async (server) => {
+      const desktop = server.auth.mintDesktopToken({ id: 11, login: "desktop-user" })!
+      const agent = server.auth.mintClientToken({ id: 12, login: "agent" })!
+      const headers = (token: string) => ({
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "x-omnia-profile": "230746284",
+      })
+      // The test key is fake, so Stripe itself refuses checkout with 502 - and the
+      // test profile has no subscription, so the portal answers 404. Both mean
+      // "past the credential check", which is what this pins: a credential
+      // failure would be 401/403 instead.
+      const checkout = await fetch(`${server.url}/v1/billing/checkout`, {
+        method: "POST",
+        headers: headers(desktop),
+        body: JSON.stringify({ plan: "pro" }),
+      })
+      expect(`checkout desktop -> ${checkout.status}`).toBe("checkout desktop -> 502")
+      const portal = await fetch(`${server.url}/v1/billing/portal`, {
+        method: "POST",
+        headers: headers(desktop),
+        body: "{}",
+      })
+      expect(`portal desktop -> ${portal.status}`).toBe("portal desktop -> 404")
+      for (const path of ["/v1/billing/checkout", "/v1/billing/portal"]) {
+        const body = path.endsWith("checkout") ? JSON.stringify({ plan: "pro" }) : "{}"
+        const denied = await fetch(`${server.url}${path}`, { method: "POST", headers: headers(agent), body })
+        expect(`${path} agent -> ${denied.status}`).toBe(`${path} agent -> 403`)
+      }
+    })
+  })
+
   test("a thin client token cannot open the billing portal", async () => {
     stubStripe(async () => new Response(JSON.stringify({ url: "https://billing.stripe.com/p/session_test" }), { status: 200 }))
     await withServer(async (server) => {

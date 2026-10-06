@@ -220,6 +220,18 @@ export class GitHubAuth {
     return this.clientTokens.get(token)?.kind
   }
 
+  /**
+   * The profile a client token was minted for, if it is one.
+   *
+   * Billing attribution reads this rather than the server's own session: the
+   * server can be signed in as one person while serving a desktop signed in as
+   * another, and charging the server's profile for the desktop's purchase bills
+   * the wrong human. The token is the most specific identity available.
+   */
+  clientTokenProfile(token: string): GitHubProfile | undefined {
+    return this.clientTokens.get(token)?.profile
+  }
+
   // The credential the signed-in person's own desktop runs on. Minted by the
   // GitHub sign-in flow; exposed so the flow and its tests share one path.
   mintDesktopToken(profile: GitHubProfile): string | undefined {

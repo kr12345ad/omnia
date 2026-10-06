@@ -16,7 +16,7 @@
 //      ones either.
 import type { IncomingMessage, ServerResponse } from "node:http"
 import type { ApiContext, ParsedRequest } from "./api.js"
-import { readBodyBytes, isOperatorRequest, isTrustedDesktopRequest, presentsServerToken } from "./api.js"
+import { bearerToken, readBodyBytes, isOperatorRequest, isTrustedDesktopRequest, presentsServerToken } from "./api.js"
 import { PLANS, isPlanId, type Capability, type PlanId } from "../billing/plans.js"
 import {
   StripeSignatureError,
@@ -87,6 +87,14 @@ function profileId(context: ApiContext, request: IncomingMessage, body: Record<s
   // another customer's profile: read their plan, spend their quota, and open a
   // Stripe portal bound to their customer id. A header the caller controls is
   // not an identity.
+  // The presented token's own profile wins over every other source. A client
+  // token is minted FOR a profile, so reading it answers "who is buying" even
+  // when the server itself is signed in as somebody else - or when it is not
+  // signed in at all, as in tests. Only when the bearer carries no profile of
+  // its own does the server session answer.
+  const presented = bearerToken(request)
+  const tokenProfile = presented === undefined ? undefined : context.auth.clientTokenProfile(presented)
+  if (tokenProfile !== undefined && /^[0-9]{1,32}$/.test(String(tokenProfile.id))) return String(tokenProfile.id)
   const session = context.auth.status().profile
   if (session !== undefined && /^[0-9]{1,32}$/.test(String(session.id))) return String(session.id)
   // No signed-in profile: fall back to a header ONLY when the caller presented
@@ -501,9 +509,13 @@ export async function handleBillingRoute(
 
   if (segments[2] === "checkout" && method === "POST") {
     // Starting a purchase, and opening the portal that can change the card or
-    // cancel a subscription, must require the operator credential rather than
-    // any token that satisfies isAuthorized - a paired thin client has one.
-    if (!isOperatorRequest(context, request, body)) {
+    // cancel a subscription, must require the SIGNED-IN DESKTOP rather than any
+    // token that satisfies isAuthorized - a paired thin client has one. That is
+    // isTrustedDesktopRequest and NOT isOperatorRequest: the desktop app holds a
+    // client token minted by the sign-in flow, never the server token, so the
+    // operator check answered every real purchase with 403 while letting nothing
+    // through. Agent-provisioned tokens are still excluded.
+    if (!isTrustedDesktopRequest(context, request, body)) {
       json(response, 403, { ok: false, error: "Only the signed-in desktop may manage billing." })
       return true
     }
@@ -554,7 +566,7 @@ export async function handleBillingRoute(
   }
 
   if (segments[2] === "portal" && method === "POST") {
-    if (!isOperatorRequest(context, request, body)) {
+    if (!isTrustedDesktopRequest(context, request, body)) {
       json(response, 403, { ok: false, error: "Only the signed-in desktop may manage billing." })
       return true
     }
