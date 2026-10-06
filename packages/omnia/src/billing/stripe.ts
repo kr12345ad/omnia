@@ -284,6 +284,33 @@ function periodEndSeconds(object: Record<string, unknown>): number | undefined {
   }, 0)
 }
 
+/**
+ * The price a subscription is actually billed on.
+ *
+ * `price.id` on the subscription object does not exist in Stripe's payloads -
+ * the price lives at `items.data[].price.id` (and a Checkout Session carries its
+ * own `price` for the one-time part). Reading only the object-level field meant a
+ * genuine `customer.subscription.updated` matched no configured price, the webhook
+ * answered 200 {ignored:true}, and the customer's payment was never granted -
+ * silently, because a 2xx is exactly what tells Stripe to stop retrying.
+ *
+ * Every location is read and the FIRST match wins, because an event that carries
+ * more than one of them is describing the same purchase.
+ */
+export function priceIdFromObject(object: Record<string, unknown>): string | undefined {
+  const direct = object.price
+  if (isRecord(direct) && typeof direct.id === "string" && direct.id.length > 0) return direct.id
+  const items = object.items
+  if (isRecord(items) && Array.isArray(items.data)) {
+    for (const item of items.data) {
+      if (!isRecord(item)) continue
+      const price = item.price
+      if (isRecord(price) && typeof price.id === "string" && price.id.length > 0) return price.id
+    }
+  }
+  return undefined
+}
+
 function normalizeStatus(status: string): SubscriptionStatus {
   switch (status) {
     case "active":

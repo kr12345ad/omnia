@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url"
 import { app, utilityProcess } from "electron"
 import type { Details } from "electron"
 import { getLogger } from "./logging"
+import { readSessionProfileId } from "./omnia/auth-session"
 import { controlPlaneAuth } from "./omnia/control-plane"
 import { getUserShell, loadShellEnv } from "./shell-env"
 import { getStore } from "./store"
@@ -235,6 +236,12 @@ function createSidecarEnv(): Record<string, string> {
   if (auth !== undefined) {
     env.OMNIA_SERVER_URL = auth.url
     env.OMNIA_SERVER_TOKEN = auth.clientToken
+    // Entitlements are per profile. Without this the sidecar's gates asked the
+    // control plane anonymously, which answered for the free plan: a paying
+    // customer was refused the features they had paid for, and the free hard
+    // allowances were never incremented, so they could not be exhausted either.
+    const profileId = readSessionProfileId()
+    if (profileId !== undefined) env.OMNIA_PROFILE_ID = profileId
   }
   return env
 }

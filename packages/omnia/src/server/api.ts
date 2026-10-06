@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http"
 import { createHmac, timingSafeEqual } from "node:crypto"
 import { handleBillingRoute } from "./billing-api"
-import { failsClosed, isPlanId, type Capability } from "../billing/plans"
+import { failsClosed, isPlanId, type Capability, type PlanId } from "../billing/plans"
 import type { EventBus, ServerEvent } from "./events"
 import type { ComputerManager, DragEndpoint, ServerActionRequest, ServerBatchStep } from "./computers"
 import { OMNIA_ACTION_CATALOG } from "./catalog"
@@ -631,6 +631,9 @@ async function capabilityDenied(
   // honours that header from a caller that presented the server token anyway.
   const profile = context.auth.status().profile
   let body: unknown
+  // The plan the control plane last reported for this caller, so a failure later
+  // in this function can be judged against the right one.
+  let lastKnownPlan: PlanId | undefined
   try {
     const response = await fetch(`${controlPlane.base}/v1/billing/check`, {
       method: "POST",
@@ -649,17 +652,18 @@ async function capabilityDenied(
     // Reading that as "not included in your plan" both lies to the customer and
     // applies free-plan policy to someone who paid.
     if (response.status !== 200 && response.status !== 402) {
-      return unconfirmed(capability, `the billing service answered HTTP ${response.status}`)
+      return unconfirmed(capability, `the billing service answered HTTP ${response.status}`, lastKnownPlan)
     }
     body = await response.json().catch(() => undefined)
+    if (isRecord(body) && isPlanId(body.plan)) lastKnownPlan = body.plan
   } catch {
-    return unconfirmed(capability, "the billing service could not be reached")
+    return unconfirmed(capability, "the billing service could not be reached", lastKnownPlan)
   }
   // The reply is untrusted: an `allowed: true` is honoured only when the shape
   // also agrees which capability it is talking about, so a replayed or proxied
   // answer for a different capability cannot grant this one.
   if (!isRecord(body) || typeof body.allowed !== "boolean" || body.capability !== capability) {
-    return unconfirmed(capability, "the billing service returned an unreadable answer")
+    return unconfirmed(capability, "the billing service returned an unreadable answer", lastKnownPlan)
   }
   if (body.allowed) return undefined
   const plan = isPlanId(body.plan) ? body.plan : "free"
@@ -697,8 +701,12 @@ async function capabilityDenied(
 function unconfirmed(
   capability: Capability,
   cause: string,
+  plan?: PlanId,
 ): { status: number; payload: Record<string, unknown> } | undefined {
-  if (!failsClosed(capability)) return undefined
+  // Evaluated against the plan the customer is actually on. Defaulting to `free`
+  // here meant a paying customer lost a paid capability on any control-plane
+  // hiccup - the fifth copy of the bug that plans.ts was fixed for.
+  if (!failsClosed(capability, plan ?? "free")) return undefined
   const label = CAPABILITY_LABELS[capability] ?? capability
   return {
     status: 503,

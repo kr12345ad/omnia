@@ -16,15 +16,24 @@
 //      ones either.
 import type { IncomingMessage, ServerResponse } from "node:http"
 import type { ApiContext, ParsedRequest } from "./api.js"
-import { readBodyBytes, isTrustedDesktopRequest, presentsServerToken } from "./api.js"
+import { readBodyBytes, isOperatorRequest, isTrustedDesktopRequest, presentsServerToken } from "./api.js"
 import { PLANS, isPlanId, type Capability, type PlanId } from "../billing/plans.js"
 import {
   StripeSignatureError,
+  defersEntitlement,
   entitles,
+  newOrderingLedger,
   parseStripeEvent,
   planForPrice,
+  priceIdFromObject,
+  recordApplied,
+  REFUNDED,
+  refundedSubscriptions,
+  stripeRequestHeaders,
   subscriptionFromEvent,
+  superseded,
   verifyStripeSignature,
+  type HeldSubscription,
   type StripeEvent,
 } from "../billing/stripe.js"
 import {
@@ -37,9 +46,25 @@ import {
   type BillingState,
 } from "../billing/store.js"
 
+// Every outbound call below goes through stripeRequestHeaders(), which is the
+// single place that pins the Stripe API version. An unpinned call would silently
+// change shape when the account's default version moves.
 const STRIPE_API = "https://api.stripe.com/v1"
 
+/**
+ * Process-local ordering watermarks, one per subscription id.
+ *
+ * See `OrderingLedger` in ../billing/stripe.ts for why it is keyed on the
+ * subscription and why starting empty after a restart is safe. It is module
+ * scoped because the webhook handler is the only writer.
+ */
+const ordering = newOrderingLedger()
+
 /** Capabilities the caller asked to exercise, used by the metered POST route. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 const CHECKABLE: ReadonlySet<string> = new Set(Object.keys(PLANS.free.capabilities))
 
 function json(response: ServerResponse, status: number, payload: unknown): void {
@@ -146,13 +171,13 @@ async function createCheckoutSession(options: {
   try {
     response = await fetch(`${STRIPE_API}/checkout/sessions`, {
       method: "POST",
-      headers: {
+      headers: stripeRequestHeaders({
         authorization: `Bearer ${options.secret}`,
         "content-type": "application/x-www-form-urlencoded",
         // Without this a second click created a second customer and a second
         // subscription, and "most generous wins" then quietly billed them twice.
         "Idempotency-Key": options.idempotencyKey,
-      },
+      }),
       body: form.toString(),
       // A hung Stripe call otherwise stalled the request for the runtime's socket
       // timeout, uncancellable.
@@ -213,10 +238,10 @@ async function createPortalSession(options: {
   try {
     response = await fetch(`${STRIPE_API}/billing_portal/sessions`, {
       method: "POST",
-      headers: {
+      headers: stripeRequestHeaders({
         authorization: `Bearer ${options.secret}`,
         "content-type": "application/x-www-form-urlencoded",
-      },
+      }),
       body: form.toString(),
       signal: AbortSignal.timeout(30_000),
     })
@@ -256,9 +281,9 @@ function planFromEvent(event: StripeEvent): { readonly plan: PlanId } | undefine
     }
     prices[price] = plan
   }
-  const object = priceId as { price?: { id?: unknown } } | undefined
-  const id = object?.price?.id
-  if (typeof id !== "string") return undefined
+  // Read every location Stripe uses, not just a field no real payload carries.
+  const id = isRecord(priceId) ? priceIdFromObject(priceId) : undefined
+  if (id === undefined) return undefined
   const plan = planForPrice(id, prices)
   return plan === undefined ? undefined : { plan }
 }
@@ -314,28 +339,75 @@ export async function handleBillingRoute(
       json(response, 503, { ok: false, error: "Billing storage is not configured, so no plan can be granted." })
       return true
     }
-    const { state } = loadState(file)
-    const subscription = subscriptionFromEvent(event)
-    const plan = planFromEvent(event)
-    if (subscription === undefined || plan === undefined) {
-      // Acknowledged on purpose: Stripe retries anything it does not get a 2xx
-      // for, and retrying an event we deliberately ignore is pure noise. This is
-      // only safe because the two ways to reach here with a REAL purchase - no
-      // storage, and no profile on the subscription - are handled above and by
-      // the subscription_data metadata respectively.
-      json(response, 200, { ok: true, ignored: true })
+    const { state, readable } = loadState(file)
+    if (!readable) {
+      // A signed event arriving while the store cannot be parsed must NOT be
+      // written: the write would replace the quarantined data with a store
+      // holding only this one subscription, silently deleting every other paid
+      // account. Refusing here is what keeps a recoverable file recoverable.
+      json(response, 503, { ok: false, error: "Billing state could not be read, so the subscription was not applied." })
       return true
     }
-    const applied = applySubscription(state, subscription, plan.plan, event.id)
-    if (!applied.duplicate && file !== undefined) {
+    const subscription = subscriptionFromEvent(event)
+    const plan = planFromEvent(event)
+    if (subscription !== undefined && plan !== undefined) {
+      // Ordering, checked BEFORE anything is written. `event.created` was parsed
+      // and never used, so an older event delivered after a newer one could undo
+      // it - a cancellation landing late would hand the plan back. The check is
+      // keyed on the subscription id alone, so events for two different
+      // subscriptions may still arrive in any order at all.
+      if (superseded(ordering, subscription.subscriptionId, event.created)) {
+        json(response, 200, { ok: true, stale: true })
+        return true
+      }
+      const applied = applySubscription(state, subscription, plan.plan, event.id)
+      if (!applied.duplicate) {
+        try {
+          writeBillingState(file, applied.state)
+        } catch {
+          json(response, 503, { ok: false, error: "Billing state could not be stored." })
+          return true
+        }
+        // Only after the write succeeded: a watermark raised by a write that
+        // failed would make Stripe's retry of this very event look stale, and the
+        // subscription would be dropped for good.
+        recordApplied(ordering, subscription.subscriptionId, event.created)
+      }
+      json(response, 200, { ok: true, duplicate: applied.duplicate })
+      return true
+    }
+    // A refunded charge and a failed invoice payment describe no subscription of
+    // their own, so they are handled against the subscriptions we already hold.
+    // Both were unhandled before, which meant a refunded customer kept their plan
+    // until Stripe happened to move the subscription status.
+    const refunded = refundedSubscriptions(event, state.subscriptions).filter(
+      (entry) => !superseded(ordering, entry.subscriptionId, event.created),
+    )
+    if (refunded.length > 0) {
       try {
-        writeBillingState(file, applied.state)
+        writeBillingState(file, refundSubscriptions(state, refunded, event.id))
       } catch {
         json(response, 503, { ok: false, error: "Billing state could not be stored." })
         return true
       }
+      for (const entry of refunded) recordApplied(ordering, entry.subscriptionId, event.created)
+      json(response, 200, { ok: true, refunded: refunded.map((entry) => entry.subscriptionId) })
+      return true
     }
-    json(response, 200, { ok: true, duplicate: applied.duplicate })
+    if (defersEntitlement(event)) {
+      // Stripe retries the payment itself and only flips the subscription to
+      // `unpaid` when it gives up, which is the event that revokes access. See
+      // `defersEntitlement` for why the first failed attempt must not cut a
+      // customer off.
+      json(response, 200, { ok: true, deferred: true, reason: "Payment failed; Stripe will retry." })
+      return true
+    }
+    // Acknowledged on purpose: Stripe retries anything it does not get a 2xx
+    // for, and retrying an event we deliberately ignore is pure noise. This is
+    // only safe because the two ways to reach here with a REAL purchase - no
+    // storage, and no profile on the subscription - are handled above and by
+    // the subscription_data metadata respectively.
+    json(response, 200, { ok: true, ignored: true })
     return true
   }
 
@@ -403,7 +475,7 @@ export async function handleBillingRoute(
     // Starting a purchase, and opening the portal that can change the card or
     // cancel a subscription, must require the operator credential rather than
     // any token that satisfies isAuthorized - a paired thin client has one.
-    if (!presentsServerToken(context, request)) {
+    if (!isOperatorRequest(context, request, body)) {
       json(response, 403, { ok: false, error: "Only the signed-in desktop may manage billing." })
       return true
     }
@@ -431,6 +503,13 @@ export async function handleBillingRoute(
       json(response, 503, { ok: false, error: "This server has no public URL for Stripe to return to." })
       return true
     }
+    // Refuse to SELL when the resulting subscription could not be granted. The
+    // webhook answers 503 without storage, so charging anyway took the money and
+    // then failed to deliver the plan, with Stripe stopping its retries.
+    if (billingFile(context) === undefined || !billingStateReadable(billingFile(context))) {
+      json(response, 503, { ok: false, error: "Billing storage is not writable on this server, so checkout is unavailable." })
+      return true
+    }
     const session = await createCheckoutSession({
       secret,
       priceId,
@@ -447,7 +526,7 @@ export async function handleBillingRoute(
   }
 
   if (segments[2] === "portal" && method === "POST") {
-    if (!presentsServerToken(context, request)) {
+    if (!isOperatorRequest(context, request, body)) {
       json(response, 403, { ok: false, error: "Only the signed-in desktop may manage billing." })
       return true
     }
@@ -495,6 +574,32 @@ async function safeJson(request: IncomingMessage): Promise<Record<string, unknow
       : {}
   } catch {
     return {}
+  }
+}
+
+/**
+ * Marks refunded subscriptions as no longer entitling, in one write.
+ *
+ * Folded in place by subscription id, exactly like a subscription update, so the
+ * rest of the profile's subscriptions are untouched and the event id is
+ * remembered, which makes a replayed refund a no-op. The plan is deliberately
+ * left on the record: a refund revokes access, it does not rewrite what somebody
+ * bought, so a later, newer subscription event restores the plan without any
+ * reconciliation.
+ */
+function refundSubscriptions(
+  state: BillingState,
+  refunded: readonly HeldSubscription[],
+  eventId: string,
+): BillingState {
+  const revoked = new Set(refunded.map((entry) => entry.subscriptionId))
+  return {
+    ...state,
+    subscriptions: state.subscriptions.map((entry) =>
+      revoked.has(entry.subscriptionId) ? { ...entry, status: REFUNDED } : entry,
+    ),
+    // Mirrors the store's own cap on remembered event ids.
+    processedEvents: [...state.processedEvents, eventId].slice(-1000),
   }
 }
 

@@ -176,7 +176,10 @@ export class BillingClient {
 
   constructor(options: BillingClientOptions = {}) {
     this.env = options.env ?? process.env
-    this.profile = profileId(options.profileId)
+    // An explicit profileId wins; otherwise the environment carries it. Both are
+    // needed: the desktop passes it through the sidecar's env, and tests pass it
+    // directly.
+    this.profile = profileId(options.profileId ?? options.env?.OMNIA_PROFILE_ID)
     this.hint = isPlanId(options.plan) ? options.plan : undefined
     this.timeoutMs = clampTimeout(options.timeoutMs ?? BILLING_TIMEOUT_MS)
     this.http = options.http ?? fetch
