@@ -1,26 +1,63 @@
-import { type ComponentProps } from "solid-js"
+import { createUniqueId, type ComponentProps } from "solid-js"
+
+// The Omnia mark: a boundary with one filled corner.
+//
+// Drawn on a 16x16 grid and placed by the caller, so the small in-app mark and
+// the boot splash are the same geometry rather than two drawings that drift.
+// The filled square's outer edges sit flush with the outline's, and a mask
+// carves a gutter out of the ring beneath it -- without that gutter a flat,
+// single-colour mark would read as an L rather than as two elements, which
+// matters because the app renders on light and dark themes alike.
+function MarkShape(props: { mask: string; scale?: number; offsetY?: number }) {
+  return (
+    <g transform={`translate(0 ${props.offsetY ?? 0}) scale(${props.scale ?? 1})`}>
+      <mask
+        id={props.mask}
+        style="mask-type:luminance"
+        maskUnits="userSpaceOnUse"
+        x="0"
+        y="0"
+        width="16"
+        height="16"
+      >
+        <rect width="16" height="16" fill="white" />
+        <rect x="7.6" y="7.6" width="6" height="6" rx="1.6" fill="black" />
+      </mask>
+      <rect
+        x="3.5"
+        y="3.5"
+        width="9"
+        height="9"
+        rx="1.5"
+        fill="none"
+        stroke="var(--icon-strong-base)"
+        stroke-width="1"
+        mask={`url(#${props.mask})`}
+      />
+      <rect x="9" y="9" width="4" height="4" rx="1" fill="var(--icon-strong-base)" />
+    </g>
+  )
+}
 
 export const Mark = (props: { class?: string }) => {
+  const mask = createUniqueId()
   return (
     <svg
       data-component="logo-mark"
       classList={{ [props.class ?? ""]: !!props.class }}
+      // Kept at 16x20 so the portait box every caller sizes against still
+      // applies; the mark itself is square and centred inside it.
       viewBox="0 0 16 20"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <path data-slot="logo-logo-mark-shadow" d="M4 8H12V16H4V8Z" fill="var(--icon-weak-base)" />
-      <path
-        data-slot="logo-logo-mark-o"
-        fill-rule="evenodd"
-        d="M0 0H16V20H0V0ZM4 4H12V16H4V4Z"
-        fill="var(--icon-strong-base)"
-      />
+      <MarkShape mask={mask} offsetY={2} />
     </svg>
   )
 }
 
 export const Splash = (props: Pick<ComponentProps<"svg">, "ref" | "class">) => {
+  const mask = createUniqueId()
   return (
     <svg
       ref={props.ref}
@@ -30,16 +67,15 @@ export const Splash = (props: Pick<ComponentProps<"svg">, "ref" | "class">) => {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <path d="M20 20H60V80H20V20Z" fill="var(--icon-weak-base)" />
-      <path
-        fill-rule="evenodd"
-        d="M0 0H80V100H0V0ZM20 20H60V80H20V20Z"
-        fill="var(--icon-strong-base)"
-      />
+      <MarkShape mask={mask} scale={5} offsetY={10} />
     </svg>
   )
 }
 
+// The wordmark already spells OMNIA, and its leading O is the same hollow
+// square the mark is built from. It is deliberately untouched: adding the
+// filled corner to a single letter is a piece of type design, and it should be
+// done with the result on screen rather than guessed at.
 export const Logo = (props: { class?: string }) => {
   return (
     <svg

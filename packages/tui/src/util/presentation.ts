@@ -1,6 +1,14 @@
+// Kept in step with the banner art in ../logo.ts: the mark on the left, the
+// wordmark on the right, one fixed width per line so the halves pair up.
 const logo = {
-  left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
-  right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
+  left: ["█▀▀▀▀▀█ ", "█     █ ", "█   ███ ", "█   ███ ", "█▀▀▀▀▀█ "],
+  right: [
+    "█▀▀█ █   █ █   █ ███ ▄▀▀▀▄",
+    "█__█ █▄ ▄█ ██  █  █  █   █",
+    "█^^█ █ █ █ █ █ █  █  █▀▀▀█",
+    "█__█ █   █ █  ██  █  █   █",
+    "▀▀▀▀ █   █ █   █ ███ █   █",
+  ],
 }
 
 const reset = "\x1b[0m"
