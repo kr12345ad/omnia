@@ -1,6 +1,10 @@
 import { app, BrowserWindow, dialog, Menu } from "electron"
 import type { MenuItemConstructorOptions } from "electron"
-import { formatDesktopNativeMessage, type DesktopNativeKey } from "@opencode-ai/app/i18n/desktop-native"
+import {
+  DESKTOP_NATIVE_ENGLISH,
+  formatDesktopNativeMessage,
+  type DesktopNativeKey,
+} from "@opencode-ai/app/i18n/desktop-native"
 import {
   DESKTOP_MENU,
   desktopMenuVisible,
@@ -43,8 +47,22 @@ const UNKNOWN_ACCOUNT: BillingAccount = { plan: undefined, billingConfigured: fa
 
 let account = UNKNOWN_ACCOUNT
 let accountHooked = false
+let accountRead: Promise<void> | undefined
+let accountRefresh = false
+let menuDeps: Deps
 
 export function createMenu(deps: Deps) {
+  menuDeps = deps
+  installMenu(deps)
+  // Checkout and sign-in both happen outside the window on every desktop OS.
+  if (!accountHooked) {
+    accountHooked = true
+    app.on("browser-window-focus", () => void syncAccount(menuDeps))
+  }
+  void syncAccount(deps)
+}
+
+function installMenu(deps: Deps) {
   // Account was macOS-only, which left Windows and Linux users with no way to
   // see their plan, upgrade, or be told billing is unconfigured. The Account
   // group is now built on every platform: it sits under the application menu on
@@ -56,15 +74,18 @@ export function createMenu(deps: Deps) {
     platform === "macos"
       ? applicationTemplate(deps, platform)
       : [...applicationTemplate(deps, platform), accountItem(deps)]
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
-  // Upgrading happens in a browser tab, so the window gaining focus back is the
-  // moment the plan may have changed. Without this the menu would keep showing
-  // the plan the user just paid to leave.
-  if (platform === "macos" && !accountHooked) {
-    accountHooked = true
-    app.on("browser-window-focus", () => void syncAccount(deps))
+  const menu = Menu.buildFromTemplate(template)
+  hookAccountMenu(menu, deps)
+  Menu.setApplicationMenu(menu)
+}
+
+function hookAccountMenu(menu: Menu, deps: Deps) {
+  for (const item of menu.items ?? []) {
+    if (!item.submenu) continue
+    if (item.label === accountLabel("desktop.menu.account") || item.label === nativeT("desktop.menu.app"))
+      item.submenu.on("menu-will-show", () => void syncAccount(deps))
+    hookAccountMenu(item.submenu, deps)
   }
-  void syncAccount(deps)
 }
 
 /** The shared menu separates macOS from the Ctrl-accelerated platforms. */
@@ -114,32 +135,47 @@ function accountSubmenu(deps: Deps): MenuItemConstructorOptions[] {
   items.push(
     {
       label: accountLabel("desktop.menu.upgradePro"),
-      enabled: canUpgradeTo(account, "pro"),
+      enabled: account.billingConfigured && canUpgradeTo(account, "pro"),
       click: () => void openCheckout(deps, "pro"),
     },
     {
       label: accountLabel("desktop.menu.upgradeBusiness"),
-      enabled: canUpgradeTo(account, "business"),
+      enabled: account.billingConfigured && canUpgradeTo(account, "business"),
       click: () => void openCheckout(deps, "business"),
     },
     {
       label: accountLabel("desktop.menu.manageBilling"),
-      enabled: canManageBilling(account),
+      enabled: account.billingConfigured && canManageBilling(account),
       click: () => void openPortal(deps),
     },
   )
   // A disabled item that says why beats a greyed menu that silently does
   // nothing when the server has no Stripe key.
-  if (account.notice !== undefined)
-    items.push({ type: "separator" }, { label: accountLabel(NOTICE_KEY[account.notice]), enabled: false })
+  const notice =
+    account.notice ?? (account.plan !== undefined && !account.billingConfigured ? "unconfigured" : undefined)
+  if (notice !== undefined)
+    items.push({ type: "separator" }, { label: accountLabel(NOTICE_KEY[notice]), enabled: false })
   return items
 }
 
-async function syncAccount(deps: Deps) {
-  const next = await readBillingAccount()
-  if (sameAccount(next, account)) return
-  account = next
-  createMenu(deps)
+function syncAccount(deps: Deps): Promise<void> {
+  if (accountRead) {
+    accountRefresh = true
+    return accountRead
+  }
+  accountRead = (async () => {
+    do {
+      accountRefresh = false
+      const next = await readBillingAccount()
+      if (accountRefresh || sameAccount(next, account)) continue
+      account = next
+      // Installing an updated menu must not trigger another account read.
+      installMenu(deps)
+    } while (accountRefresh)
+  })().finally(() => {
+    accountRead = undefined
+  })
+  return accountRead
 }
 
 function sameAccount(a: BillingAccount, b: BillingAccount) {
@@ -212,33 +248,16 @@ function nativeRole(role: DesktopMenuRole) {
   return role as NonNullable<MenuItemConstructorOptions["role"]>
 }
 
-// The Account copy now lives in DESKTOP_NATIVE_ENGLISH and in every locale
-// bundle, so nativeT answers for all of these keys. This record is only the
-// English source kept for a bundle that predates them: a bundle that is missing
-// a key resolves to nothing at all, and a menu item with no label is worse than
-// an English one.
-const ACCOUNT_COPY = {
-  "desktop.menu.account": "Account",
-  "desktop.menu.plan": "Plan: {{plan}}",
-  "desktop.menu.upgradePro": "Upgrade to Pro",
-  "desktop.menu.upgradeBusiness": "Upgrade to Business",
-  "desktop.menu.manageBilling": "Manage Billing",
-  "desktop.billing.title": "Billing",
-  "desktop.billing.notConfigured": "Billing is not configured on this server.",
-  "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.",
-  "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.",
-} as const satisfies { readonly [key in DesktopNativeKey]?: string }
-
 const NOTICE_KEY = {
   signed_out: "desktop.billing.signedOut",
   unconfigured: "desktop.billing.notConfigured",
   unreachable: "desktop.billing.unreachable",
-} as const satisfies Record<BillingAccountNotice, keyof typeof ACCOUNT_COPY>
+} as const satisfies Record<BillingAccountNotice, DesktopNativeKey>
 
-function accountLabel(key: keyof typeof ACCOUNT_COPY, params?: Record<string, string | number>) {
+function accountLabel(key: DesktopNativeKey, params?: Record<string, string | number>) {
   // nativeT is asked without the params on purpose: a bundle missing the key
   // answers undefined, and formatting undefined would throw while substituting
   // the placeholder instead of falling back.
   const translated = nativeT(key)
-  return formatDesktopNativeMessage(typeof translated === "string" ? translated : ACCOUNT_COPY[key], params)
+  return formatDesktopNativeMessage(typeof translated === "string" ? translated : DESKTOP_NATIVE_ENGLISH[key], params)
 }

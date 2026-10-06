@@ -1,5 +1,5 @@
-import { type Accessor, createMemo } from "solid-js"
-import { createStore } from "solid-js/store"
+import { type Accessor, createMemo, onCleanup, onMount } from "solid-js"
+import { createStore, reconcile } from "solid-js/store"
 import type { PaywallDecision, PaywallOffer } from "@opencode-ai/ui/paywall"
 import { useLanguage } from "./language"
 import { usePlatform } from "./platform"
@@ -11,8 +11,8 @@ import { showToast } from "@/utils/toast"
 // The paywall component renders nothing without a decision, so a surface that
 // reads its own is a surface that renders nothing when the read is slow, fails,
 // or is simply forgotten. Every capability notice reads from here instead: one
-// entitlement read per window, one metered read per capability, both cached, so
-// mounting a notice cannot become a request storm.
+// shared entitlement read per window, one metered read per capability, both
+// cached, so mounting a notice cannot become a request storm.
 //
 // Every answer is optional on purpose. A signed-out profile, a server with no
 // billing configured, and an unreachable control plane all read as "no answer",
@@ -57,6 +57,10 @@ export interface Entitlement {
 export interface EntitlementSnapshot {
   /** What the account can be charged for, or undefined when it could not be read. */
   readonly account: Accessor<Entitlement | undefined>
+  /** Refreshes the shared account snapshot. Concurrent refreshes are coalesced. */
+  readonly reload: () => Promise<void>
+  /** Existing-copy reason when billing cannot be offered. */
+  readonly accountNotice: Accessor<"unconfigured" | "unreachable" | undefined>
   /** What to offer next to a refusal, or undefined when nothing can be offered. */
   readonly offer: Accessor<PaywallOffer | undefined>
   /**
@@ -119,6 +123,7 @@ function num(value: unknown) {
  */
 const [state, setState] = createStore({
   account: undefined as Entitlement | undefined,
+  accountNotice: undefined as "unconfigured" | "unreachable" | undefined,
   decisions: {} as Record<string, PaywallDecision>,
   dismissed: {} as Record<string, boolean>,
 })
@@ -126,6 +131,11 @@ const [state, setState] = createStore({
 /** In-flight and answered metered reads, so a capability is asked once. */
 const requested = new Map<string, Promise<PaywallDecision | undefined>>()
 let accountRead: Promise<void> | undefined
+let accountLoaded = false
+let accountRefresh = false
+let accountConsumers = 0
+
+const refreshAccount = () => void loadAccount(true)
 
 /**
  * The metered decision, exactly as `POST /billing/check` answered it.
@@ -212,21 +222,53 @@ async function readDecision(capability: string) {
 }
 
 /**
- * Starts the single entitlement read, and re-arms it when the read failed so a
- * transient outage costs one missing notice rather than the whole window.
+ * Cache ordinary surface reads, but refresh on explicit reload or window focus.
+ * A refresh during a read schedules at most one follow-up. The superseded answer
+ * is never published, including when sign-in or checkout finished during it.
  */
-function loadAccount() {
-  if (accountRead) return
-  accountRead = readEntitlement().then((value) => {
-    if (value === undefined) accountRead = undefined
-    setState("account", value)
+function loadAccount(refresh = false): Promise<void> {
+  if (accountRead) {
+    if (refresh) accountRefresh = true
+    return accountRead
+  }
+  if (!refresh && accountLoaded) return Promise.resolve()
+  accountRead = (async () => {
+    do {
+      accountRefresh = false
+      const value = await readEntitlement()
+      if (accountRefresh) continue
+      // A changed plan/config invalidates cached refusals as well as the offer.
+      // In-flight capability reads must not republish the previous plan's answer.
+      if (
+        state.account &&
+        (value?.plan !== state.account.plan || value?.billingConfigured !== state.account.billingConfigured)
+      ) {
+        requested.clear()
+        setState("decisions", reconcile({}))
+      }
+      accountLoaded = value !== undefined
+      setState("account", reconcile(value))
+      setState(
+        "accountNotice",
+        value === undefined ? "unreachable" : value.billingConfigured ? undefined : "unconfigured",
+      )
+    } while (accountRefresh)
+  })().finally(() => {
+    accountRead = undefined
   })
+  return accountRead
 }
 
 export function useEntitlement(): EntitlementSnapshot {
   const platform = usePlatform()
   const language = useLanguage()
-  loadAccount()
+  void loadAccount()
+  onMount(() => {
+    if (accountConsumers++ === 0) window.addEventListener("focus", refreshAccount)
+    onCleanup(() => {
+      if (--accountConsumers === 0) window.removeEventListener("focus", refreshAccount)
+    })
+  })
 
   const offer = createMemo<PaywallOffer | undefined>(() => {
     // Nothing is offered without a confirmed entitlement: a signed-out profile,
@@ -252,6 +294,8 @@ export function useEntitlement(): EntitlementSnapshot {
 
   return {
     account: () => state.account,
+    reload: () => loadAccount(true),
+    accountNotice: () => state.accountNotice,
     offer,
     check: (capability) => {
       const existing = requested.get(capability)
@@ -259,6 +303,7 @@ export function useEntitlement(): EntitlementSnapshot {
       const read = readDecision(capability)
       requested.set(capability, read)
       void read.then((value) => {
+        if (requested.get(capability) !== read) return
         // A failed read is forgotten rather than cached: nothing is gated on it,
         // so the next surface to ask is free to try again.
         if (value === undefined) requested.delete(capability)

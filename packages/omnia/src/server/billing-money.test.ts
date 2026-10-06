@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createHmac } from "node:crypto"
 import { startOmniaServer } from "./server"
-import { readBillingState } from "../billing/store"
+import { readBillingState, type BillingState } from "../billing/store"
 
 // Two silent paths charged real money and granted nothing, permanently:
 //
@@ -23,9 +23,10 @@ const PRICE_BUSINESS = "price_business_test"
 type Server = Awaited<ReturnType<typeof startOmniaServer>>
 let dir = ""
 let saved: Record<string, string | undefined> = {}
-const realFetch = globalThis.fetch
+let realFetch = globalThis.fetch
 
 beforeEach(() => {
+  realFetch = globalThis.fetch
   dir = mkdtempSync(join(tmpdir(), "omnia-money-"))
   saved = {
     STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
@@ -34,6 +35,7 @@ beforeEach(() => {
     STRIPE_PRICE_BUSINESS: process.env.STRIPE_PRICE_BUSINESS,
     OMNIA_PUBLIC_URL: process.env.OMNIA_PUBLIC_URL,
     OMNIA_BILLING_FILE: process.env.OMNIA_BILLING_FILE,
+    OMNIA_DATA_DIR: process.env.OMNIA_DATA_DIR,
   }
   process.env.STRIPE_WEBHOOK_SECRET = WEBHOOK
   process.env.STRIPE_SECRET_KEY = "sk_test_fake"
@@ -41,6 +43,10 @@ beforeEach(() => {
   process.env.STRIPE_PRICE_BUSINESS = PRICE_BUSINESS
   process.env.OMNIA_PUBLIC_URL = "https://example.test/omnia"
   process.env.OMNIA_BILLING_FILE = join(dir, "billing.json")
+  // Every Stripe call must be explicitly simulated; never send the fake key out.
+  stubStripe(() => {
+    throw new Error("Unexpected Stripe request in billing-money.test.ts")
+  })
 })
 
 afterEach(() => {
@@ -164,45 +170,83 @@ describe("a real purchase grants a real plan", () => {
   })
 
   test("the signed-in desktop reaches checkout and the portal; an agent token does not", async () => {
+    const checkoutUrl = "https://checkout.stripe.com/c/pay/cs_desktop_test"
+    const portalUrl = "https://billing.stripe.com/p/session_desktop_test"
+    const calls: { url: string; form: URLSearchParams; headers: Headers }[] = []
+    stubStripe((url, init) => {
+      calls.push({ url, form: new URLSearchParams(String(init.body ?? "")), headers: new Headers(init.headers) })
+      if (url === "https://api.stripe.com/v1/checkout/sessions") {
+        return new Response(JSON.stringify({ url: checkoutUrl }), { status: 200 })
+      }
+      if (url === "https://api.stripe.com/v1/billing_portal/sessions") {
+        return new Response(JSON.stringify({ url: portalUrl }), { status: 200 })
+      }
+      throw new Error(`Unexpected Stripe endpoint: ${url}`)
+    })
     await withServer(async (server) => {
       const desktop = server.auth.mintDesktopToken({ id: 11, login: "desktop-user" })!
       const agent = server.auth.mintClientToken({ id: 12, login: "agent" })!
-      const headers = (token: string) => ({
+      const state: BillingState = {
+        subscriptions: [
+          { customerId: "cus_desktop", subscriptionId: "sub_desktop", status: "active", plan: "pro", profileId: "11", currentPeriodEnd: 2_000_000_000 },
+          { customerId: "cus_forged", subscriptionId: "sub_forged", status: "active", plan: "business", profileId: "230746284", currentPeriodEnd: 2_000_000_000 },
+        ],
+        usage: {},
+        processedEvents: [],
+      }
+      writeFileSync(process.env.OMNIA_BILLING_FILE!, JSON.stringify(state), { mode: 0o600 })
+      expect(readBillingState(process.env.OMNIA_BILLING_FILE)).toEqual(state)
+      const headers = (token: string, forgedProfile?: string) => ({
         authorization: `Bearer ${token}`,
         "content-type": "application/json",
-        "x-omnia-profile": "230746284",
+        ...(forgedProfile === undefined ? {} : { "x-omnia-profile": forgedProfile }),
       })
-      // The test key is fake, so Stripe itself refuses checkout with 502 - and the
-      // test profile has no subscription, so the portal answers 404. Both mean
-      // "past the credential check", which is what this pins: a credential
-      // failure would be 401/403 instead.
-      const checkout = await fetch(`${server.url}/v1/billing/checkout`, {
-        method: "POST",
-        headers: headers(desktop),
-        body: JSON.stringify({ plan: "pro" }),
-      })
-      expect(`checkout desktop -> ${checkout.status}`).toBe("checkout desktop -> 502")
-      const portal = await fetch(`${server.url}/v1/billing/portal`, {
-        method: "POST",
-        headers: headers(desktop),
-        body: "{}",
-      })
-      expect(`portal desktop -> ${portal.status}`).toBe("portal desktop -> 404")
+      // The Mac desktop needs no profile header. A forged one must not redirect
+      // checkout metadata or the portal to a different customer's subscription.
+      for (const forgedProfile of [undefined, "230746284"]) {
+        const checkout = await fetch(`${server.url}/v1/billing/checkout`, {
+          method: "POST",
+          headers: headers(desktop, forgedProfile),
+          body: JSON.stringify({ plan: "pro" }),
+        })
+        expect(checkout.status).toBe(200)
+        expect(await checkout.json()).toEqual({ ok: true, url: checkoutUrl })
+        const checkoutCall = calls.at(-1)!
+        expect(checkoutCall.url).toBe("https://api.stripe.com/v1/checkout/sessions")
+        expect(checkoutCall.form.get("subscription_data[metadata][profileId]")).toBe("11")
+        expect(checkoutCall.form.get("metadata[profileId]")).toBe("11")
+        expect(checkoutCall.form.get("client_reference_id")).toBe("11")
+        expect(checkoutCall.headers.get("Idempotency-Key")).toBe("omnia-checkout-pro-11")
+        const portal = await fetch(`${server.url}/v1/billing/portal`, {
+          method: "POST",
+          headers: headers(desktop, forgedProfile),
+          body: "{}",
+        })
+        expect(portal.status).toBe(200)
+        expect(await portal.json()).toEqual({ ok: true, url: portalUrl })
+        expect(calls.at(-1)!.url).toBe("https://api.stripe.com/v1/billing_portal/sessions")
+        expect(calls.at(-1)!.form.get("customer")).toBe("cus_desktop")
+      }
+      expect(calls).toHaveLength(4)
       for (const path of ["/v1/billing/checkout", "/v1/billing/portal"]) {
         const body = path.endsWith("checkout") ? JSON.stringify({ plan: "pro" }) : "{}"
-        const denied = await fetch(`${server.url}${path}`, { method: "POST", headers: headers(agent), body })
+        const denied = await fetch(`${server.url}${path}`, { method: "POST", headers: headers(agent, "11"), body })
         expect(`${path} agent -> ${denied.status}`).toBe(`${path} agent -> 403`)
       }
+      expect(calls).toHaveLength(4)
     })
   })
 
   test("a thin client token cannot open the billing portal", async () => {
     stubStripe(async () => new Response(JSON.stringify({ url: "https://billing.stripe.com/p/session_test" }), { status: 200 }))
     await withServer(async (server) => {
-      const body = JSON.stringify({
+      const state: BillingState = {
         subscriptions: [{ customerId: "cus_1", subscriptionId: "sub_1", status: "active", plan: "pro", profileId: "230746284", currentPeriodEnd: 2_000_000_000 }],
-      })
-      writeFileSync(process.env.OMNIA_BILLING_FILE!, JSON.stringify(body), { mode: 0o600 })
+        usage: {},
+        processedEvents: [],
+      }
+      writeFileSync(process.env.OMNIA_BILLING_FILE!, JSON.stringify(state), { mode: 0o600 })
+      expect(readBillingState(process.env.OMNIA_BILLING_FILE)).toEqual(state)
       // A client token satisfies isAuthorized, so before this the portal URL for
       // the operator's customer was reachable by any paired device.
       const thin = server.auth.mintClientToken({ id: 9, login: "thin" })!
@@ -281,7 +325,6 @@ describe("money is never taken and then dropped", () => {
       expect(checkout.status).toBe(200)
 
       // 2. Stripe delivers the subscription, with the metadata checkout set.
-      globalThis.fetch = realFetch
       const delivered = await deliver(server, {
         id: "evt_real",
         type: "customer.subscription.updated",

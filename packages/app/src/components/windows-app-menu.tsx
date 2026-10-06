@@ -18,6 +18,7 @@ export function WindowsAppMenu(props: {
 }) {
   let lastFocused: HTMLElement | undefined
   const language = useLanguage()
+  const entitlement = useEntitlement()
 
   const rememberFocus = () => {
     const active = document.activeElement
@@ -50,7 +51,14 @@ export function WindowsAppMenu(props: {
   }
 
   return (
-    <DropdownMenu gutter={4} modal={false} placement="bottom-start">
+    <DropdownMenu
+      gutter={4}
+      modal={false}
+      placement="bottom-start"
+      onOpenChange={(open) => {
+        if (open) void entitlement.reload()
+      }}
+    >
       {props.variant === "v2" ? (
         <div
           data-component="desktop-icon-button"
@@ -106,7 +114,7 @@ export function WindowsAppMenu(props: {
                 hides behind autoHideMenuBar, so a native-only Account meant no
                 upgrade path was ever visible. Same rules as the native menu -
                 nothing offered until the entitlement confirms it. */}
-            <AccountSubmenu platform={props.platform} />
+            <AccountSubmenu platform={props.platform} entitlement={entitlement} />
           </DropdownMenu.Group>
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
@@ -114,16 +122,20 @@ export function WindowsAppMenu(props: {
   )
 }
 
-function AccountSubmenu(props: { platform: ReturnType<typeof usePlatform> }) {
+function AccountSubmenu(props: {
+  platform: ReturnType<typeof usePlatform>
+  entitlement: ReturnType<typeof useEntitlement>
+}) {
   const language = useLanguage()
-  const entitlement = useEntitlement()
+  const entitlement = props.entitlement
   const plan = () => entitlement.account()?.plan
   // An upgrade is offered only for a plan the server confirmed and that sits
   // below the target. Until the read answers, everything stays disabled rather
   // than offering an upgrade the server would refuse.
-  const canUpgradeToPro = () => plan() === "free"
-  const canUpgradeToBusiness = () => plan() === "free" || plan() === "pro"
-  const canManage = () => plan() !== undefined && plan() !== "free"
+  const configured = () => entitlement.account()?.billingConfigured === true
+  const canUpgradeToPro = () => configured() && plan() === "free"
+  const canUpgradeToBusiness = () => configured() && (plan() === "free" || plan() === "pro")
+  const canManage = () => configured() && plan() !== undefined && plan() !== "free"
 
   return (
     <DesktopMenuSubmenu label={language.t("desktop.menu.account")}>
@@ -154,10 +166,14 @@ function AccountSubmenu(props: { platform: ReturnType<typeof usePlatform> }) {
         disabled={!canManage()}
         onSelect={() => openBillingPortal(props.platform, language)}
       />
-      <Show when={entitlement.account() && !entitlement.account()?.billingConfigured}>
+      <Show when={entitlement.accountNotice()}>
         <DropdownMenu.Separator />
         <DesktopMenuItem
-          label={language.t("desktop.billing.notConfigured")}
+          label={language.t(
+            entitlement.accountNotice() === "unconfigured"
+              ? "desktop.billing.notConfigured"
+              : "desktop.billing.unreachable",
+          )}
           disabled
           onSelect={() => undefined}
         />
