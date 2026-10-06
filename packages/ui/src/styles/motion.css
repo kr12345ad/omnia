@@ -1,0 +1,89 @@
+:root {
+  --ui-motion-duration-fast: 120ms;
+  --ui-motion-duration-enter: 160ms;
+  --ui-motion-duration-slow: 200ms;
+  --ui-motion-duration-exit: 100ms;
+  --ui-motion-duration-fast-exit: 80ms;
+  --ui-motion-ease-out: var(--spring-smooth, cubic-bezier(0.22, 1, 0.36, 1));
+  --ui-motion-ease-in: ease-in;
+}
+
+[data-component="dialog-overlay"][data-closed] {
+  opacity: 0;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-component="dialog-overlay"][data-expanded] {
+    animation: ui-motion-fade-in var(--ui-motion-duration-slow) var(--ui-motion-ease-out) backwards;
+  }
+
+  [data-component="dialog-overlay"][data-closed] {
+    animation: ui-motion-fade-out var(--ui-motion-duration-fast-exit) var(--ui-motion-ease-in) forwards;
+  }
+}
+
+/* Removing transition properties also cancels motion already in flight. */
+@media (prefers-reduced-motion: reduce) {
+  [data-component="tabs"] [data-slot="tabs-trigger-wrapper"],
+  [data-component="tabs"] [data-slot="tabs-trigger-wrapper"]::after,
+  [data-component="tabs"] [data-slot="tabs-trigger"],
+  [data-component="tabs"] [data-slot="tabs-trigger"] [data-component="icon"],
+  [data-component="tabs"] [data-slot="tabs-trigger-close-button"],
+  [data-component="tabs-v2"] [data-slot="tabs-v2-trigger-wrapper"],
+  [data-component="tabs-v2"] [data-slot="tabs-v2-trigger"],
+  [data-component="tabs-v2"] [data-slot="tabs-v2-close-button"],
+  [data-component="progress"] [data-slot="progress-fill"] {
+    transition: none;
+  }
+}
+
+@keyframes ui-motion-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ui-motion-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes ui-motion-surface-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--ui-motion-enter-y, 0px)) scale(var(--ui-motion-enter-scale, 0.98));
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes ui-motion-surface-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(var(--ui-motion-exit-y, 0px)) scale(0.99);
+  }
+}
+
+/* Kobalte watches the content animation; v2 paints and animates its parent shell. */
+@keyframes ui-motion-dialog-presence-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+  }
+}

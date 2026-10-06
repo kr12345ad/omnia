@@ -1,3 +1,5 @@
+@import "../styles/motion.css";
+
 [data-component="tooltip-trigger"] {
   display: flex;
 }
@@ -27,9 +29,7 @@
 
   box-shadow: var(--shadow-md);
   pointer-events: none !important;
-  /* transition: all 150ms ease-out; */
-  /* transform: translate3d(0, 0, 0); */
-  /* transform-origin: var(--kb-tooltip-content-transform-origin); */
+  transform-origin: var(--kb-tooltip-content-transform-origin);
 
   /* text-12-medium */
   font-family: var(--font-family-sans);
@@ -39,36 +39,23 @@
   line-height: var(--line-height-large); /* 166.667% */
   letter-spacing: var(--letter-spacing-normal);
 
-  &[data-expanded] {
+  &[data-expanded],
+  &[data-force-open="true"] {
     opacity: 1;
-    /* transform: translate3d(0, 0, 0); */
   }
 
   &[data-closed]:not([data-force-open="true"]) {
     opacity: 0;
   }
 
-  /* &[data-placement="top"] { */
-  /*   &[data-closed] { */
-  /*     transform: translate3d(0, 4px, 0); */
-  /*   } */
-  /* } */
-  /**/
-  /* &[data-placement="bottom"] { */
-  /*   &[data-closed] { */
-  /*     transform: translate3d(0, -4px, 0); */
-  /*   } */
-  /* } */
-  /**/
-  /* &[data-placement="left"] { */
-  /*   &[data-closed] { */
-  /*     transform: translate3d(4px, 0, 0); */
-  /*   } */
-  /* } */
-  /**/
-  /* &[data-placement="right"] { */
-  /*   &[data-closed] { */
-  /*     transform: translate3d(-4px, 0, 0); */
-  /*   } */
-  /* } */
+  @media (prefers-reduced-motion: no-preference) {
+    &[data-expanded],
+    &[data-force-open="true"] {
+      animation: ui-motion-surface-in var(--ui-motion-duration-fast) var(--ui-motion-ease-out) backwards;
+    }
+
+    &[data-closed]:not([data-force-open="true"]) {
+      animation: ui-motion-surface-out var(--ui-motion-duration-fast-exit) var(--ui-motion-ease-in) forwards;
+    }
+  }
 }

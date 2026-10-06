@@ -1,3 +1,5 @@
+@import "../../styles/motion.css";
+
 * {
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -22,6 +24,13 @@
 [data-component="tabs-v2"] [data-slot="tabs-v2-content"] {
   flex: 1;
   overflow: auto;
+
+  /* Entrance only: an outgoing panel must not delay Kobalte's unmount. */
+  @media (prefers-reduced-motion: no-preference) {
+    &[data-selected] {
+      animation: ui-motion-fade-in var(--ui-motion-duration-fast) var(--ui-motion-ease-out) backwards;
+    }
+  }
 }
 
 [data-component="tabs-v2"] [data-slot="tabs-v2-list"] {
@@ -46,6 +55,13 @@
   flex-shrink: 0;
   white-space: nowrap;
   user-select: none;
+
+  @media (prefers-reduced-motion: no-preference) {
+    transition:
+      color var(--ui-motion-duration-fast) var(--ui-motion-ease-out),
+      background-color var(--ui-motion-duration-fast) var(--ui-motion-ease-out),
+      border-color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+  }
 }
 
 [data-component="tabs-v2"] [data-slot="tabs-v2-trigger"] {
@@ -61,6 +77,10 @@
   font-weight: 440;
   line-height: 100%;
   letter-spacing: -0.04px;
+
+  @media (prefers-reduced-motion: no-preference) {
+    transition: color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+  }
 }
 
 [data-component="tabs-v2"] [data-slot="tabs-v2-trigger"]:is(:focus, :focus-visible) {
@@ -77,6 +97,10 @@
   align-items: center;
   justify-content: center;
   color: var(--v2-text-text-faint);
+
+  @media (prefers-reduced-motion: no-preference) {
+    transition: color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+  }
 }
 
 [data-component="tabs-v2"] [data-slot="tabs-v2-close-button"]:hover {

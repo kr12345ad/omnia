@@ -1,3 +1,5 @@
+@import "../styles/motion.css";
+
 [data-component="tabs"] {
   --tabs-bar-height: 48px;
   --tabs-compact-pill-height: 24px;
@@ -64,6 +66,13 @@
     border-inline-end: 1px solid var(--border-weak-base);
     background-color: var(--background-base);
 
+    @media (prefers-reduced-motion: no-preference) {
+      transition:
+        color var(--ui-motion-duration-fast) var(--ui-motion-ease-out),
+        background-color var(--ui-motion-duration-fast) var(--ui-motion-ease-out),
+        border-color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+    }
+
     [data-slot="tabs-trigger"] {
       display: flex;
       align-items: center;
@@ -73,6 +82,14 @@
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
+
+      @media (prefers-reduced-motion: no-preference) {
+        transition: color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+
+        [data-component="icon"] {
+          transition: color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+        }
+      }
 
       &:focus-visible {
         outline: none;
@@ -84,6 +101,10 @@
       display: flex;
       align-items: center;
       justify-content: center;
+
+      @media (prefers-reduced-motion: no-preference) {
+        transition: opacity var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+      }
     }
 
     [data-component="icon-button"] {
@@ -122,6 +143,13 @@
   [data-slot="tabs-content"] {
     overflow-y: auto;
     flex: 1;
+
+    /* Entrance only: an outgoing panel must not delay Kobalte's unmount. */
+    @media (prefers-reduced-motion: no-preference) {
+      &[data-selected] {
+        animation: ui-motion-fade-in var(--ui-motion-duration-fast) var(--ui-motion-ease-out) backwards;
+      }
+    }
 
     /* Hide scrollbar */
     scrollbar-width: none;
@@ -185,10 +213,6 @@
       background-color: transparent;
       gap: 8px;
       color: var(--text-weak);
-      transition:
-        color 120ms ease,
-        background-color 120ms ease,
-        border-color 120ms ease;
 
       &::after {
         content: "";
@@ -199,11 +223,14 @@
         height: 1px;
         background-color: var(--text-strong);
         opacity: 0;
-        transform: scaleX(0.75);
+        transform: scaleX(0.96);
         transform-origin: center;
-        transition:
-          opacity 120ms ease,
-          transform 120ms ease;
+
+        @media (prefers-reduced-motion: no-preference) {
+          transition:
+            opacity var(--ui-motion-duration-exit) var(--ui-motion-ease-in),
+            transform var(--ui-motion-duration-exit) var(--ui-motion-ease-in);
+        }
       }
 
       &[data-value="review"] {
@@ -231,6 +258,11 @@
         &::after {
           opacity: 1;
           transform: scaleX(1);
+
+          @media (prefers-reduced-motion: no-preference) {
+            transition-duration: var(--ui-motion-duration-fast);
+            transition-timing-function: var(--ui-motion-ease-out);
+          }
         }
       }
 
@@ -466,10 +498,6 @@
       color: var(--text-weak);
       box-sizing: border-box;
       border: 1px solid transparent;
-      transition:
-        color 120ms ease,
-        background-color 120ms ease,
-        border-color 120ms ease;
 
       &:not(:has([data-selected])):hover:not(:disabled) {
         color: var(--text-base);

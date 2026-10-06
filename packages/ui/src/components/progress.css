@@ -1,3 +1,5 @@
+@import "../styles/motion.css";
+
 [data-component="progress"] {
   display: flex;
   flex-direction: column;
@@ -43,12 +45,19 @@
     width: var(--kb-progress-fill-width);
     border-radius: inherit;
     background-color: var(--border-active);
-    transition: width 200ms ease;
+
+    @media (prefers-reduced-motion: no-preference) {
+      transition: width var(--ui-motion-duration-slow) var(--ui-motion-ease-out);
+    }
   }
 
   &[data-indeterminate] [data-slot="progress-fill"] {
     width: 35%;
-    animation: progress-indeterminate 1.3s ease-in-out infinite;
+
+    @media (prefers-reduced-motion: no-preference) {
+      transition: none;
+      animation: progress-indeterminate 1.3s ease-in-out infinite;
+    }
   }
 }
 
@@ -59,11 +68,5 @@
 
   to {
     transform: translateX(300%);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  [data-component="progress"][data-indeterminate] [data-slot="progress-fill"] {
-    animation: none;
   }
 }

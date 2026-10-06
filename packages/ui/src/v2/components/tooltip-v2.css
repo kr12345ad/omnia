@@ -1,3 +1,5 @@
+@import "../../styles/motion.css";
+
 [data-component="tooltip-v2-trigger"] {
   display: flex;
 }
@@ -31,39 +33,25 @@
   user-select: none;
   pointer-events: none;
 
-  animation: tooltipV2In 120ms ease-out;
   transform-origin: var(--kb-tooltip-content-transform-origin);
 
-  &[data-closed] {
-    animation: tooltipV2Out 80ms ease-in forwards;
-  }
-}
-
-@keyframes tooltipV2In {
-  from {
-    opacity: 0;
-    transform: scale(0.96);
-  }
-  to {
+  &[data-expanded],
+  &[data-force-open="true"] {
     opacity: 1;
-    transform: scale(1);
   }
-}
 
-@keyframes tooltipV2Out {
-  from {
-    opacity: 1;
-    transform: scale(1);
-  }
-  to {
+  &[data-closed]:not([data-force-open="true"]) {
     opacity: 0;
-    transform: scale(0.96);
   }
-}
 
-@media (prefers-reduced-motion: reduce) {
-  [data-component="tooltip-v2"],
-  [data-component="tooltip-v2"][data-closed] {
-    animation: none;
+  @media (prefers-reduced-motion: no-preference) {
+    &[data-expanded],
+    &[data-force-open="true"] {
+      animation: ui-motion-surface-in var(--ui-motion-duration-fast) var(--ui-motion-ease-out) backwards;
+    }
+
+    &[data-closed]:not([data-force-open="true"]) {
+      animation: ui-motion-surface-out var(--ui-motion-duration-fast-exit) var(--ui-motion-ease-in) forwards;
+    }
   }
 }
