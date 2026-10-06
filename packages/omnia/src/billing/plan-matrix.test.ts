@@ -56,18 +56,18 @@ const FREE_MATRIX = {
   // Remote control is included on free because it is what converts somebody.
   // Bounded by a session ceiling rather than by a request count.
   remote_computer: { limit: UNLIMITED, metering: "soft" },
-  input_freeze: { limit: 0, metering: "hard" },
+  input_freeze: { limit: UNLIMITED, metering: "soft" },
   remote_shell: { limit: 0, metering: "hard" },
-  clipboard: { limit: 0, metering: "hard" },
-  browser_automation: { limit: 250, metering: "hard" },
-  credential_vault: { limit: 1, metering: "soft" },
+  clipboard: { limit: UNLIMITED, metering: "soft" },
+  browser_automation: { limit: 500, metering: "hard" },
+  credential_vault: { limit: 5, metering: "hard" },
   vault_login: { limit: 3, metering: "hard" },
   cloud_vision: { limit: 0, metering: "hard" },
   scheduled_runs: { limit: 0, metering: "hard" },
-  live_view: { limit: 20, metering: "soft" },
+  live_view: { limit: 500, metering: "hard" },
   api_access: { limit: 0, metering: "hard" },
   webhooks: { limit: 0, metering: "hard" },
-  subagents: { limit: 2, metering: "soft" },
+  subagents: { limit: UNLIMITED, metering: "soft" },
   audit_export: { limit: 0, metering: "hard" },
   rbac: { limit: 0, metering: "hard" },
   sso: { limit: 0, metering: "hard" },
@@ -81,15 +81,15 @@ const PRO_MATRIX = {
   input_freeze: { limit: UNLIMITED, metering: "soft" },
   remote_shell: { limit: UNLIMITED, metering: "soft" },
   clipboard: { limit: UNLIMITED, metering: "soft" },
-  browser_automation: { limit: 2_000, metering: "soft" },
+  browser_automation: { limit: UNLIMITED, metering: "soft" },
   credential_vault: { limit: UNLIMITED, metering: "soft" },
   vault_login: { limit: 300, metering: "soft" },
   cloud_vision: { limit: 2_000, metering: "soft" },
   scheduled_runs: { limit: 50, metering: "soft" },
-  live_view: { limit: 500, metering: "soft" },
+  live_view: { limit: UNLIMITED, metering: "soft" },
   api_access: { limit: UNLIMITED, metering: "soft" },
   webhooks: { limit: UNLIMITED, metering: "soft" },
-  subagents: { limit: 10, metering: "soft" },
+  subagents: { limit: UNLIMITED, metering: "soft" },
   audit_export: { limit: 0, metering: "hard" },
   rbac: { limit: 0, metering: "hard" },
   sso: { limit: 0, metering: "hard" },
@@ -206,6 +206,36 @@ describe("every capability in the plan table has an asserted limit", () => {
     expect(PLANS.free.capabilities.remote_computer.sessionMinutes).toBe(120)
     expect(PLANS.pro.capabilities.remote_computer.sessionMinutes).toBeUndefined()
   })
+
+  test("upgrading never reduces an allowance or refuses a free unlimited basic", () => {
+    const tiers = ["free", "pro", "business", "enterprise"] as const
+    for (let index = 1; index < tiers.length; index += 1) {
+      const previous = PLANS[tiers[index - 1]]
+      const paid = PLANS[tiers[index]]
+      expect(paid.computers).toBeGreaterThanOrEqual(previous.computers)
+      const saturated = saturatedStore(paid.id)
+      for (const capability of CAPABILITIES) {
+        const before = previous.capabilities[capability]
+        const after = paid.capabilities[capability]
+        // A monthly paid budget must cover even a 31-day free daily budget.
+        const minimum = before.period === "day" && after.period === "month" ? before.limit * 31 : before.limit
+        expect(after.limit).toBeGreaterThanOrEqual(minimum)
+        expect(after.sessionMinutes ?? UNLIMITED).toBeGreaterThanOrEqual(before.sessionMinutes ?? UNLIMITED)
+        if (before.limit > 0) {
+          expect(decide(freshStore(paid.id), PROFILE, capability, { now: NOW }).allowed).toBe(true)
+        }
+        if (FREE_MATRIX[capability].limit === UNLIMITED) {
+          expect(decide(saturated, PROFILE, capability, { now: NOW, storeReadable: false })).toMatchObject({
+            plan: paid.id,
+            allowed: true,
+            code: "granted",
+            used: 1e12,
+            limit: UNLIMITED,
+          })
+        }
+      }
+    }
+  })
 })
 
 for (const plan of ["free", "pro"] as const) {
@@ -220,6 +250,8 @@ for (const plan of ["free", "pro"] as const) {
         // The answer names the plan the customer is on, not the plan we wished
         // they were on.
         expect(fresh.plan).toBe(plan)
+        expect(fresh.limit).toBe(row.limit)
+        expect(fresh.metering).toBe(row.metering)
 
         if (row.limit === 0) {
           // Excluded outright: refused before a single unit of usage matters,
@@ -296,20 +328,22 @@ describe("a ceiling only counts as a ceiling if a finite one binds", () => {
 
   test("a spent month does not follow the customer into the next one", () => {
     const january = Date.parse("2026-01-05T00:00:00Z")
-    let state = spend("pro", "subagents", 0)
-    // Pro allows ten subagents a month, and they are all spent in January.
-    for (let index = 0; index < 10; index += 1) {
-      state = consume(state, PROFILE, "subagents", { now: january })
+    let state = freshStore("pro")
+    // Pro has a finite soft allowance of 300 vault logins per month.
+    for (let index = 0; index < 300; index += 1) {
+      state = consume(state, PROFILE, "vault_login", { now: january })
     }
     const file = tempFile()
     writeBillingState(file, state)
     const read = readBillingState(file)
-    const inJanuary = decide(read, PROFILE, "subagents", { now: Date.parse("2026-01-20T00:00:00Z") })
-    expect(inJanuary.used).toBe(10)
+    const inJanuary = decide(read, PROFILE, "vault_login", { now: Date.parse("2026-01-20T00:00:00Z") })
+    expect(inJanuary.used).toBe(300)
+    expect(inJanuary.allowed).toBe(true)
+    expect(inJanuary.limit).toBe(300)
     expect(inJanuary.code).toBe("limit_reached")
-    // March is a fresh period: the counter that stopped them in January does not
+    // March is a fresh period: the fair-use warning from January does not
     // follow them across the month boundary.
-    const inMarch = decide(read, PROFILE, "subagents", { now: NOW })
+    const inMarch = decide(read, PROFILE, "vault_login", { now: NOW })
     expect(inMarch.used).toBe(0)
     expect(inMarch.code).toBe("granted")
     expect(inMarch.allowed).toBe(true)
@@ -389,13 +423,13 @@ describe("the failure policy, per capability, on the plan the customer is on", (
   })
 
   test("a free customer's hard allowance is not handed out unmetered when billing is unwell", () => {
-    // The opposite half. On free these two ARE granted in normal operation, so
+    // The opposite half. On free these four ARE granted in normal operation, so
     // an unreadable counter is exactly the case that would turn a disk error
     // into unlimited use - a revenue leak dressed up as an outage.
     const atRisk = CAPABILITIES.filter(
       (capability) => FREE_MATRIX[capability].metering === "hard" && FREE_MATRIX[capability].limit > 0,
     ).sort()
-    expect(atRisk).toEqual(["browser_automation", "vault_login"])
+    expect(atRisk).toEqual(["browser_automation", "credential_vault", "live_view", "vault_login"])
     for (const capability of atRisk) {
       expect(decide(freshStore("free"), PROFILE, capability, { now: NOW }).allowed).toBe(true)
       expect(decide(freshStore("free"), PROFILE, capability, { now: NOW, storeReadable: false }).allowed).toBe(false)
@@ -408,9 +442,9 @@ describe("the failure policy, per capability, on the plan the customer is on", (
     ).sort()
     // Pinned deliberately: these are exactly the capabilities that must survive
     // OUR outage rather than being taken away from a customer who did nothing
-    // wrong. The two unlimited ones are here too - "soft with no ceiling" is
+    // wrong. All five are unlimited - "soft with no ceiling" is
     // still soft, and stripping them would break the free app entirely.
-    expect(atRisk).toEqual(["credential_vault", "live_view", "local_computer", "remote_computer", "subagents"])
+    expect(atRisk).toEqual(["clipboard", "input_freeze", "local_computer", "remote_computer", "subagents"])
     for (const capability of atRisk) {
       expect(decide(freshStore("free"), PROFILE, capability, { now: NOW, storeReadable: false }).allowed).toBe(true)
     }

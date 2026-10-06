@@ -18,11 +18,10 @@
 //      assumed.
 //
 //   3. THE METERING PERIOD IS OBSERVABLE AT THE CALL SITE. browser_automation is
-//      budgeted DAILY on free (`capability:YYYY-MM-DD`) and MONTHLY on pro
-//      (`capability:YYYY-MM`). That distinction was wrong once - it was described
-//      as a daily budget and metered monthly - so both halves are pinned from the
-//      outside: a spent month must not refill at midnight, and a spent day must
-//      come back at midnight, through the route a real client calls.
+//      budgeted DAILY on free (`capability:YYYY-MM-DD`) and unlimited on pro,
+//      where usage is still counted monthly. A spent vault_login month must not
+//      refill at midnight, and a spent browser day must come back at midnight,
+//      through the route a real client calls.
 //
 // Nothing here restates a number from plans.ts on its own. Every row below drives
 // the route and asserts what the limit CAUSED, and the row tables are `satisfies
@@ -97,22 +96,22 @@ interface Row {
 const FREE_MATRIX = {
   local_computer: { limit: UNLIMITED, metering: "soft" },
   remote_computer: { limit: UNLIMITED, metering: "soft" },
-  input_freeze: { limit: 0, metering: "hard" },
+  input_freeze: { limit: UNLIMITED, metering: "soft" },
   remote_shell: { limit: 0, metering: "hard" },
-  clipboard: { limit: 0, metering: "hard" },
-  browser_automation: { limit: 250, metering: "hard" },
-  credential_vault: { limit: 1, metering: "soft" },
+  clipboard: { limit: UNLIMITED, metering: "soft" },
+  browser_automation: { limit: 500, metering: "hard" },
+  credential_vault: { limit: 5, metering: "hard" },
   vault_login: { limit: 3, metering: "hard" },
   cloud_vision: { limit: 0, metering: "hard" },
   scheduled_runs: { limit: 0, metering: "hard" },
-  live_view: { limit: 20, metering: "soft" },
+  live_view: { limit: 500, metering: "hard" },
   api_access: { limit: 0, metering: "hard" },
   webhooks: { limit: 0, metering: "hard" },
   audit_export: { limit: 0, metering: "hard" },
   rbac: { limit: 0, metering: "hard" },
   sso: { limit: 0, metering: "hard" },
   self_hosted: { limit: 0, metering: "hard" },
-  subagents: { limit: 2, metering: "soft" },
+  subagents: { limit: UNLIMITED, metering: "soft" },
 } satisfies Record<Capability, Row>
 
 /** The same contract for the plan sold by self-service checkout. */
@@ -122,19 +121,19 @@ const PRO_MATRIX = {
   input_freeze: { limit: UNLIMITED, metering: "soft" },
   remote_shell: { limit: UNLIMITED, metering: "soft" },
   clipboard: { limit: UNLIMITED, metering: "soft" },
-  browser_automation: { limit: 2_000, metering: "soft" },
+  browser_automation: { limit: UNLIMITED, metering: "soft" },
   credential_vault: { limit: UNLIMITED, metering: "soft" },
   vault_login: { limit: 300, metering: "soft" },
   cloud_vision: { limit: 2_000, metering: "soft" },
   scheduled_runs: { limit: 50, metering: "soft" },
-  live_view: { limit: 500, metering: "soft" },
+  live_view: { limit: UNLIMITED, metering: "soft" },
   api_access: { limit: UNLIMITED, metering: "soft" },
   webhooks: { limit: UNLIMITED, metering: "soft" },
   audit_export: { limit: 0, metering: "hard" },
   rbac: { limit: 0, metering: "hard" },
   sso: { limit: 0, metering: "hard" },
   self_hosted: { limit: 0, metering: "hard" },
-  subagents: { limit: 10, metering: "soft" },
+  subagents: { limit: UNLIMITED, metering: "soft" },
 } satisfies Record<Capability, Row>
 
 const CAPABILITIES = Object.keys(FREE_MATRIX) as Capability[]
@@ -334,7 +333,7 @@ describe("every capability, through the enforcement route", () => {
         env: { OMNIA_SERVER_URL: server.url, OMNIA_SERVER_TOKEN: server.token },
         profileId: PROFILE,
       })
-      for (const capability of ["input_freeze", "credential_vault"] as const) {
+      for (const capability of ["input_freeze", "credential_vault", "browser_automation", "subagents", "live_view"] as const) {
         const answer = await client.check(capability)
         expect(`${capability} limit -> ${answer.limit}`).toBe(`${capability} limit -> ${UNLIMITED}`)
         expect(answer.allowed).toBe(true)
@@ -342,8 +341,8 @@ describe("every capability, through the enforcement route", () => {
         expect(answer.degraded).toBe(false)
       }
       // A finite limit arrives as itself, from the wire.
-      const finite = await client.check("subagents")
-      expect(`${finite.limit}/${finite.used}`).toBe("10/0")
+      const finite = await client.check("vault_login")
+      expect(`${finite.limit}/${finite.used}`).toBe("300/0")
     } finally {
       await server.stop()
     }
@@ -387,7 +386,7 @@ describe("an unreadable store, per capability, on the plan the customer is on", 
       const atRisk = CAPABILITIES.filter(
         (capability) => FREE_MATRIX[capability].metering === "hard" && FREE_MATRIX[capability].limit > 0,
       )
-      expect(atRisk).toEqual(["browser_automation", "vault_login"])
+      expect(atRisk).toEqual(["browser_automation", "credential_vault", "vault_login", "live_view"])
       for (const capability of atRisk) {
         const answer = await check(server, capability)
         expect(`${capability} -> ${answer.status} ${answer.body.code}`).toBe(`${capability} -> 402 unknown`)
@@ -406,7 +405,7 @@ describe("an unreadable store, per capability, on the plan the customer is on", 
       const atRisk = CAPABILITIES.filter(
         (capability) => FREE_MATRIX[capability].metering === "soft" && FREE_MATRIX[capability].limit > 0,
       ).sort()
-      expect(atRisk).toEqual(["credential_vault", "live_view", "local_computer", "remote_computer", "subagents"])
+      expect(atRisk).toEqual(["clipboard", "input_freeze", "local_computer", "remote_computer", "subagents"])
       for (const capability of atRisk) {
         const answer = await check(server, capability)
         expect(`${capability} -> ${answer.status} ${answer.body.code}`).toBe(`${capability} -> 200 granted`)
@@ -454,21 +453,25 @@ describe("an unreadable store, per capability, on the plan the customer is on", 
     // the outage is survivable rather than total. Pinned so the blast radius is
     // visible instead of assumed.
     await withUnreadableStore("pro", async (server) => {
-      const paidOnly = ["input_freeze", "remote_shell", "clipboard", "cloud_vision", "scheduled_runs", "api_access", "webhooks"]
+      const paidOnly = ["remote_shell", "cloud_vision", "scheduled_runs", "api_access", "webhooks"]
       for (const capability of paidOnly) {
         const answer = await check(server, capability)
         expect(`pro outage ${capability} -> ${answer.status} ${answer.body.code} plan=${answer.body.plan}`).toBe(
           `pro outage ${capability} -> 402 not_entitled plan=free`,
         )
       }
-      for (const capability of ["vault_login", "browser_automation"]) {
+      for (const capability of ["vault_login", "browser_automation", "credential_vault", "live_view"]) {
         const answer = await check(server, capability)
         expect(`pro outage ${capability} -> ${answer.status} ${answer.body.code}`).toBe(
           `pro outage ${capability} -> 402 unknown`,
         )
       }
-      const kept = await check(server, "live_view")
-      expect(`pro outage live_view -> ${kept.status} ${kept.body.code}`).toBe("pro outage live_view -> 200 granted")
+      for (const capability of ["local_computer", "remote_computer", "input_freeze", "clipboard", "subagents"]) {
+        const kept = await check(server, capability)
+        expect(`pro outage ${capability} -> ${kept.status} ${kept.body.code}`).toBe(
+          `pro outage ${capability} -> 200 granted`,
+        )
+      }
     })
   })
 
@@ -476,13 +479,13 @@ describe("an unreadable store, per capability, on the plan the customer is on", 
     const server = await startServer()
     try {
       writeBillingState(billingFile, store("pro"))
-      expect((await check(server, "input_freeze")).status).toBe(200)
+      expect((await check(server, "remote_shell")).status).toBe(200)
       writeFileSync(billingFile, "{ not json", { mode: 0o600 })
-      expect((await check(server, "input_freeze")).status).toBe(402)
+      expect((await check(server, "remote_shell")).status).toBe(402)
       // The corrupt file is moved aside by a read rather than overwritten, so
       // restoring the last good copy is all it takes.
       writeBillingState(billingFile, store("pro"))
-      const restored = await check(server, "input_freeze")
+      const restored = await check(server, "remote_shell")
       expect(restored.status).toBe(200)
       expect(restored.body.plan).toBe("pro")
     } finally {
@@ -537,7 +540,7 @@ describe("an unreadable store, per capability, on the plan the customer is on", 
         profileId: PROFILE,
         timeoutMs: 1_000,
       })
-      for (const capability of ["vault_login", "browser_automation"] as const) {
+      for (const capability of ["vault_login", "browser_automation", "credential_vault", "live_view"] as const) {
         const answer = await freeClient.check(capability)
         expect(`free outage ${capability} -> ${answer.allowed} ${answer.origin}`).toBe(
           `free outage ${capability} -> false fail-closed`,
@@ -550,11 +553,9 @@ describe("an unreadable store, per capability, on the plan the customer is on", 
 })
 
 describe("a daily allowance is a day, and a spent month is a month", () => {
-  // The bug this pins: browser_automation is budgeted 250 a DAY on free and
-  // 2000 a MONTH on pro. It was metered monthly while being described as daily,
-  // so one busy afternoon could spend a month of the budget and leave the account
-  // dead until the first. The counter key is derived from the rule's own period,
-  // which makes the two indistinguishable from outside unless they are checked.
+  // Free browser automation is 500/day; Pro browser automation is unlimited,
+  // while Pro vault_login is soft 300/month. The counter keys and boundary
+  // behaviour must agree with those promises through the route.
   const day = (iso: string): void => {
     setSystemTime(new Date(iso))
   }
@@ -566,13 +567,13 @@ describe("a daily allowance is a day, and a spent month is a month", () => {
     // The daily key at the limit and the monthly key at zero: the refusal can
     // only come from the daily counter, so the daily counter is what this route
     // reads.
-    writeBillingState(billingFile, store("free", { [`browser_automation:${today}`]: 250, "browser_automation:2026-03": 0 }))
+    writeBillingState(billingFile, store("free", { [`browser_automation:${today}`]: 500, "browser_automation:2026-03": 0 }))
     const server = await startServer()
     try {
       const spent = await check(server, "browser_automation")
       expect(spent.status).toBe(402)
       expect(spent.body.code).toBe("limit_reached")
-      expect(spent.body.used).toBe(250)
+      expect(spent.body.used).toBe(500)
       // The refusal names the budget it came out of, because it is back in hours.
       expect(spent.body.reason).toContain("allowance today")
 
@@ -595,7 +596,7 @@ describe("a daily allowance is a day, and a spent month is a month", () => {
     // monthly key are ignored rather than obeyed, and reading them would keep
     // denying for a month.
     day(`${today}T12:00:00Z`)
-    writeBillingState(billingFile, store("free", { "browser_automation:2026-03": 250 }))
+    writeBillingState(billingFile, store("free", { "browser_automation:2026-03": 500 }))
     const server = await startServer()
     try {
       const answer = await check(server, "browser_automation")
@@ -606,25 +607,52 @@ describe("a daily allowance is a day, and a spent month is a month", () => {
     }
   })
 
-  test("pro browser automation stays monthly: a spent month does NOT refill at midnight", async () => {
+  test("unlimited pro browser automation counts usage across midnight without a refusal", async () => {
     day(`${today}T12:00:00Z`)
     writeBillingState(billingFile, store("pro", { "browser_automation:2026-03": 2_000 }))
     const server = await startServer()
     try {
       const spent = await check(server, "browser_automation")
-      // Soft metering, so it is still allowed - but a new day must not hand the
-      // allowance back, which is the same confusion in the paid direction.
+      // The old monthly ceiling no longer limits Pro, but usage is still counted.
       expect(spent.status).toBe(200)
-      expect(spent.body.code).toBe("limit_reached")
+      expect(spent.body.code).toBe("granted")
       expect(spent.body.allowed).toBe(true)
       expect(spent.body.used).toBe(2_000)
+      expect(spent.body.limit).toBeNull()
+      expect(countersOnDisk()?.["browser_automation:2026-03"]).toBe(2_001)
       expect(spent.body.reason).not.toContain("today")
 
       day(`${tomorrow}T00:00:01Z`)
       const nextDay = await check(server, "browser_automation")
-      expect(nextDay.body.used).toBe(2_000)
-      expect(nextDay.body.code).toBe("limit_reached")
+      expect(nextDay.status).toBe(200)
+      expect(nextDay.body.used).toBe(2_001)
+      expect(nextDay.body.code).toBe("granted")
       expect(Object.keys(countersOnDisk() ?? {})).toEqual(["browser_automation:2026-03"])
+      expect(countersOnDisk()?.["browser_automation:2026-03"]).toBe(2_002)
+    } finally {
+      await server.stop()
+    }
+  })
+
+  test("a finite pro vault-login month stays soft-exhausted across midnight and resets next month", async () => {
+    day(`${today}T12:00:00Z`)
+    writeBillingState(billingFile, store("pro", { "vault_login:2026-03": 300 }))
+    const server = await startServer()
+    try {
+      const spent = await check(server, "vault_login")
+      expect(spent.status).toBe(200)
+      expect(spent.body).toMatchObject({ allowed: true, code: "limit_reached", plan: "pro", used: 300, limit: 300 })
+      expect(spent.body.reason).toContain("fair-use")
+      day(`${tomorrow}T00:00:01Z`)
+      const nextDay = await check(server, "vault_login")
+      expect(nextDay.status).toBe(200)
+      expect(nextDay.body).toMatchObject({ allowed: true, code: "limit_reached", used: 300 })
+      expect(countersOnDisk()).toEqual({ "vault_login:2026-03": 300 })
+      day("2026-04-01T00:00:01Z")
+      const nextMonth = await check(server, "vault_login")
+      expect(nextMonth.status).toBe(200)
+      expect(nextMonth.body).toMatchObject({ allowed: true, code: "granted", used: 0, limit: 300 })
+      expect(countersOnDisk()).toEqual({ "vault_login:2026-04": 1 })
     } finally {
       await server.stop()
     }
@@ -660,7 +688,7 @@ describe("a daily allowance is a day, and a spent month is a month", () => {
 
   test("the two periods draw on separate counters, so neither can starve the other", async () => {
     day(`${today}T12:00:00Z`)
-    writeBillingState(billingFile, store("free", { [`browser_automation:${today}`]: 250, "vault_login:2026-03": 3 }))
+    writeBillingState(billingFile, store("free", { [`browser_automation:${today}`]: 500, "vault_login:2026-03": 3 }))
     const server = await startServer()
     try {
       // Exhausted on both, and each refusal is about its own budget.
@@ -702,9 +730,9 @@ describe("the store's bounds hold at the call site", () => {
     const server = await startServer()
     try {
       // 6,000 subscriptions and 1,200 event ids in the file; the route answered.
-      const oldest = await check(server, "input_freeze", { "x-omnia-profile": "1000000000" })
+      const oldest = await check(server, "remote_shell", { "x-omnia-profile": "1000000000" })
       expect(`oldest subscriber -> ${oldest.status} ${oldest.body.plan}`).toBe("oldest subscriber -> 200 pro")
-      const newest = await check(server, "input_freeze", { "x-omnia-profile": "222222222" })
+      const newest = await check(server, "remote_shell", { "x-omnia-profile": "222222222" })
       expect(`newest subscriber -> ${newest.status} ${newest.body.plan}`).toBe("newest subscriber -> 402 free")
       // The counters survived the same read, so metering is unaffected by the
       // bounds above it.

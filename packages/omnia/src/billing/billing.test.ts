@@ -374,7 +374,7 @@ describe("metering periods", () => {
   })
 
   test("a daily spend is keyed on the day, and the elapsed key is dropped", () => {
-    // 250/day replaces 250/month, so the key is a date rather than a month and the
+    // The daily allowance uses a date rather than a month, and the
     // file cannot accumulate one dead key per day forever.
     let state = consume(EMPTY_STATE, "p1", "browser_automation", { now: at("2026-02-01T10:00:00Z") })
     expect(Object.keys(state.usage.p1!.counters)).toEqual(["browser_automation:2026-02-01"])
@@ -389,14 +389,16 @@ describe("metering periods", () => {
     // a month; ignoring them can only ever be the more generous direction.
     const before = {
       ...EMPTY_STATE,
-      usage: { p1: { counters: { "browser_automation:2026-01": 250 }, updatedAt: 0 } },
+      usage: { p1: { counters: { "browser_automation:2026-02": 500 }, updatedAt: 0 } },
     }
-    expect(decide(before, "p1", "browser_automation", { now: at("2026-02-01T12:00:00Z") }).allowed).toBe(true)
+    expect(decide(before, "p1", "browser_automation", { now: at("2026-02-01T12:00:00Z") })).toMatchObject({
+      allowed: true, code: "granted", used: 0,
+    })
     expect(currentDay(at("2026-02-01T12:00:00Z"))).toBe("2026-02-01")
     expect(currentPeriod(at("2026-02-01T12:00:00Z"))).toBe("2026-02")
   })
 
-test("a genuinely monthly allowance does not refill on a day boundary", () => {
+  test("a genuinely monthly allowance does not refill on a day boundary", () => {
     // vault_login is 3 for the billing period, not 3 a day. Spent in January, so
     // every day boundary crossed inside January has to stay refused - only the
     // month rolling over gives the budget back.
@@ -405,9 +407,9 @@ test("a genuinely monthly allowance does not refill on a day boundary", () => {
       state = consume(state, "p1", "vault_login", { now: at("2026-01-15T00:00:00Z") })
     }
     expect(Object.keys(state.usage.p1!.counters)).toEqual(["vault_login:2026-01"])
-    expect(decide(state, "p1", "vault_login", { now: at("2026-01-16T00:00:00Z")}).allowed).toBe(false)
-    expect(decide(state, "p1", "vault_login", { now: at("2026-01-31T23:59:59Z")}).allowed).toBe(false)
-    expect(decide(state, "p1", "vault_login", { now: at("2026-01-31T23:59:59Z")}).used).toBe(3)
+    expect(decide(state, "p1", "vault_login", { now: at("2026-01-16T00:00:00Z") }).allowed).toBe(false)
+    expect(decide(state, "p1", "vault_login", { now: at("2026-01-31T23:59:59Z") }).allowed).toBe(false)
+    expect(decide(state, "p1", "vault_login", { now: at("2026-01-31T23:59:59Z") }).used).toBe(3)
     // ...and it does come back when the month rolls over.
     const february = decide(state, "p1", "vault_login", { now: at("2026-02-01T00:00:00Z") })
     expect(february.allowed).toBe(true)
@@ -417,16 +419,57 @@ test("a genuinely monthly allowance does not refill on a day boundary", () => {
     expect(Object.keys(state.usage.p1!.counters)).toEqual(["vault_login:2026-01"])
   })
 
-  test("a paid monthly allowance survives the day boundary", () => {
-    const subscribed = applySubscription(EMPTY_STATE, liveSubscription("pro", "sub_1"), "pro", "evt_1").state
-    let state = subscribed
-    for (let i = 0; i < PLANS.pro.capabilities.browser_automation.limit; i += 1) {
-      state = consume(state, "p1", "browser_automation", { now: at("2026-02-01T10:00:00Z") })
+  test("unlimited paid browser usage keeps counting across a day boundary", () => {
+    let state = applySubscription(
+      EMPTY_STATE,
+      { ...liveSubscription("pro", "sub_1"), currentPeriodEnd: at("2026-03-01T00:00:00Z") },
+      "pro",
+      "evt_1",
+    ).state
+    // Exceed the free daily limit with a fixed, finite number of actual spends.
+    for (let i = 0; i < 501; i += 1) {
+      state = consume(state, "p1", "browser_automation", { now: at("2026-02-01T23:59:59Z") })
     }
-    // Soft, so it still works - but a new day must not hand the allowance back.
-    const nextDay = decide(state, "p1", "browser_automation", { now: at("2026-02-02T10:00:00Z") })
-    expect(nextDay.code).toBe("limit_reached")
-    expect(nextDay.used).toBe(PLANS.pro.capabilities.browser_automation.limit)
+    expect(decide(state, "p1", "browser_automation", { now: at("2026-02-01T23:59:59Z") })).toMatchObject({
+      plan: "pro",
+      allowed: true,
+      code: "granted",
+      used: 501,
+      limit: Number.POSITIVE_INFINITY,
+    })
+    const nextDay = at("2026-02-02T00:00:00Z")
+    expect(decide(state, "p1", "browser_automation", { now: nextDay })).toMatchObject({
+      plan: "pro",
+      allowed: true,
+      code: "granted",
+      used: 501,
+      limit: Number.POSITIVE_INFINITY,
+    })
+    state = consume(state, "p1", "browser_automation", { now: nextDay })
+    expect(decide(state, "p1", "browser_automation", { now: nextDay }).used).toBe(502)
+    expect(state.usage.p1!.counters).toEqual({ "browser_automation:2026-02": 502 })
+  })
+
+  test("a paid finite soft monthly allowance survives the day boundary", () => {
+    let state = applySubscription(
+      EMPTY_STATE,
+      { ...liveSubscription("pro", "sub_monthly"), currentPeriodEnd: at("2026-03-01T00:00:00Z") },
+      "pro",
+      "evt_monthly",
+    ).state
+    for (let i = 0; i < 300; i += 1) {
+      state = consume(state, "p1", "vault_login", { now: at("2026-02-01T23:59:59Z") })
+    }
+    const nextDay = decide(state, "p1", "vault_login", { now: at("2026-02-02T00:00:00Z") })
+    expect(nextDay).toMatchObject({
+      plan: "pro",
+      allowed: true,
+      code: "limit_reached",
+      used: 300,
+      limit: 300,
+      metering: "soft",
+    })
+    expect(nextDay.reason).toMatch(/fair-use/)
   })
 })
 
@@ -447,14 +490,15 @@ describe("decisions", () => {
     expect(denied.limit).toBe(3)
   })
 
-  test("a spent soft limit still works and says why", () => {
-    // subagents is SOFT(2) on free: past the allowance it degrades, it does not break.
-    let state = consume(consume(consume(EMPTY_STATE, "p1", "subagents"), "p1", "subagents"), "p1", "subagents")
+  test("free subagents remain granted beyond the former soft limit", () => {
+    const state = consume(consume(consume(EMPTY_STATE, "p1", "subagents"), "p1", "subagents"), "p1", "subagents")
     const decision = decide(state, "p1", "subagents")
     expect(decision.allowed).toBe(true)
-    expect(decision.code).toBe("limit_reached")
+    expect(decision.code).toBe("granted")
+    expect(decision.used).toBe(3)
+    expect(decision.limit).toBe(Number.POSITIVE_INFINITY)
     expect(decision.metering).toBe("soft")
-    expect(decision.reason).toMatch(/fair-use/)
+    expect(decision.reason).toContain("included in the free plan")
   })
 
   test("an unreadable store refuses a hard-metered capability and allows a soft one", () => {
