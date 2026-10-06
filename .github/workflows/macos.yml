@@ -1,0 +1,46 @@
+name: macos
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  omnia:
+    name: omnia (macos)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # Runs `bun install --frozen-lockfile` at the repo root.
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Typecheck omnia
+        working-directory: packages/omnia
+        run: bun typecheck
+
+      # Fake-runner tests only: X11/Wayland suites skip when DISPLAY and
+      # WAYLAND_DISPLAY are absent, and the macOS driver tests use fake
+      # executables instead of System Events.
+      - name: Run omnia tests
+        working-directory: packages/omnia
+        run: bun test
+        env:
+          CI: true

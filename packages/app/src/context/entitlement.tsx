@@ -1,7 +1,10 @@
 import { type Accessor, createMemo } from "solid-js"
 import { createStore } from "solid-js/store"
 import type { PaywallDecision, PaywallOffer } from "@opencode-ai/ui/paywall"
+import { useLanguage } from "./language"
 import { usePlatform } from "./platform"
+import { friendlyErrorMessage } from "@/utils/error-message"
+import { showToast } from "@/utils/toast"
 
 // The renderer's one view of what the signed-in account may do.
 //
@@ -16,16 +19,39 @@ import { usePlatform } from "./platform"
 // and no answer means no notice and no gate: enforcement is the server's job,
 // and the UI must never bill somebody for our outage.
 
+/** What the entitlement read answered about one capability of the account. */
+export interface EntitlementCapability {
+  readonly allowed: boolean
+  readonly code: PaywallDecision["code"] | "unknown"
+  readonly used: number
+  /**
+   * The allowance, or undefined when there is no ceiling.
+   *
+   * Undefined is the honest reading of an unlimited plan: the server serialises
+   * `Infinity` as null, and reading that as 0 would tell a Business subscriber
+   * they have no allowance left on every capability they bought without limit.
+   */
+  readonly limit: number | undefined
+}
+
 /** What the entitlement read answered about the account itself. */
 export interface Entitlement {
   /**
    * Whether the server can take a payment at all.
    *
    * The response also names the plan the account is on and that plan's monthly
-   * price. Neither is surfaced: a notice may only quote the plan being OFFERED
-   * and what that plan costs, and the entitlement never names those.
+   * price. Both are carried here so a notice can quote a real figure: nothing
+   * below hardcodes a plan or a price, because a rename or a price change is a
+   * server-side edit and a component that invents one is simply wrong.
    */
   readonly billingConfigured: boolean
+  /** Plan id the server resolved for this profile, or undefined when it named none. */
+  readonly plan: string | undefined
+  /** What that plan costs a month, or 0 for a plan sold at no price. */
+  readonly monthlyUsd: number
+  /** Computers the plan covers, or undefined for unlimited. See `EntitlementCapability`. */
+  readonly computers: number | undefined
+  readonly capabilities: Readonly<Record<string, EntitlementCapability>>
 }
 
 export interface EntitlementSnapshot {
@@ -50,10 +76,14 @@ export interface EntitlementSnapshot {
  * The desktop preload owns the only billing path the renderer has. Everywhere
  * else - the browser build, a test, a server render - there is no bridge, which
  * is not a failure: there is simply nothing to say about the account.
+ *
+ * Checkout and the portal are both here because the CTA has to reach one of
+ * them: a bridge that can only manage a subscription cannot sell one.
  */
 type BillingBridge = {
   entitlement(): Promise<unknown>
   check(capability: string): Promise<unknown>
+  checkout(plan: string): Promise<unknown>
   portal(): Promise<unknown>
 }
 
@@ -66,11 +96,12 @@ function bridge(): BillingBridge | undefined {
   if (typeof window === "undefined") return undefined
   const billing = (window as unknown as { api?: { billing?: Partial<BillingBridge> } }).api?.billing
   if (!billing) return undefined
-  const { entitlement, check, portal } = billing
+  const { entitlement, check, checkout, portal } = billing
   if (typeof entitlement !== "function") return undefined
   if (typeof check !== "function") return undefined
+  if (typeof checkout !== "function") return undefined
   if (typeof portal !== "function") return undefined
-  return { entitlement, check, portal }
+  return { entitlement, check, checkout, portal }
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -122,7 +153,50 @@ function decisionState(value: unknown): PaywallDecision | undefined {
 
 function entitlementState(value: unknown): Entitlement | undefined {
   if (!record(value)) return undefined
-  return { billingConfigured: value.billingConfigured === true }
+  return {
+    billingConfigured: value.billingConfigured === true,
+    plan: typeof value.plan === "string" && value.plan.length > 0 ? value.plan : undefined,
+    monthlyUsd: num(value.monthlyUsd) ?? 0,
+    computers: num(value.computers),
+    capabilities: capabilityStates(value.capabilities),
+  }
+}
+
+/** The plan the server resolved to nobody's subscription. */
+const FREE_PLAN = "free"
+
+/**
+ * Whether this account has a subscription to manage.
+ *
+ * The portal route answers 404 for a profile with no subscription, because a
+ * free profile has no Stripe customer. Sending a free profile there is what
+ * made the Upgrade button do nothing at all for the one population that sees a
+ * paywall, so the plan id - not the response's shape - decides which of the two
+ * billing routes the CTA can actually use.
+ */
+function subscribed(account: Entitlement) {
+  return account.plan !== undefined && account.plan !== FREE_PLAN
+}
+
+/**
+ * One capability as the account-wide read answered it.
+ *
+ * `limit` keeps the null an unlimited plan arrives as rather than flattening it
+ * to zero, for the reason in `EntitlementCapability`.
+ */
+function capabilityState(value: unknown): EntitlementCapability {
+  const decision = decisionState(value)
+  return {
+    allowed: record(value) && value.allowed === true,
+    code: decision?.code ?? "unknown",
+    used: decision?.used ?? 0,
+    limit: decision?.limit,
+  }
+}
+
+function capabilityStates(value: unknown): Readonly<Record<string, EntitlementCapability>> {
+  if (!record(value)) return {}
+  return Object.fromEntries(Object.entries(value).map(([capability, state]) => [capability, capabilityState(state)]))
 }
 
 async function readEntitlement() {
@@ -151,6 +225,7 @@ function loadAccount() {
 
 export function useEntitlement(): EntitlementSnapshot {
   const platform = usePlatform()
+  const language = useLanguage()
   loadAccount()
 
   const offer = createMemo<PaywallOffer | undefined>(() => {
@@ -158,8 +233,21 @@ export function useEntitlement(): EntitlementSnapshot {
     // an unconfigured server and an unreachable one all mean the checkout would
     // be refused, and an upgrade button that quietly does nothing is worse than
     // an explanation on its own.
-    if (!state.account?.billingConfigured) return undefined
-    return { onUpgrade: () => openBillingPortal(platform) }
+    const account = state.account
+    if (!account?.billingConfigured) return undefined
+    return {
+      // Quoted from the response rather than named here, so a plan rename or a
+      // price change is a server-side edit. A plan the server prices at nothing
+      // is not quoted at all: "$0" or "free" beside an Upgrade button is a figure
+      // nobody can act on, and `Paywall` already has honest wording for an offer
+      // that names no plan.
+      plan: subscribed(account) ? account.plan : undefined,
+      price: account.monthlyUsd > 0 ? formatUsd(account.monthlyUsd, language.locale()) : undefined,
+      onUpgrade: () =>
+        subscribed(account)
+          ? openBilling(platform, language, (billing) => billing.portal())
+          : openBilling(platform, language, (billing) => billing.checkout(CHECKOUT_PLAN)),
+    }
   })
 
   return {
@@ -198,22 +286,58 @@ export function useEntitlementDecision(capability: string): Accessor<PaywallDeci
 }
 
 /**
- * Billing hands back a URL rather than opening a tab itself, so the renderer
- * decides where it goes. A portal that cannot be reached leaves the notice
- * standing: the explanation is still true, and it is not the surface's job to
- * report the failure.
+ * The paid plan a single Upgrade button buys.
+ *
+ * A protocol value and not copy: `POST /billing/checkout` accepts only the paid
+ * plan ids, and the desktop Account menu offers them in this same order. The
+ * name and the price shown beside the button are the server's, never this.
  */
-function openBillingPortal(platform: ReturnType<typeof usePlatform>) {
+const CHECKOUT_PLAN = "pro"
+
+/** What the plan costs, in the user's own locale and currency. */
+function formatUsd(amount: number, locale: string) {
+  return new Intl.NumberFormat(locale, { style: "currency", currency: "USD" }).format(amount)
+}
+
+/**
+ * Runs a billing route and opens what it hands back.
+ *
+ * Billing returns a URL rather than opening a tab itself, so the renderer
+ * decides where it goes. Both outcomes are reported: a URL that never arrives
+ * and a request that is refused are the same thing to the person who clicked,
+ * and swallowing either is what made this button do nothing at all.
+ */
+function openBilling(
+  platform: ReturnType<typeof usePlatform>,
+  language: ReturnType<typeof useLanguage>,
+  request: (billing: BillingBridge) => Promise<unknown>,
+) {
   const billing = bridge()
   if (!billing) return
-  void billing.portal().then(
+  void request(billing).then(
     (url) => {
-      if (typeof url !== "string" || url.length === 0) return
-      platform.openExternal(url)
+      if (typeof url === "string" && url.length > 0) {
+        platform.openExternal(url)
+        return
+      }
+      reportBillingFailure(language)
     },
-    // A portal that cannot be reached leaves the notice standing: the
-    // explanation is still true, and reporting the failure is the menu's job,
-    // not this surface's.
-    () => {},
+    (error) => reportBillingFailure(language, error),
   )
+}
+
+/**
+ * What a user is told when billing will not start.
+ *
+ * The server's own refusal is already a sentence somebody can act on, so it is
+ * what gets shown; a transport failure is not, and `friendlyErrorMessage` maps
+ * that to designed copy rather than a stack. Either way the notice stays
+ * standing, because the explanation it gave is still true.
+ */
+function reportBillingFailure(language: ReturnType<typeof useLanguage>, error?: unknown) {
+  showToast({
+    variant: "error",
+    title: language.t("desktop.billing.title"),
+    description: friendlyErrorMessage(error, language.t, "desktop.billing.unreachable"),
+  })
 }

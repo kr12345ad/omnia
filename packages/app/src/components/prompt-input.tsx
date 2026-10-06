@@ -1536,7 +1536,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
           removeLabel={language.t("prompt.attachment.remove")}
           fileLabel={language.t("ui.common.file")}
           newLayoutDesigns={false}
-          vision={vision()}
+          vision={entitlement.dismissed("cloud_vision") ? undefined : vision()}
           visionOffer={entitlement.offer()}
           onDismissVision={() => entitlement.dismiss("cloud_vision")}
         />

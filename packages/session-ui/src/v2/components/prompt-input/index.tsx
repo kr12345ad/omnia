@@ -499,7 +499,7 @@ export function PromptInputV2Attachments(props: {
           class="pointer-events-none absolute inset-y-0 end-0 z-10 w-6 bg-[linear-gradient(to_left,var(--v2-background-bg-base),transparent)] rtl:bg-[linear-gradient(to_right,var(--v2-background-bg-base),transparent)]"
         />
       </div>
-      <Show when={promptInputV2VisionOwed(props.attachments)}>
+      <Show when={false /* attaching an image is unmetered; see the real refusal */ && promptInputV2VisionOwed(props.attachments)}>
         <div class="px-2 pb-2">{props.vision}</div>
       </Show>
     </Show>

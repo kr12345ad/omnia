@@ -30,13 +30,22 @@ export interface BillingCapabilityState {
   readonly allowed: boolean
   readonly code: DecisionCode
   readonly used: number
-  readonly limit: number
+  /**
+   * null is unlimited, not zero.
+   *
+   * A plan's fair-use allowances are `Infinity`, which JSON cannot express, so
+   * the server sends null for them. Reading that null as 0 reported "nothing
+   * left" for the one case that has no ceiling at all, which is how an
+   * unlimited allowance ends up displayed as a spent one.
+   */
+  readonly limit: number | null
 }
 
 export interface BillingEntitlement {
   /** Server-supplied price so the UI never hardcodes one. */
   readonly plan: PlanId
-  readonly computers: number
+  /** null is unlimited, for the same reason `limit` is. */
+  readonly computers: number | null
   readonly capabilities: Readonly<Record<string, BillingCapabilityState>>
   readonly billingConfigured: boolean
   readonly monthlyUsd: number
@@ -80,8 +89,17 @@ export function canUpgradeTo(account: BillingAccount, plan: CheckoutPlan): boole
   return PLAN_RANK[account.plan] < PLAN_RANK[plan]
 }
 
+/**
+ * Whether the billing portal can be opened for this account.
+ *
+ * The portal exists for a subscriber. A free profile has no Stripe customer, and
+ * the control plane answers the portal route for one with "This profile has no
+ * subscription to manage yet", so offering it there would be an item that opens
+ * a refusal. An account that has not been resolved yet is in the same position:
+ * there may be no subscription to manage at all.
+ */
 export function canManageBilling(account: BillingAccount): boolean {
-  return account.notice === undefined
+  return account.notice === undefined && account.plan !== undefined && account.plan !== "free"
 }
 
 export async function readBillingEntitlement(): Promise<BillingEntitlement> {
@@ -90,7 +108,7 @@ export async function readBillingEntitlement(): Promise<BillingEntitlement> {
     // An unrecognised plan id must not be rendered as if it were a plan: fall
     // back the same way the server's own resolver does.
     plan: isPlanId(json.plan) ? json.plan : "free",
-    computers: typeof json.computers === "number" ? json.computers : 0,
+    computers: typeof json.computers === "number" ? json.computers : null,
     capabilities: capabilityStates(json.capabilities),
     billingConfigured: json.billingConfigured === true,
     // Carried so the UI can show what the plan costs instead of hardcoding it.
@@ -98,7 +116,7 @@ export async function readBillingEntitlement(): Promise<BillingEntitlement> {
   }
 }
 
-export async function checkBillingCapability(capability: Capability): Promise<BillingCheck> {
+export async function checkBillingCapability(capability: Capability, preview = false): Promise<BillingCheck> {
   // 402 is the server's way of answering a refusal, so it is accepted here and
   // returned as a decision; only a genuine failure throws.
   // A refusal is a 402 and must come back as a DECISION, not a thrown error. The
@@ -106,7 +124,12 @@ export async function checkBillingCapability(capability: Capability): Promise<Bi
   // ok-check rather than adding to it - so a granted 200 threw
   // ControlPlaneRequestError("HTTP 200") and every soft or free capability was
   // reported as a failure in the desktop app.
-  const { json } = await billingRequest("POST", "/v1/billing/check", { capability }, (status: number, ok: boolean) => ok || status === 402)
+  const { json } = await billingRequest(
+    "POST",
+    "/v1/billing/check",
+    { capability },
+    (status: number, ok: boolean) => ok || status === 402,
+  )
   return {
     ...capabilityState(json),
     plan: isPlanId(json.plan) ? json.plan : "free",
@@ -180,7 +203,12 @@ function profileHeaders(): Record<string, string> {
   return profileId === undefined ? {} : { "x-omnia-profile": profileId }
 }
 
-function billingRequest(method: "GET" | "POST", path: string, body?: unknown, accept?: (status: number, ok: boolean) => boolean) {
+function billingRequest(
+  method: "GET" | "POST",
+  path: string,
+  body?: unknown,
+  accept?: (status: number, ok: boolean) => boolean,
+) {
   return controlPlaneRequest(path, method, { body, headers: profileHeaders(), accept })
 }
 
@@ -203,6 +231,9 @@ function capabilityState(value: unknown): BillingCapabilityState {
     allowed: state.allowed === true,
     code: decisionCode(state.code),
     used: typeof state.used === "number" ? state.used : 0,
-    limit: typeof state.limit === "number" ? state.limit : 0,
+    // Anything that is not a finite number is left as null - unlimited - rather
+    // than becoming a 0, because a 0 is a refusal the UI would then have to
+    // explain and an absent ceiling has nothing to refuse.
+    limit: typeof state.limit === "number" && Number.isFinite(state.limit) ? state.limit : null,
   }
 }

@@ -79,6 +79,23 @@ jobs:
         working-directory: packages/opencode
         run: bun run test:httpapi
 
+      # `bun test` exits 0 when a DOM suite is guarded by
+      # `describe.skipIf(isServer)`, so a missing `--conditions=browser` would
+      # silently drop every DOM assertion. Fail loudly instead of trusting the
+      # exit code.
+      - name: Guard DOM suites against silent skips
+        if: runner.os == 'Linux'
+        working-directory: packages/ui
+        run: |
+          output="$(bun run test:browser 2>&1)"
+          echo "$output"
+          passes="$(printf '%s\n' "$output" | sed -n 's/^ *\([0-9][0-9]*\) pass$/\1/p' | tail -1)"
+          skips="$(printf '%s\n' "$output" | sed -n 's/^ *\([0-9][0-9]*\) skip$/\1/p' | tail -1)"
+          if [ "${passes:-0}" -eq 0 ] || [ "${skips:-0}" -ne 0 ]; then
+            echo "::error::packages/ui DOM suites did not execute (pass=${passes:-0} skip=${skips:-0}). Check the --conditions=browser flag on test:browser."
+            exit 1
+          fi
+
   e2e:
     name: e2e (${{ matrix.settings.name }})
     strategy:

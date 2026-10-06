@@ -405,7 +405,14 @@ export function decide(
   }
 }
 
-/** Records consumption. Returns a new state; the caller persists it. */
+/**
+ * Records consumption. Returns a new state; the caller persists it.
+ *
+ * INVARIANT, relied on by `check` below: when this declines to record anything
+ * it returns the state it was GIVEN, by identity, not a copy. A caller that
+ * needs to know whether a unit was recorded compares the reference rather than
+ * keeping a second copy of the rules that decide it.
+ */
 export function consume(
   state: BillingState,
   profileId: string | undefined,
@@ -443,6 +450,57 @@ export function consume(
  */
 function isElapsed(key: string, capability: Capability, current: string): boolean {
   return key.startsWith(`${capability}:`) && key < current
+}
+
+export interface CheckResult {
+  readonly decision: Decision
+  /**
+   * The state to persist, or the state that was passed in when nothing was
+   * charged. Compared by IDENTITY when `consumed` is false, so a caller that
+   * wants to avoid touching the disk can skip the write without diffing.
+   */
+  readonly state: BillingState
+  /** Whether a unit was actually taken. Never true for a read. */
+  readonly consumed: boolean
+}
+
+/**
+ * Decides, and charges a unit only when the caller said to.
+ *
+ * READING an entitlement and CONSUMING one are different acts, and the route
+ * used to do both unconditionally: every answer to "may this profile use X?"
+ * moved X's counter, so the app's own reads - a composer mounting, a settings
+ * page rendering, a poll - were billed to the customer as if they were use.
+ * That is the metering-the-meter bug, and the fix has to live here rather than
+ * at each call site, because "did this ask intend to spend?" is a property of
+ * the question and not of whoever asked it.
+ *
+ * `consume` DEFAULTS TO TRUE, deliberately. The alternative default - charge
+ * only when asked - turns every existing call site into a read the moment it is
+ * written, which silently under-meters a paid capability. Under-metering a paid
+ * capability is worse than an inflated counter, so the unsafe direction is the
+ * one you have to name out loud: a bare check still spends, and a read is
+ * something a caller has to ask for.
+ *
+ * A charge still only happens on `granted`. A refused capability spends nothing,
+ * because there was no use to bill for - which is what makes a read of an
+ * exhausted allowance report the refusal and cost nothing at the same time.
+ */
+export function check(
+  state: BillingState,
+  profileId: string | undefined,
+  capability: Capability,
+  options: { readonly now?: number; readonly storeReadable?: boolean; readonly consume?: boolean } = {},
+): CheckResult {
+  const decision = decide(state, profileId, capability, options)
+  if (options.consume === false || !decision.allowed || decision.code !== "granted") {
+    return { decision, state, consumed: false }
+  }
+  const next = consume(state, profileId, capability, options)
+  // `consume` returns the SAME state when it declined to record anything - no
+  // profile, or a prototype-polluting id - so identity is the honest answer to
+  // "was a unit taken" rather than a second copy of the rules that decide it.
+  return { decision, state: next, consumed: next !== state }
 }
 
 /** Folds a subscription in, ignoring an event id that was already applied. */

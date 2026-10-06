@@ -39,7 +39,7 @@ import {
 import {
   applySubscription,
   billingStateReadable,
-  consume,
+  check,
   decide,
   readBillingState,
   writeBillingState,
@@ -427,7 +427,14 @@ export async function handleBillingRoute(
     const capabilities = Object.fromEntries(
       (Object.keys(PLANS[plan].capabilities) as Capability[]).map((capability) => {
         const decision = decide(state, who, capability, { storeReadable: readable })
-        return [capability, { allowed: decision.allowed, code: decision.code, used: decision.used, limit: decision.limit }]
+        // Always false, and said out loud: this route is a snapshot of what the
+        // account has, and asking it what you have must never be what takes it
+        // away. The field is here so a caller can tell from the reply alone that
+        // nothing was charged, without having to know which route it called.
+        return [
+          capability,
+          { allowed: decision.allowed, code: decision.code, used: decision.used, limit: decision.limit, consumed: false },
+        ]
       }),
     )
     json(response, 200, {
@@ -453,21 +460,42 @@ export async function handleBillingRoute(
     }
     const file = billingFile(context)
     const { state, readable } = loadState(file)
-    const decision = decide(state, who, capability as Capability, { storeReadable: readable })
-    if (decision.allowed && decision.code === "granted") {
-      const next = consume(state, who, capability as Capability)
-      // Never write usage over a store we could not parse: that would overwrite a
-      // quarantined file with an empty one and lose every subscription in it.
-      if (file !== undefined && who !== undefined && readable) {
-        try {
-          writeBillingState(file, next)
-        } catch {
-          // Failing to persist a counter must not deny a request that was
-          // already allowed; the worst case is one un-metered call.
-        }
+    // Spending is the DEFAULT and a read has to be asked for by name. The
+    // asymmetry is deliberate and it is the whole safety argument: a call site
+    // that never heard of this parameter keeps charging exactly as before, so no
+    // enforcement path can stop metering by omission, by a typo, or by a caller
+    // that upgrades the server ahead of its own client. Getting it the other way
+    // round - charge only when asked - would quietly hand a paid capability away
+    // from every gate in the product the first time one was written.
+    //
+    // Strictly `=== false`, so `consume: "false"`, `0` and `null` all still
+    // spend. A truthy value and a missing one are the same answer on purpose.
+    const outcome = check(state, who, capability as Capability, {
+      storeReadable: readable,
+      consume: body.consume !== false,
+    })
+    let consumed = false
+    // Never write usage over a store we could not parse: that would overwrite a
+    // quarantined file with an empty one and lose every subscription in it.
+    if (outcome.consumed && file !== undefined && readable) {
+      try {
+        writeBillingState(file, outcome.state)
+        consumed = true
+      } catch {
+        // Failing to persist a counter must not deny a request that was
+        // already allowed; the worst case is one un-metered call.
       }
     }
-    json(response, decision.allowed ? 200 : 402, { ok: decision.allowed, ...decision })
+    // `consumed` is reported from what actually landed on disk rather than from
+    // what was asked for, so a caller can tell a decision from a preview and a
+    // charge that failed to persist from a charge that did not. A read is
+    // always false here, which is the property the composer mount and the
+    // settings display depend on.
+    json(response, outcome.decision.allowed ? 200 : 402, {
+      ok: outcome.decision.allowed,
+      ...outcome.decision,
+      consumed,
+    })
     return true
   }
 

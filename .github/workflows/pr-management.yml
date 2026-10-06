@@ -33,7 +33,7 @@ jobs:
 
       - name: Install dependencies
         if: steps.team-check.outputs.is_team != 'true'
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Install opencode
         if: steps.team-check.outputs.is_team != 'true'

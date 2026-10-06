@@ -14,6 +14,7 @@ import { normalizePromptHistoryEntry, promptLength, type PromptHistoryComment } 
 import { createPersistedPromptInputHistory } from "@/components/prompt-input/history-store"
 import { promptDesignPlaceholder, promptPlaceholder } from "@/components/prompt-input/placeholder"
 import { createPromptSubmit } from "@/components/prompt-input/submit"
+import { useEntitlement, useEntitlementDecision } from "@/context/entitlement"
 import { selectionFromLines, type SelectedLineRange, useFile } from "@/context/file"
 import { useComments } from "@/context/comments"
 import { useCommand } from "@/context/command"
@@ -28,7 +29,11 @@ import { useSync } from "@/context/sync"
 import { createSessionTabs } from "@/pages/session/helpers"
 import { resolveSessionMode } from "@/utils/session-mode"
 import { showToast } from "@/utils/toast"
-import { PromptInputV2, type PromptInputV2Suggestion } from "@opencode-ai/session-ui/v2/prompt-input"
+import {
+  PromptInputV2,
+  type PromptInputV2Paywalls,
+  type PromptInputV2Suggestion,
+} from "@opencode-ai/session-ui/v2/prompt-input"
 import {
   createPromptInputV2Controller,
   createPromptInputV2State,
@@ -50,6 +55,32 @@ export function PromptInputV2Composer(props: PromptInputV2ComposerProps) {
   const dialog = useDialog()
   const command = useCommand()
   const language = useLanguage()
+  const entitlement = useEntitlement()
+  const vision = useEntitlementDecision("cloud_vision")
+  const shellMode = () => props.controller.state.mode === "shell"
+
+  // Asked only once the user has reached for a shell, so mounting a composer
+  // never spends a billing read on a capability nobody asked about.
+  createEffect(() => {
+    if (!shellMode()) return
+    void entitlement.check("remote_shell")
+  })
+
+  const paywalls: PromptInputV2Paywalls = {
+    // Withholding a decision is how `Paywall` renders nothing, so a notice the
+    // user closed and one nobody asked for are the same absence rather than two
+    // ways for a notice to be half-drawn.
+    get cloudVision() {
+      return entitlement.dismissed("cloud_vision") ? undefined : vision()
+    },
+    get remoteShell() {
+      return entitlement.dismissed("remote_shell") ? undefined : entitlement.decision("remote_shell")
+    },
+    get offer() {
+      return entitlement.offer()
+    },
+    onDismiss: (capability) => entitlement.dismiss(capability),
+  }
 
   return (
     <div class="flex flex-col gap-3">
@@ -57,6 +88,7 @@ export function PromptInputV2Composer(props: PromptInputV2ComposerProps) {
         controller={props.controller}
         borderUnderlay={props.borderUnderlay}
         class={props.class}
+        paywalls={paywalls}
         variantControlVisible={!props.controller.model.loading}
         attachKeybind={command.keybindParts("file.attach")}
         attachShortcut={command.keybind("file.attach")}

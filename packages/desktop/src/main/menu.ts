@@ -1,10 +1,11 @@
 import { app, BrowserWindow, dialog, Menu } from "electron"
 import type { MenuItemConstructorOptions } from "electron"
-import { formatDesktopNativeMessage } from "@opencode-ai/app/i18n/desktop-native"
+import { formatDesktopNativeMessage, type DesktopNativeKey } from "@opencode-ai/app/i18n/desktop-native"
 import {
   DESKTOP_MENU,
   desktopMenuVisible,
   type DesktopMenuEntry,
+  type DesktopMenuPlatform,
   type DesktopMenuRole,
 } from "@opencode-ai/app/desktop-menu"
 
@@ -33,7 +34,12 @@ type Deps = {
 
 // Nothing is known about the account until the entitlement call answers, and
 // until it does the menu must not offer an upgrade the server would refuse.
-const UNKNOWN_ACCOUNT: BillingAccount = { plan: undefined, billingConfigured: false, notice: "signed_out" }
+// This state carries no notice on purpose: a notice is a statement about the
+// user, and before the answer arrives the only true statement is that there is
+// nothing to say yet. Telling a signed-in user to sign in while a slow control
+// plane is being waited on is a false claim, so the group shows no row at all
+// until the server has actually said something.
+const UNKNOWN_ACCOUNT: BillingAccount = { plan: undefined, billingConfigured: false, notice: undefined }
 
 let account = UNKNOWN_ACCOUNT
 let accountHooked = false
@@ -41,46 +47,57 @@ let accountHooked = false
 export function createMenu(deps: Deps) {
   // Account was macOS-only, which left Windows and Linux users with no way to
   // see their plan, upgrade, or be told billing is unconfigured. The Account
-  // group is now appended to the existing menu on every platform; only the
-  // native application menu itself stays macOS-shaped.
-  if (process.platform !== "darwin") {
-    const menu = Menu.getApplicationMenu()
-    if (menu === null) return
-    const withAccount = [...accountSubmenu(deps)]
-    if (withAccount.length > 0) Menu.setApplicationMenu(Menu.buildFromTemplate([...applicationTemplate(deps), { label: accountLabel("desktop.menu.account"), submenu: withAccount }]))
-    return
-  }
-
-  Menu.setApplicationMenu(Menu.buildFromTemplate(applicationTemplate(deps)))
+  // group is now built on every platform: it sits under the application menu on
+  // macOS, and is appended to the menu itself everywhere else. The menu is built
+  // from the shared template rather than from whatever was installed before,
+  // because on Windows and Linux nothing has been installed yet.
+  const platform = desktopPlatform()
+  const template =
+    platform === "macos"
+      ? applicationTemplate(deps, platform)
+      : [...applicationTemplate(deps, platform), accountItem(deps)]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
   // Upgrading happens in a browser tab, so the window gaining focus back is the
   // moment the plan may have changed. Without this the menu would keep showing
   // the plan the user just paid to leave.
-  if (!accountHooked) {
+  if (platform === "macos" && !accountHooked) {
     accountHooked = true
     app.on("browser-window-focus", () => void syncAccount(deps))
   }
   void syncAccount(deps)
 }
 
-function applicationTemplate(deps: Deps) {
-  return DESKTOP_MENU.filter((menu) => desktopMenuVisible(menu, "macos")).map((menu) => {
+/** The shared menu separates macOS from the Ctrl-accelerated platforms. */
+function desktopPlatform(): DesktopMenuPlatform {
+  return process.platform === "darwin" ? "macos" : "windows"
+}
+
+function applicationTemplate(deps: Deps, platform: DesktopMenuPlatform): MenuItemConstructorOptions[] {
+  return DESKTOP_MENU.filter((menu) => desktopMenuVisible(menu, platform)).map((menu) => {
     if (menu.role) return { role: nativeRole(menu.role), label: nativeT(menu.labelKey) }
-    const entries = menu.items?.filter((entry) => desktopMenuVisible(entry, "macos")) ?? []
+    const entries = menu.items?.filter((entry) => desktopMenuVisible(entry, platform)) ?? []
     return {
       label: nativeT(menu.labelKey),
-      submenu: menu.id === "app" ? appSubmenu(entries, deps) : entries.map((entry) => nativeItem(entry, deps)),
+      submenu:
+        menu.id === "app"
+          ? appSubmenu(entries, deps, platform)
+          : entries.map((entry) => nativeItem(entry, deps, platform)),
     }
   })
 }
 
 /** The application menu, with Account under Settings where it belongs. */
-function appSubmenu(entries: readonly DesktopMenuEntry[], deps: Deps): MenuItemConstructorOptions[] {
+function appSubmenu(
+  entries: readonly DesktopMenuEntry[],
+  deps: Deps,
+  platform: DesktopMenuPlatform,
+): MenuItemConstructorOptions[] {
   const settings = entries.findIndex((entry) => entry.type === "item" && entry.command === "settings.open")
   const at = settings < 0 ? 0 : settings + 1
   return [
-    ...entries.slice(0, at).map((entry) => nativeItem(entry, deps)),
+    ...entries.slice(0, at).map((entry) => nativeItem(entry, deps, platform)),
     accountItem(deps),
-    ...entries.slice(at).map((entry) => nativeItem(entry, deps)),
+    ...entries.slice(at).map((entry) => nativeItem(entry, deps, platform)),
   ]
 }
 
@@ -161,13 +178,13 @@ function reportBillingFailure(deps: Deps, action: "checkout" | "portal", error: 
   void (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options))
 }
 
-function nativeItem(entry: DesktopMenuEntry, deps: Deps): MenuItemConstructorOptions {
+function nativeItem(entry: DesktopMenuEntry, deps: Deps, platform: DesktopMenuPlatform): MenuItemConstructorOptions {
   if (entry.type === "separator") return { type: "separator" }
   if (entry.role) return { role: nativeRole(entry.role), label: entry.labelKey ? nativeT(entry.labelKey) : undefined }
 
   const item: MenuItemConstructorOptions = {
     label: entry.labelKey ? nativeT(entry.labelKey) : undefined,
-    accelerator: entry.accelerator?.macos,
+    accelerator: entry.accelerator?.[platform],
     enabled: entry.enabled === "updater" ? UPDATER_ENABLED : undefined,
   }
 
@@ -195,12 +212,11 @@ function nativeRole(role: DesktopMenuRole) {
   return role as NonNullable<MenuItemConstructorOptions["role"]>
 }
 
-// The Account copy is not in DESKTOP_NATIVE_ENGLISH yet: that table and its
-// locale dicts are owned with the rest of the shared native bundle, and
-// parseDesktopNativeBundle rejects a bundle whose key set drifts, so a key
-// cannot be added to one locale alone. These are the English sources for the
-// keys the table needs; once they land, nativeT answers and this record is only
-// the fallback for a bundle that predates them.
+// The Account copy now lives in DESKTOP_NATIVE_ENGLISH and in every locale
+// bundle, so nativeT answers for all of these keys. This record is only the
+// English source kept for a bundle that predates them: a bundle that is missing
+// a key resolves to nothing at all, and a menu item with no label is worse than
+// an English one.
 const ACCOUNT_COPY = {
   "desktop.menu.account": "Account",
   "desktop.menu.plan": "Plan: {{plan}}",
@@ -211,7 +227,7 @@ const ACCOUNT_COPY = {
   "desktop.billing.notConfigured": "Billing is not configured on this server.",
   "desktop.billing.signedOut": "Sign in to Omnia to see your plan and upgrade.",
   "desktop.billing.unreachable": "Omnia could not reach the server to check your plan.",
-} as const
+} as const satisfies { readonly [key in DesktopNativeKey]?: string }
 
 const NOTICE_KEY = {
   signed_out: "desktop.billing.signedOut",
@@ -220,8 +236,9 @@ const NOTICE_KEY = {
 } as const satisfies Record<BillingAccountNotice, keyof typeof ACCOUNT_COPY>
 
 function accountLabel(key: keyof typeof ACCOUNT_COPY, params?: Record<string, string | number>) {
-  const translated = nativeT(key as Parameters<typeof nativeT>[0])
-  // An unknown key resolves to nothing at all, so the fallback is what keeps the
-  // menu labelled rather than blank.
+  // nativeT is asked without the params on purpose: a bundle missing the key
+  // answers undefined, and formatting undefined would throw while substituting
+  // the placeholder instead of falling back.
+  const translated = nativeT(key)
   return formatDesktopNativeMessage(typeof translated === "string" ? translated : ACCOUNT_COPY[key], params)
 }

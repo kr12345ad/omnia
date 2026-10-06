@@ -1,0 +1,33 @@
+name: audit
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - bun.lock
+      - "**/package.json"
+  pull_request:
+    paths:
+      - bun.lock
+      - "**/package.json"
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: dependency audit
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Audit dependencies
+        run: bun audit --audit-level=high
