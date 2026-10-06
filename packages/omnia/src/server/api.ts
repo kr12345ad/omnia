@@ -495,12 +495,28 @@ function finiteNumber(value: unknown, bounds: { min?: number; max?: number } = {
 // so a "denied" scope still needs a fingerprint-bound grant from
 // /v1/permissions/approve. A fingerprint is proof this server issued, so it is
 // forwarded for every caller.
+// A prompt-level approval claim is only honored from a runtime allowed to make
+// it: the deployment's own server token, or the signed-in person's own desktop.
+// The desktop's GitHub sign-in mints a "desktop"-kind client token, and the
+// agent sidecar runs on that same token (desktop/src/main/server.ts), so
+// requiring the server token here silently dropped the agent's approvedScopes
+// and refused every computer action with "missing scopes". A provisioned
+// "agent" client token and a remote computer token stay gated, and
+// permissions.evaluate still refuses to let any of these lift a denied scope.
+function mayApproveRequest(
+  context: Pick<ApiContext, "token" | "auth">,
+  request: IncomingMessage,
+  body: Record<string, unknown> = {},
+): boolean {
+  return presentsServerToken(context, request) || isTrustedDesktopRequest(context, request, body)
+}
+
 function approvalFromBody(
-  context: Pick<ApiContext, "token">,
+  context: Pick<ApiContext, "token" | "auth">,
   request: IncomingMessage,
   body: Record<string, unknown>,
 ): ApprovalInput {
-  const mayApprove = presentsServerToken(context, request)
+  const mayApprove = mayApproveRequest(context, request, body)
   const scopes = asStringArray(body.approvedScopes)?.filter(isOmniaScope)
   return {
     ...(mayApprove ? { approved: body.approve === true } : { approved: false }),
@@ -1398,7 +1414,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       }
       const sessionId = requestSessionId(request, body)
       const fields = {
-        ...actionFields(body, presentsServerToken(context, request)),
+        ...actionFields(body, mayApproveRequest(context, request, body)),
         ...(sessionId === undefined ? {} : { sessionId }),
         // The desktop UI is the approver for its own actions; every other
         // caller is forwarded as agent so the ComputerManager gates it even
@@ -1448,7 +1464,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         if (!response.writableEnded) scriptCancelled = true
       })
       const operator = isOperatorRequest(context, request, body)
-      const mayApprove = presentsServerToken(context, request)
+      const mayApprove = mayApproveRequest(context, request, body)
       const outcome = await context.computers.executeBatch(computerId, {
         steps: parsedScript.steps,
         shouldStop: () => scriptCancelled,
@@ -1472,7 +1488,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 400, { ok: false, error: "A steps array is required." })
         return true
       }
-      const mayApprove = presentsServerToken(context, request)
+      const mayApprove = mayApproveRequest(context, request, body)
       const operator = isOperatorRequest(context, request, body)
       const parsedSteps = body.steps.map((step): ServerBatchStep | undefined =>
         isRecord(step) ? parseBatchStep(step, mayApprove) : undefined,
@@ -2153,7 +2169,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         return true
       }
       const sessionId = requestSessionId(request, body)
-      const mayApprove = presentsServerToken(context, request)
+      const mayApprove = mayApproveRequest(context, request, body)
       const input = {
         computerId: analyzeComputerId,
         operation: computerUseOperation(body.requestedOperation),

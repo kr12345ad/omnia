@@ -120,6 +120,50 @@ describe("desktop identity", () => {
       expect(await scopes(server)).toBe("denied")
     })
   })
+
+  // Regression guard: the agent sidecar runs on the desktop's own client token
+  // (a "desktop"-kind token), not the server token. Requiring the server token
+  // to forward its approvedScopes dropped the approval and refused every action
+  // with "missing scopes: POINTER" for get_context and PROCESS_EXECUTE for
+  // launch_app/run_command, so controlled computers could not be used at all.
+  test("the signed-in desktop's own runtime can approve a prompt scope for its session", async () => {
+    await withServer(async (server) => {
+      const desktopToken = server.auth.mintDesktopToken({ id: 2, login: "signed-in-user" } satisfies GitHubProfile)
+      if (desktopToken === undefined) throw new Error("the desktop token was not minted")
+      const response = await post(
+        server,
+        "/v1/computers/local/actions",
+        desktopToken,
+        {
+          action: "get_context",
+          approve: true,
+          approvedBy: "session:session-context",
+          approvedScopes: ["UI_READ", "POINTER", "BROWSER"],
+          sessionId: "session-context",
+        },
+        { sessionId: "session-context", origin: "agent" },
+      )
+      expect(response.status).toBe(200)
+    })
+  })
+
+  test("a provisioned agent client token still cannot self-approve a prompt scope", async () => {
+    await withServer(async (server, clientToken) => {
+      const response = await post(
+        server,
+        "/v1/computers/local/actions",
+        clientToken,
+        {
+          action: "get_context",
+          approve: true,
+          approvedScopes: ["UI_READ", "POINTER", "BROWSER"],
+          sessionId: "session-context",
+        },
+        { sessionId: "session-context", origin: "agent" },
+      )
+      expect(response.status).toBe(428)
+    })
+  })
 })
 
 describe("operator identity", () => {
