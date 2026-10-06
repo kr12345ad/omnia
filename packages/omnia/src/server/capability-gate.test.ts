@@ -147,34 +147,23 @@ async function startGated(controlPlane: Server) {
   return { server, calls }
 }
 
-describe("input_freeze is metered before the grab is installed", () => {
-  test("a free plan is refused and the driver is never reached", async () => {
+describe("input_freeze is a free basic, gated before the grab but never refused for money", () => {
+  test("a free plan is allowed and the driver IS reached", async () => {
     const controlPlane = await startControlPlane()
     try {
       const { server, calls } = await startGated(controlPlane)
       try {
-        const refused = await postJson(server, "/v1/input/freeze", { computerId: "local", reason: "agent task" })
-        expect(refused.status).toBe(402)
-        // The refusal is typed and names BOTH the capability and the plan, so the
-        // caller can tell an upgrade prompt from a transient failure.
-        expect(refused.body).toEqual({
-          ok: false,
-          error: {
-            code: "capability_not_entitled",
-            message: expect.stringContaining("input_freeze") as unknown as string,
-            capability: "input_freeze",
-            plan: "free",
-            retryable: false,
-          },
-        })
-        expect((refused.body.error as { message: string }).message).toContain("plan: free")
-        // THE assertion: nothing reached the machine.
-        expect(calls.grabs).toBe(0)
-        // ...and nothing was reported as a successful freeze either.
+        const allowed = await postJson(server, "/v1/input/freeze", { computerId: "local", reason: "agent task" })
+        // Freezing input is a safety basic, not a premium feature: the human
+        // must always be able to take the machine back. A 402 here would mean
+        // the paywall can hold input hostage.
+        expect(allowed.status).toBe(200)
+        expect(allowed.body).toEqual({ ok: true, frozen: true, mode: "x11" })
+        expect(calls.grabs).toBe(1)
         const state = await (await fetch(`${server.url}/v1/input/state?computerId=local`, {
           headers: { authorization: `Bearer ${server.token}` },
         })).json()
-        expect(state).toMatchObject({ ok: true, frozen: false })
+        expect(state).toMatchObject({ ok: true, frozen: true })
       } finally {
         await server.stop()
       }
@@ -201,12 +190,12 @@ describe("input_freeze is metered before the grab is installed", () => {
     }
   })
 
-  test("release is never gated: a refused freeze is not a trap", async () => {
+  test("release is never gated: the escape hatch works whether or not freeze did", async () => {
     const controlPlane = await startControlPlane()
     try {
       const { server, calls } = await startGated(controlPlane)
       try {
-        expect((await postJson(server, "/v1/input/freeze", { computerId: "local" })).status).toBe(402)
+        expect((await postJson(server, "/v1/input/freeze", { computerId: "local" })).status).toBe(200)
         // The escape hatch must not depend on money: refusing it would leave a
         // customer unable to give their own input back.
         const released = await postJson(server, "/v1/input/release", { computerId: "local" })
@@ -223,7 +212,7 @@ describe("input_freeze is metered before the grab is installed", () => {
 })
 
 describe("the gate's failure policy", () => {
-  test("a configured but unreachable control plane refuses a hard-metered capability", async () => {
+  test("an unreachable control plane does not take away a free basic", async () => {
     // Port 1 is reserved and never listening, so this is a real transport failure
     // rather than a simulated one.
     const { driver, calls } = createRecordingDriver()
@@ -231,22 +220,14 @@ describe("the gate's failure policy", () => {
     process.env.OMNIA_SERVER_TOKEN = "token-that-cannot-be-verified"
     const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
     try {
-      const refused = await postJson(server, "/v1/input/freeze", { computerId: "local" })
-      // input_freeze is NEVER on free, which is hard metering: an unknown counter
-      // cannot be honoured, so it fails CLOSED rather than serving unmetered use.
-      expect(refused.status).toBe(503)
-      expect(refused.body).toMatchObject({
-        ok: false,
-        error: {
-          code: "entitlement_unavailable",
-          capability: "input_freeze",
-          // Retryable, and distinct from the 402: waiting fixes this one, paying
-          // does not.
-          retryable: true,
-        },
-      })
-      expect((refused.body.error as { message: string }).message).toContain("could not be reached")
-      expect(calls.grabs).toBe(0)
+      const allowed = await postJson(server, "/v1/input/freeze", { computerId: "local" })
+      // input_freeze is unlimited on free, which is soft metering: an unknown
+      // counter cannot take away what the customer already has, so it fails
+      // OPEN. A hard-metered capability in the same situation fails closed -
+      // pinned at the decide() level, where the policy lives.
+      expect(allowed.status).toBe(200)
+      expect(allowed.body).toEqual({ ok: true, frozen: true, mode: "x11" })
+      expect(calls.grabs).toBe(1)
     } finally {
       await server.stop()
     }
@@ -280,11 +261,12 @@ describe("the gate's failure policy", () => {
     const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
     try {
       const startedAt = Date.now()
-      const refused = await postJson(server, "/v1/input/freeze", { computerId: "local" })
-      expect(refused.status).toBe(503)
-      expect(refused.body).toMatchObject({ ok: false, error: { code: "entitlement_unavailable" } })
+      const allowed = await postJson(server, "/v1/input/freeze", { computerId: "local" })
+      // Bounded AND allowed: freeze is soft on free, so the timeout resolves to
+      // the fail-open answer rather than hanging or refusing.
+      expect(allowed.status).toBe(200)
       expect(Date.now() - startedAt).toBeLessThan(20_000)
-      expect(calls.grabs).toBe(0)
+      expect(calls.grabs).toBe(1)
     } finally {
       await server.stop()
       hung.stop(true)

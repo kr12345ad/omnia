@@ -89,7 +89,7 @@ describe("live view metering", () => {
     expect(captures).toBe(0)
   })
 
-  test("live_view is free-tier soft, so an unreachable control plane still streams", async () => {
+  test("live_view is hard-metered on free, so an unreachable control plane refuses before a frame", async () => {
     const calls: string[] = []
     const gate = new EntitlementGate({
       env: { OMNIA_SERVER_URL: "http://control.test", OMNIA_SERVER_TOKEN: "t" },
@@ -99,12 +99,18 @@ describe("live view metering", () => {
         throw new Error("ECONNREFUSED")
       }) as unknown as typeof fetch,
     })
-    const view = await CuaLiveView.open(async () => frame(0), { gate })
-    expect(view.decision.origin).toBe("fail-open")
-    expect((await view.frame()).result.success).toBe(true)
-    // The outage fallback is cached, so the frame loop adds no more round trips.
-    await view.frame()
-    expect(calls).toHaveLength(1)
+    let captures = 0
+    const thrown = await CuaLiveView.open(async () => frame(captures++), { gate }).catch(
+      (error: unknown) => error,
+    )
+    // Fail-closed, exactly like a plan refusal: no frame is captured for an
+    // allowance whose counters are unknown. The code names the outage, not the
+    // plan, so nobody is told to pay for our own downtime.
+    expect(isEntitlementRefusedError(thrown)).toBe(true)
+    if (!isEntitlementRefusedError(thrown)) throw new Error("expected a typed refusal")
+    expect(thrown.capability).toBe(LIVE_VIEW_CAPABILITY)
+    expect(thrown.decision.code).toBe("unreachable")
+    expect(captures).toBe(0)
   })
 
   test("a closed stream refuses to capture another frame", async () => {

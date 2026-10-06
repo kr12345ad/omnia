@@ -221,11 +221,11 @@ describe("402 is a decision and 5xx is a failure", () => {
   test("a control plane that reports its own unreadable store takes the policy, not its verdict", async () => {
     const client = new BillingClient({
       env: { OMNIA_SERVER_TOKEN: "server-token", OMNIA_SERVER_URL: "https://control.example" },
-      http: reply({ allowed: false, code: "unknown", capability: "live_view", plan: "free" }, 402),
+      http: reply({ allowed: false, code: "unknown", capability: "subagents", plan: "free" }, 402),
     })
-    // live_view is SOFT on free: the policy lets it through rather than turning
+    // subagents is soft on free: the policy lets it through rather than turning
     // the server's disk error into a refusal.
-    const answer = await client.check("live_view")
+    const answer = await client.check("subagents")
     expect(answer.code).toBe("unreachable")
     expect(answer.origin).toBe("fail-open")
     expect(answer.allowed).toBe(true)
@@ -255,8 +255,10 @@ describe("the failure policy follows the current plan, not the free plan", () =>
   })
 
   test("a soft allowance is allowed when billing is unreachable", async () => {
-    // live_view is fair-use (SOFT(20)) and credential_vault is SOFT(1) on free.
-    for (const capability of ["live_view", "credential_vault"] as const) {
+    // subagents and local_computer are soft on free (unlimited): an outage must
+    // not take away what the customer already has. Every finite free allowance
+    // is hard, so those refuse instead (pinned below).
+    for (const capability of ["subagents", "local_computer"] as const) {
       const client = new BillingClient({
         env: { OMNIA_SERVER_TOKEN: "server-token", OMNIA_SERVER_URL: "https://control.example" },
         http: broken(),
@@ -425,7 +427,7 @@ describe("every request is time-bound", () => {
       http: (async () => new Promise<Response>(() => undefined)) as unknown as typeof fetch,
       timeoutMs: 40,
     })
-    const answer = await client.check("live_view")
+    const answer = await client.check("subagents")
     expect(answer.allowed).toBe(true)
     expect(answer.origin).toBe("fail-open")
   })

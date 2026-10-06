@@ -124,7 +124,9 @@ describe("entitlement gate failure policy", () => {
     const harness = gate(() => {
       throw new Error("ECONNREFUSED")
     })
-    const decision = await harness.gate.check("live_view")
+    // subagents is soft on free (unlimited): an outage must not take away what
+    // the customer already has. Every finite free allowance is hard and refuses.
+    const decision = await harness.gate.check("subagents")
     expect(decision.allowed).toBe(true)
     expect(decision.origin).toBe("fail-open")
     expect(decision.degraded).toBe(true)
@@ -134,7 +136,9 @@ describe("entitlement gate failure policy", () => {
   test("a 5xx is a failure, not a decision", async () => {
     const harness = gate(() => reply({ ok: false, error: "boom" }, 503))
     expect((await harness.gate.check("cloud_vision")).origin).toBe("fail-closed")
-    expect((await harness.gate.check("live_view")).origin).toBe("fail-open")
+    // live_view is hard-metered on free, so a 5xx fails closed for it too; the
+    // fail-open side of the policy is pinned by the soft test above.
+    expect((await harness.gate.check("live_view")).origin).toBe("fail-closed")
   })
 
   test("a refusal answered with 402 is a decision, not a failure", async () => {
