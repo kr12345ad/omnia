@@ -102,6 +102,14 @@ const TAB_RESOLUTION_DELAY_MS = 120
 // the location read, so the final location is polled before giving up.
 const NAVIGATION_READ_ATTEMPTS = 3
 const NAVIGATION_READ_DELAY_MS = 120
+// HTML5 drag sources only enter drag mode after the pointer crosses a small
+// threshold while the button stays down. Keep the fallback moves short enough
+// for jQuery UI droppables to see every hover transition, without flooding CDP
+// on long page drags.
+const DRAG_POINTER_STEP_PX = 12
+const MIN_DRAG_POINTER_STEPS = 12
+const MAX_DRAG_POINTER_STEPS = 48
+const NATIVE_DRAG_INTERCEPT_TIMEOUT_MS = 500
 
 // Bridge failures that mean the embedded view cannot serve this request; image
 // saves fall back to an in-page fetch for these codes only.
@@ -417,6 +425,13 @@ interface RawTab {
   readonly active?: boolean
 }
 
+type DragData = Record<string, unknown>
+
+type DragWaiter = {
+  readonly resolve: (data: DragData | undefined) => void
+  readonly timeout: ReturnType<typeof setTimeout>
+}
+
 const MODIFIER_KEYS: Readonly<Record<KeyModifier, { code: string; keyCode: number }>> = {
   Alt: { code: "AltLeft", keyCode: 18 },
   Control: { code: "ControlLeft", keyCode: 17 },
@@ -465,6 +480,7 @@ export class CdpRuntime {
   // detach (or a navigation, for the world) drops them again.
   private readonly isolatedWorlds = new Map<string, number>()
   private readonly intercepted = new Set<string>()
+  private readonly dragWaiters = new Map<string, DragWaiter>()
   private readonly options: CdpRuntimeOptions
   private readonly entitlements: BrowserEntitlementGate
 
@@ -526,7 +542,7 @@ export class CdpRuntime {
       ...(this.options.timeoutMs === undefined ? {} : { timeoutMs: this.options.timeoutMs }),
       // Dialog and auth state come from Page/Omnia events; without an explicit
       // subscription the client drops every event and both are invisible.
-      eventDomains: ["Fetch", "Page", "Omnia", "Inspector"],
+      eventDomains: ["Fetch", "Input", "Page", "Omnia", "Inspector"],
       onEvent: (method, params, tabId) => this.handleBrowserEvent(method, params, tabId),
       onClose: () => {
         this.transport = undefined
@@ -537,6 +553,7 @@ export class CdpRuntime {
         // behind with no page to answer it, so nothing survives the close.
         this.dialogs.clear()
         this.isolatedWorlds.clear()
+        this.clearDragWaiters()
         // The bridge releases its interception when the controller disconnects,
         // so the fresh connection must arm it again instead of trusting the
         // cache of the connection that just died.
@@ -1058,6 +1075,15 @@ export class CdpRuntime {
 
   private handleBrowserEvent(method: string, params: unknown, tabId?: string): void {
     const key = tabId ?? "default"
+    if (method === "Input.dragIntercepted") {
+      const data = dragData(params)
+      const waiter = this.dragWaiters.get(key)
+      if (data === undefined || waiter === undefined) return
+      clearTimeout(waiter.timeout)
+      this.dragWaiters.delete(key)
+      waiter.resolve(data)
+      return
+    }
     if (method === "Page.javascriptDialogOpening") {
       const record = typeof params === "object" && params !== null ? (params as Record<string, unknown>) : {}
       this.dialogs.set(key, {
@@ -1103,6 +1129,7 @@ export class CdpRuntime {
       // ref state in died with the old document.
       this.dialogs.delete(key)
       this.isolatedWorlds.delete(key)
+      this.clearDragWaiter(key)
       return
     }
     // A crashed tab never answers a dialog, chooser, or auth challenge again, so
@@ -1113,6 +1140,7 @@ export class CdpRuntime {
       this.authChallenges.delete(key)
       this.fileChoosers.delete(key)
       this.isolatedWorlds.delete(key)
+      this.clearDragWaiter(key)
       return
     }
     if (method === "Omnia.interceptionReleased") {
@@ -1127,6 +1155,7 @@ export class CdpRuntime {
       this.dialogs.delete(key)
       this.fileChoosers.delete(key)
       this.authChallenges.delete(key)
+      this.clearDragWaiter(key)
       return
     }
     if (method === "Omnia.authRequired") {
@@ -1500,39 +1529,110 @@ export class CdpRuntime {
     await this.ensureReadyOn(context)
     const source = await this.dragPoint(from, context)
     const destination = await this.dragPoint(to, context)
-    const before = await this.pageTextFingerprint(context)
-    const dragData = { files: [], items: [{ mimeType: "text/plain", data: "" }], dragOperationsMask: 16 }
+    if (await this.tryNativeDrag(context, source, destination)) return { dragged: true, method: "drag_events" }
+    await this.dispatchPointerDrag(context, source, destination)
+    return { dragged: true, method: "mouse" }
+  }
+
+  // `Input.dispatchDragEvent` needs the browser-generated payload from the
+  // source's real dragstart. Sending an invented empty payload directly to the
+  // destination never starts HTML5 DnD, which made vocabulary-match style
+  // pages look like they had received a drag when they had not.
+  private async tryNativeDrag(
+    context: string,
+    source: { x: number; y: number },
+    destination: { x: number; y: number },
+  ): Promise<boolean> {
+    // Injected transports drive deterministic unit tests but have no event
+    // channel for Input.dragIntercepted. Their pointer fallback stays covered.
+    if (this.options.transport !== undefined) return false
+    let pointerHeld = false
+    let dropped = false
+    let intercepted = false
     try {
-      await this.send("Input.dispatchDragEvent", { type: "dragEnter", x: destination.x, y: destination.y, data: dragData }, context)
-      await this.send("Input.dispatchDragEvent", { type: "dragOver", x: destination.x, y: destination.y, data: dragData }, context)
-      await this.send("Input.dispatchDragEvent", { type: "drop", x: destination.x, y: destination.y, data: dragData }, context)
-      if ((await this.pageTextFingerprint(context)) !== before) return { dragged: true, method: "drag_events" }
-    } catch {
-      // The bridge may not support dispatchDragEvent; the pointer fallback
-      // below is the trusted path for jQuery UI droppables.
+      await this.send("Input.setInterceptDrags", { enabled: true }, context)
+      const nativeDrag = this.waitForNativeDrag(context)
+      pointerHeld = true
+      await this.dispatchPointerDrag(context, source, destination, false)
+      const data = await nativeDrag
+      if (data === undefined) return false
+      intercepted = true
+      const points = dragPoints(source, destination)
+      const first = points[0] ?? destination
+      await this.send("Input.dispatchDragEvent", { type: "dragEnter", x: first.x, y: first.y, data }, context)
+      for (const point of points) {
+        await this.send("Input.dispatchDragEvent", { type: "dragOver", x: point.x, y: point.y, data }, context)
+      }
+      await this.send("Input.dispatchDragEvent", { type: "drop", x: destination.x, y: destination.y, data }, context)
+      dropped = true
+      return true
+    } catch (error) {
+      // Once Chromium handed us real source data, a failed CDP drop may have
+      // reached the page already. Retrying the full pointer drag could submit
+      // a second drop, so surface that failure instead of duplicating work.
+      if (intercepted) throw error
+      return false
+    } finally {
+      this.clearDragWaiter(context)
+      if (pointerHeld && !dropped) {
+        await this.send(
+          "Input.dispatchMouseEvent",
+          { type: "mouseReleased", x: destination.x, y: destination.y, button: "left", buttons: 0, clickCount: 1 },
+          context,
+        ).catch(() => undefined)
+      }
+      await this.send("Input.setInterceptDrags", { enabled: false }, context).catch(() => undefined)
     }
+  }
+
+  private async dispatchPointerDrag(
+    context: string,
+    source: { x: number; y: number },
+    destination: { x: number; y: number },
+    release = true,
+  ): Promise<void> {
     await this.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: source.x, y: source.y, button: "none", buttons: 0 }, context)
     await this.send(
       "Input.dispatchMouseEvent",
       { type: "mousePressed", x: source.x, y: source.y, button: "left", buttons: 1, clickCount: 1 },
       context,
     )
-    for (let step = 1; step <= 5; step += 1) {
-      const x = source.x + ((destination.x - source.x) * step) / 5
-      const y = source.y + ((destination.y - source.y) * step) / 5
+    for (const point of dragPoints(source, destination)) {
       await this.send(
         "Input.dispatchMouseEvent",
-        { type: "mouseMoved", x, y, button: "left", buttons: 1 },
+        { type: "mouseMoved", x: point.x, y: point.y, button: "left", buttons: 1 },
         context,
       )
     }
+    if (!release) return
     await this.send(
       "Input.dispatchMouseEvent",
       { type: "mouseReleased", x: destination.x, y: destination.y, button: "left", buttons: 0, clickCount: 1 },
       context,
     )
-    if ((await this.pageTextFingerprint(context)) !== before) return { dragged: true, method: "mouse" }
-    return { dragged: false }
+  }
+
+  private waitForNativeDrag(tabId: string): Promise<DragData | undefined> {
+    this.clearDragWaiter(tabId)
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.dragWaiters.delete(tabId)
+        resolve(undefined)
+      }, NATIVE_DRAG_INTERCEPT_TIMEOUT_MS)
+      this.dragWaiters.set(tabId, { resolve, timeout })
+    })
+  }
+
+  private clearDragWaiter(tabId: string): void {
+    const waiter = this.dragWaiters.get(tabId)
+    if (waiter === undefined) return
+    clearTimeout(waiter.timeout)
+    this.dragWaiters.delete(tabId)
+    waiter.resolve(undefined)
+  }
+
+  private clearDragWaiters(): void {
+    for (const tabId of this.dragWaiters.keys()) this.clearDragWaiter(tabId)
   }
 
   private async dragPoint(
@@ -1966,7 +2066,27 @@ export class CdpRuntime {
     this.dialogs.clear()
     this.isolatedWorlds.clear()
     this.intercepted.clear()
+    this.clearDragWaiters()
   }
+}
+
+function dragPoints(source: { x: number; y: number }, destination: { x: number; y: number }): Array<{ x: number; y: number }> {
+  const distance = Math.hypot(destination.x - source.x, destination.y - source.y)
+  const steps = Math.min(MAX_DRAG_POINTER_STEPS, Math.max(MIN_DRAG_POINTER_STEPS, Math.ceil(distance / DRAG_POINTER_STEP_PX)))
+  return Array.from({ length: steps }, (_, index) => {
+    const progress = (index + 1) / steps
+    return {
+      x: source.x + (destination.x - source.x) * progress,
+      y: source.y + (destination.y - source.y) * progress,
+    }
+  })
+}
+
+function dragData(params: unknown): DragData | undefined {
+  if (typeof params !== "object" || params === null) return undefined
+  const data = (params as Record<string, unknown>).data
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return undefined
+  return data as DragData
 }
 
 function parseChord(key: string): ReturnType<typeof parseKeyChord> {

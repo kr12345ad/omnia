@@ -228,6 +228,32 @@ describe("browser verification uses per-action readback", () => {
     expect(outcome.result.verification?.message).toContain("could not be read back")
   })
 
+  test("drag never treats an unrelated page re-render as proof of the intended drop", async () => {
+    const { browser, state } = browserHarness({
+      drag: async () => {
+        // A common DnD implementation re-renders while tracking the pointer.
+        // That is not evidence that this source landed in this destination.
+        state.page = { ...state.page, text: "re-rendered", hash: "hash-re-rendered" }
+        return { dragged: true, method: "mouse" }
+      },
+    })
+    const { manager } = createManager(baseDriver(), { browser })
+
+    const outcome = await manager.execute("local", {
+      action: "browser_drag",
+      from: { elementId: "word-1" },
+      to: { elementId: "slot-1" },
+      sessionId: "s",
+    })
+
+    expect(outcome.result.success).toBe(true)
+    expect(outcome.result.verification?.status).toBe("unverified")
+    expect(outcome.result.verification?.method).toBe("browser-drag-readback")
+    expect(outcome.result.verification?.message).toContain("does not confirm the intended drop")
+    expect((outcome.result.metadata as { dragged?: { method?: string } }).dragged?.method).toBe("mouse")
+    expect(state.readCalls).toBe(2)
+  })
+
   test("back/forward verify on an independent URL change", async () => {
     const { browser } = browserHarness({
       back: async () => {

@@ -39,10 +39,11 @@ Actions:
 - select: choose an option in a page <select> by option value or visible
   option text (pass value or text with target). Verified by an independent
   read of the select's value.
-- drag: drag from one endpoint to another with real pointer actions; each
-  endpoint is a target id (fromTarget/toTarget) or x/y pixels
-  (fromX/fromY/toX/toY). Verified only when an independent page read shows
-  the drop effect.
+- drag: drag from one endpoint to another with native HTML5 drag data when the
+  page supplies it, otherwise a held pointer with small intermediate moves.
+  Each endpoint is a target id (fromTarget/toTarget) or x/y pixels
+  (fromX/fromY/toX/toY). A page re-render alone does not prove the right item
+  landed in the right target: re-read both after the drag to verify the effect.
 - type: type into a found field; the result reports whether the value was
   read back as verified. Pass credential to enter a stored credential
   instead of text: "auto" matches by page URL, or an id/name picks one

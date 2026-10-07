@@ -5237,27 +5237,20 @@ export class ComputerManager {
             beforePage !== undefined &&
             afterPage !== undefined &&
             (afterPage.hash !== beforePage.hash || !sameBrowserUrl(afterPage.url, beforePage.url))
-          const verification: Verification = pageChanged
-            ? {
-                status: "verified" as const,
-                message: "The page changed after the drag, confirming the drop effect.",
-                method: "browser-drag-readback",
-                evidence: [
-                  {
-                    kind: "browser-drag",
-                    value: JSON.stringify({
-                      before: beforePage === undefined ? null : { url: beforePage.url, hash: beforePage.hash },
-                      after: afterPage === undefined ? null : { url: afterPage.url, hash: afterPage.hash },
-                    }),
-                  },
-                ],
-              }
-            : unverified(
-                afterPage === undefined
-                  ? `The page could not be read back after the drag (${"error" in after ? after.error : "unknown"}).`
-                  : "The page did not change after the drag.",
-                "browser-drag-readback",
-              )
+          // A page hash only says that something re-rendered or navigated. It
+          // cannot prove that the intended source landed in the intended drop
+          // target, so drag stays unverified until the agent reads that specific
+          // target back rather than reporting a coincidental page change as done.
+          const verification: Verification = unverified(
+            afterPage === undefined
+              ? `The page could not be read back after the drag (${"error" in after ? after.error : "unknown"}).`
+              : pageChanged
+                ? "The page changed after the drag, but that does not confirm the intended drop. Read the source and target to verify the result."
+                : dragged.method === undefined
+                  ? "The browser could not deliver the drag input."
+                  : "The drag input was delivered, but the drop effect is not confirmed. Read the source and target to verify the result.",
+            "browser-drag-readback",
+          )
           return ok(
             `Dragged from ${from?.elementId ?? `${from?.x ?? 0},${from?.y ?? 0}`} to ${to?.elementId ?? `${to?.x ?? 0},${to?.y ?? 0}`}.`,
             {

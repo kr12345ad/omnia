@@ -133,6 +133,25 @@ describe("cdp client", () => {
     await expect(client.send("Page.reload")).rejects.toThrow(CdpError)
   })
 
+  test("forwards Chromium's intercepted native drag payload to opted-in consumers", async () => {
+    const socket = new FakeSocket()
+    const events: Array<{ params: unknown; tabId?: string }> = []
+    const client = new CdpClient({
+      url: "ws://127.0.0.1:9",
+      eventDomains: ["Input"],
+      onEvent: (_method, params, tabId) => events.push({ params, ...(tabId === undefined ? {} : { tabId }) }),
+    })
+    const connecting = client.attach(socket)
+    socket.emit("open")
+    await connecting
+
+    const data = { items: [{ mimeType: "text/plain", data: "word" }], files: [], dragOperationsMask: 16 }
+    socket.emit("message", { method: "Input.dragIntercepted", params: { data }, tabId: "tab-1" })
+    await Promise.resolve()
+
+    expect(events).toEqual([{ params: { data }, tabId: "tab-1" }])
+  })
+
   test("passes the tab id on the wire and can re-attach after close", async () => {
     const first = new FakeSocket()
     const client = new CdpClient({ url: "ws://127.0.0.1:9", timeoutMs: 1000 })
@@ -535,7 +554,7 @@ describe("cdp runtime", () => {
     await expect(badRuntime.select({ id: "omnia-3@d1" }, "us")).rejects.toMatchObject({ code: "not_a_select" })
   })
 
-  test("drag tries native drag events, then falls back to pointer events", async () => {
+  test("drag sends a held pointer through short intermediate moves when native drag data is unavailable", async () => {
     const transport = tabbedTransport(new FakeTransport(), [{ id: "tab-1", url: "https://example.test" }])
     transport.handle("Runtime.evaluate", (params) => {
       if (isReadyState(params.expression)) return readyState()
@@ -547,16 +566,24 @@ describe("cdp runtime", () => {
     const runtime = new CdpRuntime({ endpoint: "ws://127.0.0.1:9", token: "bridge-token", transport })
 
     const result = await runtime.drag({ x: 10, y: 10 }, { x: 200, y: 200 })
-    expect(result).toEqual({ dragged: false })
-    expect(transport.callsOf("Input.dispatchDragEvent").map((call) => call.params.type)).toEqual([
-      "dragEnter",
-      "dragOver",
-      "drop",
-    ])
+    expect(result).toEqual({ dragged: true, method: "mouse" })
+    // An invented empty drag payload never starts an HTML5 source drag. The
+    // injected transport has no Input.dragIntercepted event channel, so it
+    // deliberately exercises the real held-pointer fallback instead.
+    expect(transport.callsOf("Input.dispatchDragEvent")).toEqual([])
     const mouse = transport.callsOf("Input.dispatchMouseEvent").map((call) => call.params)
     expect(mouse[0]).toEqual({ type: "mouseMoved", x: 10, y: 10, button: "none", buttons: 0 })
     expect(mouse[1]).toEqual({ type: "mousePressed", x: 10, y: 10, button: "left", buttons: 1, clickCount: 1 })
-    expect(mouse[2]).toMatchObject({ type: "mouseMoved", button: "left", buttons: 1 })
+    const moves = mouse.slice(2, -1)
+    expect(moves).toHaveLength(23)
+    expect(moves.every((move) => move.type === "mouseMoved" && move.button === "left" && move.buttons === 1)).toBe(
+      true,
+    )
+    for (let index = 1; index < moves.length; index += 1) {
+      const previous = moves[index - 1] as { x: number; y: number }
+      const current = moves[index] as { x: number; y: number }
+      expect(Math.hypot(current.x - previous.x, current.y - previous.y)).toBeLessThanOrEqual(12)
+    }
     expect(mouse[mouse.length - 1]).toEqual({
       type: "mouseReleased",
       x: 200,
@@ -565,7 +592,7 @@ describe("cdp runtime", () => {
       buttons: 0,
       clickCount: 1,
     })
-    expect(mouse.length).toBe(8)
+    expect(mouse.length).toBe(26)
   })
 
   test("drag reports the pointer method when the page shows the drop effect", async () => {
@@ -585,7 +612,7 @@ describe("cdp runtime", () => {
     expect(result).toEqual({ dragged: true, method: "mouse" })
   })
 
-  test("drag uses native drag events when they produce the effect", async () => {
+  test("drag does not claim empty destination drag events are native HTML5 DnD", async () => {
     const transport = tabbedTransport(new FakeTransport(), [{ id: "tab-1", url: "https://example.test" }])
     let reads = 0
     transport.handle("Runtime.evaluate", (params) => {
@@ -599,8 +626,9 @@ describe("cdp runtime", () => {
     const runtime = new CdpRuntime({ endpoint: "ws://127.0.0.1:9", token: "bridge-token", transport })
 
     const result = await runtime.drag({ x: 0, y: 0 }, { x: 50, y: 50 })
-    expect(result).toEqual({ dragged: true, method: "drag_events" })
-    expect(transport.callsOf("Input.dispatchMouseEvent")).toEqual([])
+    expect(result).toEqual({ dragged: true, method: "mouse" })
+    expect(transport.callsOf("Input.dispatchDragEvent")).toEqual([])
+    expect(transport.callsOf("Input.dispatchMouseEvent")).not.toEqual([])
   })
 
   test("activates a tab before navigating and lists embedded tabs", async () => {
