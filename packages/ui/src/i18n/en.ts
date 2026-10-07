@@ -268,6 +268,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.rbac": "Role-based access",
   "ui.paywall.capability.sso": "Single sign-on",
   "ui.paywall.capability.selfHosted": "Self hosting",
+  "ui.paywall.capability.customSpecialists": "Custom specialists",
 
   "ui.paywall.fairUse.title": "{{capability}} is past its fair-use allowance",
   "ui.paywall.fairUse.description": "It still works. Upgrading raises the allowance.",

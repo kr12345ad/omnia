@@ -203,6 +203,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.vaultLogin": "Vault sign-ins", // TODO(i18n): needs a native review
   "ui.paywall.capability.cloudVision": "Cloud vision", // TODO(i18n): needs a native review
   "ui.paywall.capability.scheduledRuns": "Unattended runs", // TODO(i18n): needs a native review
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} is past its fair-use allowance", // TODO(i18n): needs a native review
   "ui.paywall.fairUse.description": "It still works. Upgrading raises the allowance.", // TODO(i18n): needs a native review

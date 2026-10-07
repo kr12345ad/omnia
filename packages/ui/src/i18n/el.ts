@@ -201,6 +201,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.vaultLogin": "Συνδέσεις στο θησαυροφυλάκιο",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Εκτελέσεις χωρίς επιτήρηση",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "Το {{capability}} έχει ξεπεράσει το δίκαιο όριο χρήσης",
   "ui.paywall.fairUse.description": "Λειτουργεί ακόμα. Η αναβάθμιση αυξάνει το όριο.",

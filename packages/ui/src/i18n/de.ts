@@ -195,6 +195,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "Anmeldungen am Tresor",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Unbeaufsichtigte Ausführungen",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} hat das Kontingent für faire Nutzung überschritten",
   "ui.paywall.fairUse.description": "Es funktioniert weiterhin. Ein Upgrade erhöht das Kontingent.",

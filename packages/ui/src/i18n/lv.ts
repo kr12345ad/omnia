@@ -204,6 +204,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.vaultLogin": "Pieteikšanās ar Vault",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Palaišanas bez uzraudzības",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
   "ui.paywall.fairUse.title": "{{capability}} pārsniedz godīgās izmantošanas limitu",
   "ui.paywall.fairUse.description": "Tas joprojām darbojas. Pārejot uz augstāku plānu, limits tiek paaugstināts.",
   "ui.paywall.usedUp.title": "{{capability}} izmantošanas limits ir iztērēts",

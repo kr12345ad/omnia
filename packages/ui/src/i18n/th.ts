@@ -209,6 +209,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "การเข้าสู่ระบบคลังข้อมูล",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "การรันที่ไม่ต้องติดตามดู",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} เกินโควตาการใช้งานตามข้อกำหนดแล้ว",
   "ui.paywall.fairUse.description": "ยังใช้งานได้ตามปกติ การอัปเกรดจะเพิ่มโควตา",

@@ -201,6 +201,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.vaultLogin": "Đăng nhập vào kho",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Lần chạy không giám sát",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} đã vượt quá hạn mức sử dụng hợp lệ",
   "ui.paywall.fairUse.description": "Tính năng vẫn hoạt động. Nâng cấp sẽ tăng hạn mức.",

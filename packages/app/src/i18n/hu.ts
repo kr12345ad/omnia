@@ -102,7 +102,11 @@ const desktop = [
   "Az Omnia nem tudta elérni a kiszolgálót a csomag ellenőrzéséhez.",
 ]
 
+import { dict as en } from "./en"
+
 export const dict = {
+  // TODO(i18n): needs a native review
+  ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("work.home.discussion.specialists."))),
   ...Object.fromEntries(DESKTOP_NATIVE_KEYS.map((key, index) => [key, desktop[index]])),
   "command.category.suggested": "Javasolt",
   "command.category.view": "Nézet",

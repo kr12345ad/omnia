@@ -68,6 +68,7 @@ import { partDefaultOpen } from "./part-default-open"
 import { animate } from "motion"
 import { attached, inline, kind, typeLabel } from "./message-file"
 import { readPartText } from "./message-part-text"
+import { discussionParticipantLabel, readDiscussionSpecialists } from "./message-part-discussion"
 import { SessionProgressIndicatorV2 } from "../v2/components/session-progress-indicator-v2"
 
 async function writeClipboard(text: string): Promise<boolean> {
@@ -2481,17 +2482,20 @@ ToolRegistry.register({
       const value = props.metadata.managerSessionId
       return typeof value === "string" && value ? value : undefined
     })
+    const specialists = createMemo(() => readDiscussionSpecialists(props.metadata.specialists))
     const participantIds = createMemo(() => {
       const value = props.metadata.specialistSessionIds
-      const specialists = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
-      return [managerId(), ...specialists].filter((id): id is string => typeof id === "string" && id.length > 0)
+      const ids = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []
+      return [managerId(), ...ids].filter((id): id is string => typeof id === "string" && id.length > 0)
     })
     const participants = createMemo(() =>
       participantIds().map((id) => {
         const session = data.store.session.find((item) => item.id === id)
-        const agent = session?.agent ?? "specialist"
-        const role = agent.startsWith("discussion-") ? agent.slice("discussion-".length) : agent
-        const label = role.length > 0 ? role[0]!.toUpperCase() + role.slice(1) : agent
+        const label = discussionParticipantLabel({
+          agent: session?.agent,
+          title: session?.title,
+          specialist: specialists().find((item) => item.sessionId === id),
+        })
         return { id, label, status: data.store.session_status[id]?.type ?? "idle" }
       }),
     )

@@ -1,4 +1,8 @@
+import { dict as en } from "./en"
+
 export const dict = {
+  // TODO(i18n): needs a native review
+  ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("work.home.discussion.specialists."))),
   "command.category.suggested": "추천",
   "command.category.view": "보기",
   "command.category.project": "프로젝트",

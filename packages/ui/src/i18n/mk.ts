@@ -201,6 +201,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "Најави во трезорот",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Извршувања без надзор",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} ја надмина квотата за праведна употреба",
   "ui.paywall.fairUse.description": "Сè уште работи. Надградбата ја зголемува квотата.",

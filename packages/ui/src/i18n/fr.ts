@@ -215,6 +215,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "Connexions au coffre-fort",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Exécutions sans surveillance",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} a dépassé son quota d'usage équitable",
   "ui.paywall.fairUse.description": "Cela fonctionne toujours. La mise à niveau augmente le quota.",

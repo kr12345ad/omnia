@@ -205,6 +205,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.vaultLogin": "Inicis de sessió al cofre",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Execucions no supervisades",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} ha superat la quota d'ús just",
   "ui.paywall.fairUse.description": "Encara funciona. Actualitzar augmenta la quota.",

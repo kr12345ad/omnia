@@ -225,6 +225,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "تسجيلات الدخول إلى الخزنة",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "عمليات تشغيل بلا مراقبة",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "تجاوز {{capability}} حد الاستخدام العادل",
   "ui.paywall.fairUse.description": "لا يزال يعمل. الترقية ترفع الحد.",

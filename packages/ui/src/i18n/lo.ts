@@ -202,6 +202,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "Vault sign-ins",
   "ui.paywall.capability.cloudVision": "Cloud vision",
   "ui.paywall.capability.scheduledRuns": "Unattended runs",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
   "ui.paywall.fairUse.title": "{{capability}} is past its fair-use allowance",
   "ui.paywall.fairUse.description": "It still works. Upgrading raises the allowance.",
   "ui.paywall.usedUp.title": "The {{capability}} allowance is used up",

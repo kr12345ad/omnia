@@ -200,6 +200,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.vaultLogin": "Inloggen via Vault",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Onbeheerde runs",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
   "ui.paywall.fairUse.title": "{{capability}} heeft de fair-use-grens overschreden",
   "ui.paywall.fairUse.description": "Het werkt nog. Upgraden verhoogt de grens.",
   "ui.paywall.usedUp.title": "De limiet voor {{capability}} is verbruikt",

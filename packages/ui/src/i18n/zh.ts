@@ -211,6 +211,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "凭据库登录",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "无人值守运行",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} 已超出其公平使用额度",
   "ui.paywall.fairUse.description": "仍可使用。升级可提高额度。",

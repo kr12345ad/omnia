@@ -213,6 +213,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "Acessos via cofre",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Execuções não supervisionadas",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} excedeu a cota de uso justo",
   "ui.paywall.fairUse.description": "Ainda funciona. Fazer upgrade aumenta a cota.",

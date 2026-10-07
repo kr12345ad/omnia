@@ -102,7 +102,11 @@ const desktop = [
   "Omnia nije mogla doći do poslužitelja da provjeri vaš plan.",
 ]
 
+import { dict as en } from "./en"
+
 export const dict = {
+  // TODO(i18n): needs a native review
+  ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("work.home.discussion.specialists."))),
   ...Object.fromEntries(DESKTOP_NATIVE_KEYS.map((key, index) => [key, desktop[index]])),
   "command.category.suggested": "Predloženo",
   "command.category.view": "Prikaz",

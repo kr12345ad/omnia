@@ -216,6 +216,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "Входы в хранилище",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Запуски без участия пользователя",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}}: лимит бесплатного использования превышен",
   "ui.paywall.fairUse.description": "Функция по-прежнему работает. Смена плана увеличит лимит.",

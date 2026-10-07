@@ -70,6 +70,7 @@ const CAPABILITY_KEYS: Readonly<Record<string, string>> = {
   vault_login: "ui.paywall.capability.vaultLogin",
   cloud_vision: "ui.paywall.capability.cloudVision",
   scheduled_runs: "ui.paywall.capability.scheduledRuns",
+  custom_specialists: "ui.paywall.capability.customSpecialists",
 }
 
 /**

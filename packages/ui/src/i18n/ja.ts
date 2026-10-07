@@ -208,6 +208,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "保管庫へのサインイン",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "無人実行",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}}の許容使用量を超えました",
   "ui.paywall.fairUse.description": "引き続き利用できます。アップグレードすると許容使用量が増えます。",

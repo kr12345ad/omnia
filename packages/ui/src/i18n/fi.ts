@@ -182,6 +182,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.vaultLogin": "Vault-kirjautumiset",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Valvomattomat ajot",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
   "ui.paywall.fairUse.title": "{{capability}} on ylittänyt reilun käytön rajan",
   "ui.paywall.fairUse.description": "Se toimii yhä. Päivitys nostaa rajaa.",
   "ui.paywall.usedUp.title": "{{capability}}-raja on täyttynyt",

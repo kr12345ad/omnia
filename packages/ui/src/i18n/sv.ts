@@ -201,6 +201,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.vaultLogin": "Inloggningar i valvet",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Körningar utan tillsyn",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} har överskridit sin kvot för rimlig användning",
   "ui.paywall.fairUse.description": "Det fungerar fortfarande. En uppgradering ökar kvoten.",

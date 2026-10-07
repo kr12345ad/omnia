@@ -203,6 +203,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.vaultLogin": "Vault orqali kirish",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Avtomatik ishga tushirishlar",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
   "ui.paywall.fairUse.title": "{{capability}} adolatli foydalanish chegarasidan o'tib ketdi",
   "ui.paywall.fairUse.description": "U hali ham ishlaydi. Yangilash chegarani oshiradi.",
   "ui.paywall.usedUp.title": "{{capability}} chegarasi tugab qoldi",

@@ -209,6 +209,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.vaultLogin": "Prihlasovanie do trezoru",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Spustenia bez dozoru",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} prekročilo kvótu spravodlivého používania",
   "ui.paywall.fairUse.description": "Stále to funguje. Po upgradovaní sa kvóta zvýši.",

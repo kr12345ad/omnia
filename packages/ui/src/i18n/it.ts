@@ -205,6 +205,7 @@ export const dict: Record<string, string> = {
   "ui.paywall.capability.vaultLogin": "Accessi al Vault",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Esecuzioni non presidiate",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
   "ui.paywall.fairUse.title": "{{capability}} ha superato il limite di uso equo",
   "ui.paywall.fairUse.description": "Funziona ancora. Il passaggio a un piano superiore aumenta il limite.",
   "ui.paywall.usedUp.title": "Il limite di {{capability}} è esaurito",

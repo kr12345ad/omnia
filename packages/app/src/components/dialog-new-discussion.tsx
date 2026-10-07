@@ -9,6 +9,7 @@ import { useLayout } from "@/context/layout"
 import { useServer } from "@/context/server"
 import { useTabs } from "@/context/tabs"
 import { SelectField } from "./select-field"
+import { SpecialistsEditor } from "./specialists-editor"
 
 export function DialogNewDiscussion() {
   const language = useLanguage()
@@ -21,6 +22,7 @@ export function DialogNewDiscussion() {
     goal: "",
     rounds: 2,
     error: "",
+    specialists: undefined as number | undefined,
   })
   const [starting, setStarting] = createSignal(false)
 
@@ -82,7 +84,12 @@ export function DialogNewDiscussion() {
           ]}
           onChange={(value) => setStore("rounds", Number(value) || 2)}
         />
-        <div class="text-[11px] font-[440] text-v2-text-text-muted">{language.t("work.home.discussion.agents")}</div>
+        <SpecialistsEditor onCount={(count) => setStore("specialists", count)} />
+        <div class="text-[11px] font-[440] text-v2-text-text-muted">
+          {store.specialists === undefined
+            ? language.t("work.home.discussion.agents")
+            : language.t("work.home.discussion.specialists.agents", { count: store.specialists })}
+        </div>
 
         <Show when={store.error}>
           <div class="rounded-md bg-v2-background-bg-layer-01 p-2 text-[11px] font-[440] text-v2-state-fg-danger">{store.error}</div>

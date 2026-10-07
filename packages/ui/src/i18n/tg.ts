@@ -200,6 +200,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "Воридшавӣ ба Vault",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Иҷроҳои беназорат",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
   "ui.paywall.fairUse.title": "{{capability}} аз ҳадди истифодаи адолатӣ гузаштааст",
   "ui.paywall.fairUse.description": "Ин ҳанӯз кор мекунад. Гузаштан ба планҳои баландтар ҳадро зиёд мекунад.",
   "ui.paywall.usedUp.title": "Ҳади {{capability}} тамом шуд",

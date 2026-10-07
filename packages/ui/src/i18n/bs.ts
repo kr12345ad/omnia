@@ -217,6 +217,7 @@ export const dict = {
   "ui.paywall.capability.vaultLogin": "Prijave u sef",
   "ui.paywall.capability.cloudVision": "Cloud Vision",
   "ui.paywall.capability.scheduledRuns": "Pokretanja bez nadzora",
+  "ui.paywall.capability.customSpecialists": "Custom specialists", // TODO(i18n): needs a native review
 
   "ui.paywall.fairUse.title": "{{capability}} je premašilo kvotu poštene upotrebe",
   "ui.paywall.fairUse.description": "Još uvijek radi. Nadogradnja povećava kvotu.",
