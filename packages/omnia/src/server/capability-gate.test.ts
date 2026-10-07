@@ -148,33 +148,22 @@ async function startGated(controlPlane: Server) {
 }
 
 describe("input_freeze is metered before the grab is installed", () => {
-  test("a free plan is refused and the driver is never reached", async () => {
+  test("a free plan freezes too: taking input back is not a paid capability", async () => {
     const controlPlane = await startControlPlane()
     try {
       const { server, calls } = await startGated(controlPlane)
       try {
-        const refused = await postJson(server, "/v1/input/freeze", { computerId: "local", reason: "agent task" })
-        expect(refused.status).toBe(402)
-        // The refusal is typed and names BOTH the capability and the plan, so the
-        // caller can tell an upgrade prompt from a transient failure.
-        expect(refused.body).toEqual({
-          ok: false,
-          error: {
-            code: "capability_not_entitled",
-            message: expect.stringContaining("input_freeze") as unknown as string,
-            capability: "input_freeze",
-            plan: "free",
-            retryable: false,
-          },
-        })
-        expect((refused.body.error as { message: string }).message).toContain("plan: free")
-        // THE assertion: nothing reached the machine.
-        expect(calls.grabs).toBe(0)
-        // ...and nothing was reported as a successful freeze either.
+        // Free includes input_freeze (unmetered): grabbing the mouse back is a
+        // safety basic, so the gate answers allowed and the grab still happens
+        // AFTER the check ran.
+        const allowed = await postJson(server, "/v1/input/freeze", { computerId: "local", reason: "agent task" })
+        expect(allowed.status).toBe(200)
+        expect(allowed.body).toEqual({ ok: true, frozen: true, mode: "x11" })
+        expect(calls.grabs).toBe(1)
         const state = await (await fetch(`${server.url}/v1/input/state?computerId=local`, {
           headers: { authorization: `Bearer ${server.token}` },
         })).json()
-        expect(state).toMatchObject({ ok: true, frozen: false })
+        expect(state).toMatchObject({ ok: true, frozen: true })
       } finally {
         await server.stop()
       }
@@ -201,14 +190,14 @@ describe("input_freeze is metered before the grab is installed", () => {
     }
   })
 
-  test("release is never gated: a refused freeze is not a trap", async () => {
+  test("release is never gated", async () => {
     const controlPlane = await startControlPlane()
     try {
       const { server, calls } = await startGated(controlPlane)
       try {
-        expect((await postJson(server, "/v1/input/freeze", { computerId: "local" })).status).toBe(402)
-        // The escape hatch must not depend on money: refusing it would leave a
-        // customer unable to give their own input back.
+        expect((await postJson(server, "/v1/input/freeze", { computerId: "local" })).status).toBe(200)
+        // The escape hatch must not depend on money or on a billing verdict:
+        // refusing it would leave a customer unable to give their input back.
         const released = await postJson(server, "/v1/input/release", { computerId: "local" })
         expect(released.status).toBe(200)
         expect(released.body).toMatchObject({ ok: true, frozen: false })
@@ -223,7 +212,7 @@ describe("input_freeze is metered before the grab is installed", () => {
 })
 
 describe("the gate's failure policy", () => {
-  test("a configured but unreachable control plane refuses a hard-metered capability", async () => {
+  test("an unreachable control plane cannot lock the user out of their own input", async () => {
     // Port 1 is reserved and never listening, so this is a real transport failure
     // rather than a simulated one.
     const { driver, calls } = createRecordingDriver()
@@ -231,22 +220,11 @@ describe("the gate's failure policy", () => {
     process.env.OMNIA_SERVER_TOKEN = "token-that-cannot-be-verified"
     const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
     try {
-      const refused = await postJson(server, "/v1/input/freeze", { computerId: "local" })
-      // input_freeze is NEVER on free, which is hard metering: an unknown counter
-      // cannot be honoured, so it fails CLOSED rather than serving unmetered use.
-      expect(refused.status).toBe(503)
-      expect(refused.body).toMatchObject({
-        ok: false,
-        error: {
-          code: "entitlement_unavailable",
-          capability: "input_freeze",
-          // Retryable, and distinct from the 402: waiting fixes this one, paying
-          // does not.
-          retryable: true,
-        },
-      })
-      expect((refused.body.error as { message: string }).message).toContain("could not be reached")
-      expect(calls.grabs).toBe(0)
+      const allowed = await postJson(server, "/v1/input/freeze", { computerId: "local" })
+      // input_freeze is soft on every plan: a billing outage must never leave a
+      // customer unable to take the mouse back, so the gate stays open.
+      expect(allowed.status).toBe(200)
+      expect(calls.grabs).toBe(1)
     } finally {
       await server.stop()
     }
@@ -280,11 +258,10 @@ describe("the gate's failure policy", () => {
     const server = await startOmniaServer({ drivers: [driver], authFile: join(dir, "auth.json") })
     try {
       const startedAt = Date.now()
-      const refused = await postJson(server, "/v1/input/freeze", { computerId: "local" })
-      expect(refused.status).toBe(503)
-      expect(refused.body).toMatchObject({ ok: false, error: { code: "entitlement_unavailable" } })
+      const allowed = await postJson(server, "/v1/input/freeze", { computerId: "local" })
+      expect(allowed.status).toBe(200)
       expect(Date.now() - startedAt).toBeLessThan(20_000)
-      expect(calls.grabs).toBe(0)
+      expect(calls.grabs).toBe(1)
     } finally {
       await server.stop()
       hung.stop(true)

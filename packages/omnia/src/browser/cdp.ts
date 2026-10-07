@@ -761,7 +761,19 @@ export class CdpRuntime {
     const requestId = typeof record.requestId === "string" ? record.requestId : undefined
     if (requestId === undefined) return
     const target = key === "default" ? undefined : key
-    const url = typeof record.requestUrl === "string" ? record.requestUrl : ""
+    const request =
+      typeof record.request === "object" && record.request !== null
+        ? (record.request as Record<string, unknown>)
+        : undefined
+    // Chromium reports the paused URL at params.request.url; a flat requestUrl
+    // is only a fallback for bridges that pre-shape the event. Reading the
+    // wrong key yields "", which fails the allowlist and aborts every request.
+    const url =
+      typeof request?.url === "string"
+        ? request.url
+        : typeof record.requestUrl === "string"
+          ? record.requestUrl
+          : ""
     if (isNavigableBrowserUrl(url)) {
       void this.send("Fetch.continueRequest", { requestId }, target).catch(() => undefined)
       return

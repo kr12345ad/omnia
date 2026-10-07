@@ -863,3 +863,35 @@ describe("embedded browser page debugger and dialogs", () => {
     await browser.destroy()
   })
 })
+
+describe("embedded browser fetch interception cleanup", () => {
+  test("disarms interception and settles paused requests under the url policy", async () => {
+    const browser = manager()
+    const host = createWindow()
+    const { guest } = registerGuest(browser, host.webContents, "req-fetch")
+
+    await dispatch(browser, "Fetch.enable", {}, guest.id)
+    guest.debugger.emit("message", undefined, "Fetch.requestPaused", {
+      requestId: "r-1",
+      request: { url: "https://example.test/next.png" },
+    })
+    guest.debugger.emit("message", undefined, "Fetch.requestPaused", {
+      requestId: "r-2",
+      request: { url: "http://127.0.0.1:8080/admin" },
+    })
+
+    // Once the controller socket is gone nothing answers the pauses, so the
+    // shutdown path continues the public request, fails the private one, and
+    // turns interception off instead of hanging the page.
+    ;(browser as unknown as { releaseInterceptions(): void }).releaseInterceptions()
+    expect(guest.debugger.commands.map((command) => command.method)).toEqual(
+      expect.arrayContaining(["Fetch.continueRequest", "Fetch.failRequest", "Fetch.disable"]),
+    )
+    const continued = guest.debugger.commands.find((command) => command.method === "Fetch.continueRequest")
+    const failed = guest.debugger.commands.find((command) => command.method === "Fetch.failRequest")
+    expect(continued?.params).toEqual({ requestId: "r-1" })
+    expect(failed?.params).toEqual({ requestId: "r-2", errorReason: "BlockedByClient" })
+
+    await browser.destroy()
+  })
+})

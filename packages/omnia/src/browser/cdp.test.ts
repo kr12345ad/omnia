@@ -1507,11 +1507,19 @@ describe("cdp runtime navigation policy", () => {
     const runtime = new CdpRuntime({ endpoint: bridge.endpoint, token: bridge.token })
     try {
       await runtime.read()
-      bridge.emit("Fetch.requestPaused", { requestId: "r-1", requestUrl: "https://example.test/next.png" }, "tab-1")
-      bridge.emit("Fetch.requestPaused", { requestId: "r-2", requestUrl: "http://169.254.169.254/latest/meta-data" }, "tab-1")
       bridge.emit(
         "Fetch.requestPaused",
-        { requestId: "r-3", requestUrl: "http://127.0.0.1:8080/admin", resourceType: "Document" },
+        { requestId: "r-1", request: { url: "https://example.test/next.png" } },
+        "tab-1",
+      )
+      bridge.emit(
+        "Fetch.requestPaused",
+        { requestId: "r-2", request: { url: "http://169.254.169.254/latest/meta-data" } },
+        "tab-1",
+      )
+      bridge.emit(
+        "Fetch.requestPaused",
+        { requestId: "r-3", request: { url: "http://127.0.0.1:8080/admin" }, resourceType: "Document" },
         "tab-1",
       )
       await waitUntil(() => callsOf(bridge, "Fetch.failRequest").length === 2)

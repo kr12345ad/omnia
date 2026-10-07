@@ -1779,6 +1779,12 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 404, { ok: false, error: `Unknown superskill ${id}.` })
         return true
       }
+      // A disabled superskill must not run: the call route has to honor the
+      // same enabled flag the list and save paths do.
+      if (skill.enabled === false) {
+        json(response, 403, { ok: false, error: `Superskill ${id} is disabled.` })
+        return true
+      }
       const method = skill.methods.find((entry) => entry.name === body.method)
       if (method === undefined) {
         json(response, 400, {
@@ -1788,12 +1794,16 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         })
         return true
       }
-      const required =
+      // Declared scopes can only add to what the bridge type implies, never
+      // relax it: a stdio bridge executes a local command, so every call needs
+      // PROCESS_EXECUTE even when the skill claims a weaker scope.
+      const declared =
         method.scopes !== undefined && method.scopes.length > 0
           ? method.scopes
           : skill.scopes !== undefined && skill.scopes.length > 0
             ? skill.scopes
-            : superskillScopes(skill.bridge.type)
+            : []
+      const required: readonly OmniaScope[] = [...new Set<OmniaScope>([...superskillScopes(skill.bridge.type), ...declared])]
       const operation: OperationInput = { action: `superskill:${id}:${body.method}`, resources: [id] }
       const decision = context.permissions.evaluate(required, {
         sessionId: requestSessionId(request, body),
