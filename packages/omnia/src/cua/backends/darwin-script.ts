@@ -252,7 +252,20 @@ function main() {
   var screen = null
   try {
     var display = $.CGDisplayBounds($.CGMainDisplayID())
-    screen = { width: Math.round(Number(display.size.width)), height: Math.round(Number(display.size.height)) }
+    // CGDisplayPixelsHigh is unreliable under JXA (it bridges as the point
+    // height, which would pin scale to 1 on every Retina display). The display
+    // mode's pixel size over its point size is the backing ratio instead.
+    var scale = 1
+    try {
+      var mode = $.CGDisplayCopyDisplayMode($.CGMainDisplayID())
+      var pixelsWide = Number($.CGDisplayModeGetPixelWidth(mode))
+      var pointsWide = Number($.CGDisplayModeGetWidth(mode))
+      if (isFinite(pixelsWide) && isFinite(pointsWide) && pointsWide > 0) {
+        var computed = pixelsWide / pointsWide
+        if (isFinite(computed) && computed > 0) scale = computed
+      }
+    } catch (scaleError) {}
+    screen = { width: Math.round(Number(display.size.width)), height: Math.round(Number(display.size.height)), scale: scale }
   } catch (error) {
     screen = null
   }
@@ -752,7 +765,7 @@ export interface DarwinApplicationSnapshot {
 
 export interface DarwinSnapshotPayload {
   applications: DarwinApplicationSnapshot[]
-  screen?: { width: number; height: number }
+  screen?: { width: number; height: number; scale?: number }
   truncated: boolean
 }
 
@@ -889,7 +902,12 @@ export function parseDarwinSnapshotPayload(value: unknown): DarwinSnapshotPayloa
   const rawScreen = isRecord(value.screen) ? value.screen : undefined
   const width = rawScreen === undefined ? undefined : finiteNumber(rawScreen.width)
   const height = rawScreen === undefined ? undefined : finiteNumber(rawScreen.height)
-  const screen = width !== undefined && height !== undefined ? { width, height } : undefined
+  const rawScale = rawScreen === undefined ? undefined : finiteNumber(rawScreen.scale)
+  const scale = rawScale !== undefined && rawScale > 0 ? rawScale : undefined
+  const screen =
+    width !== undefined && height !== undefined
+      ? { width, height, ...(scale === undefined ? {} : { scale }) }
+      : undefined
   return {
     applications,
     ...(screen === undefined ? {} : { screen }),

@@ -352,7 +352,7 @@ export interface DarwinSnapshotBuildInput {
   generation: number
   takenAt: number
   applications: readonly DarwinApplicationSnapshot[]
-  screen?: { width: number; height: number }
+  screen?: { width: number; height: number; scale?: number }
   maxElements: number
   requestedApp?: string
   helperTruncated?: boolean
@@ -560,6 +560,16 @@ function pointInBounds(
   const originX = bounds.x ?? 0
   const originY = bounds.y ?? 0
   return point.x >= originX && point.y >= originY && point.x < originX + bounds.width && point.y < originY + bounds.height
+}
+
+function darwinScreenScale(screen: { scale?: unknown } | undefined): number {
+  const scale = screen?.scale
+  return typeof scale === "number" && Number.isFinite(scale) && scale > 0 ? scale : 1
+}
+
+function scalePointToLogical(point: { x: number; y: number }, scale: number): { x: number; y: number } {
+  const factor = Number.isFinite(scale) && scale > 0 ? scale : 1
+  return { x: Math.round(point.x / factor), y: Math.round(point.y / factor) }
 }
 
 export interface DarwinCuaBackendOptions {
@@ -1549,26 +1559,28 @@ const raw = await this.performTarget(resolved.pid, resolved.path, rawAction)
   ): Promise<CuaActionResult> {
     const stale = this.captureFailure(action.captureId, action, generation)
     if (stale !== undefined) return stale
+    const scale = darwinScreenScale(this.latest?.screen as { scale?: unknown } | undefined)
+    const point = scalePointToLogical(action.point, scale)
     const bounds = this.latest?.screen
-    if (bounds !== undefined && !pointInBounds(action.point, bounds)) {
+    if (bounds !== undefined && !pointInBounds(point, bounds)) {
       return refuse(
         action,
         "invalid_point",
-        `Point ${action.point.x},${action.point.y} is outside the ${bounds.width}x${bounds.height} screen.`,
+        `Point ${point.x},${point.y} is outside the ${bounds.width}x${bounds.height} screen.`,
         generation,
       )
     }
     const button = BUTTONS[action.button ?? "left"]
     const count = Math.max(1, action.count ?? 1)
     const output = parseDarwinResultPayload(
-      await this.runScript(darwinClickScript(action.point, button, count), DARWIN_SCRIPT_TIMEOUT_MS),
+      await this.runScript(darwinClickScript(point, button, count), DARWIN_SCRIPT_TIMEOUT_MS),
     )
     if (output?.ok !== true) return refuse(action, "input_failed", "The macOS pointer click failed.", generation, true)
     this.consumeCapture(action.captureId)
     return success(
       action,
       "pointer",
-      `Sent ${action.button ?? "left"} click x${count} at ${action.point.x},${action.point.y}.`,
+      `Sent ${action.button ?? "left"} click x${count} at ${point.x},${point.y}.`,
       generation,
       false,
     )
@@ -1580,19 +1592,22 @@ const raw = await this.performTarget(resolved.pid, resolved.path, rawAction)
   ): Promise<CuaActionResult> {
     const stale = this.captureFailure(action.captureId, action, generation)
     if (stale !== undefined) return stale
+    const scale = darwinScreenScale(this.latest?.screen as { scale?: unknown } | undefined)
+    const from = scalePointToLogical(action.from, scale)
+    const to = scalePointToLogical(action.to, scale)
     const bounds = this.latest?.screen
-    if (bounds !== undefined && (!pointInBounds(action.from, bounds) || !pointInBounds(action.to, bounds))) {
+    if (bounds !== undefined && (!pointInBounds(from, bounds) || !pointInBounds(to, bounds))) {
       return refuse(action, "invalid_point", "The drag start or end point is outside the screen.", generation)
     }
     const output = parseDarwinResultPayload(
-      await this.runScript(darwinDragScript(action.from, action.to), DARWIN_SCRIPT_TIMEOUT_MS),
+      await this.runScript(darwinDragScript(from, to), DARWIN_SCRIPT_TIMEOUT_MS),
     )
     if (output?.ok !== true) return refuse(action, "input_failed", "The macOS pointer drag failed.", generation, true)
     this.consumeCapture(action.captureId)
     return success(
       action,
       "pointer",
-      `Dragged ${action.from.x},${action.from.y} to ${action.to.x},${action.to.y}.`,
+      `Dragged ${from.x},${from.y} to ${to.x},${to.y}.`,
       generation,
       false,
     )

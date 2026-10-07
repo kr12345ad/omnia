@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { DarwinHostDriver } from "./darwin"
 
 // The shipped shell is /bin/zsh, which does not exist off macOS. The driver
@@ -63,6 +66,43 @@ describeShell("macOS paid primitive local path", () => {
     const result = await testDriver().runCommand({ command: "printf omnia-local" })
     expect(result.success).toBe(true)
     expect(result.command?.stdout).toBe("omnia-local")
+  })
+})
+
+describeShell("macOS screen info", () => {
+  function fakeExecutable(directory: string, name: string, body: string): string {
+    const path = join(directory, name)
+    writeFileSync(path, body)
+    chmodSync(path, 0o755)
+    return path
+  }
+
+  test("info() carries screen when the script succeeds", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "omnia-darwin-screen-"))
+    try {
+      const driver = new DarwinHostDriver({
+        shell: "/bin/sh",
+        osascript: fakeExecutable(directory, "osascript", '#!/bin/sh\necho \'{"width":1512,"height":944}\'\n'),
+      })
+      const info = await driver.info()
+      expect(info.screen).toEqual({ width: 1512, height: 944 })
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("info() omits screen when the script fails", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "omnia-darwin-screen-"))
+    try {
+      const driver = new DarwinHostDriver({
+        shell: "/bin/sh",
+        osascript: fakeExecutable(directory, "osascript", "#!/bin/sh\nexit 1\n"),
+      })
+      const info = await driver.info()
+      expect(info.screen).toBeUndefined()
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   })
 })
 

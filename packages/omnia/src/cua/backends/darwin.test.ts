@@ -1193,3 +1193,93 @@ describe("cua darwin controller probe", () => {
     expect(calls.some((call) => call.command === "apps")).toBe(true)
   })
 })
+
+describe("cua darwin retina scale", () => {
+  function retinaObserve() {
+    const base = JSON.parse(DARWIN_FIXTURE_JSON)
+    return { ...base, screen: { width: 1280, height: 800, scale: 2 } }
+  }
+
+  test("carries scale from the snapshot payload, defaulting absent to unscaled", () => {
+    const scaled = parseDarwinSnapshotPayload({
+      applications: [],
+      screen: { width: 1280, height: 800, scale: 2 },
+      truncated: false,
+    })
+    expect(scaled?.screen).toEqual({ width: 1280, height: 800, scale: 2 })
+    const unscaled = parseDarwinSnapshotPayload({
+      applications: [],
+      screen: { width: 1920, height: 1080 },
+      truncated: false,
+    })
+    expect(unscaled?.screen).toEqual({ width: 1920, height: 1080 })
+    expect(parseDarwinSnapshotPayload(JSON.parse(DARWIN_FIXTURE_JSON))?.screen).toEqual({
+      width: 1920,
+      height: 1080,
+    })
+  })
+
+  test("observe and helper report backing scale", async () => {
+    const { darwinObserveScript } = await import("./darwin-script")
+    expect(darwinObserveScript()).toContain("CGDisplayPixelsHigh")
+    expect(DARWIN_AX_HELPER).toContain("backingScaleFactor")
+  })
+
+  test("click converts a 2x device point once to logical", async () => {
+    const { backend, runner } = createHarness({ handlers: { observe: () => retinaObserve() } })
+    const snapshot = await backend.snapshot()
+    const result = await backend.execute({ type: "click", point: { x: 2000, y: 1200 }, captureId: snapshot.id })
+    expect(result.ok).toBe(true)
+    const scripts = runner.calls.filter((script) => scriptKind(script) === "click")
+    expect(scripts).toHaveLength(1)
+    expect(scripts[0]).toContain("CGPointMake(1000, 600)")
+  })
+
+  test("drag converts both 2x endpoints once to logical", async () => {
+    const { backend, runner } = createHarness({ handlers: { observe: () => retinaObserve() } })
+    const snapshot = await backend.snapshot()
+    const result = await backend.execute({
+      type: "drag",
+      from: { x: 2000, y: 1200 },
+      to: { x: 2200, y: 1400 },
+      captureId: snapshot.id,
+    })
+    expect(result.ok).toBe(true)
+    const scripts = runner.calls.filter((script) => script.includes("kCGEventLeftMouseDragged"))
+    expect(scripts).toHaveLength(1)
+    expect(scripts[0]).toContain("CGPointMake(1000, 600)")
+    expect(scripts[0]).toContain("CGPointMake(1100, 700)")
+  })
+
+  test("scale-absent snapshots pass points through unchanged", async () => {
+    const { backend, runner } = createHarness()
+    const snapshot = await backend.snapshot()
+    const clicked = await backend.execute({ type: "click", point: { x: 100, y: 50 }, captureId: snapshot.id })
+    expect(clicked.ok).toBe(true)
+    const clickScripts = runner.calls.filter((script) => scriptKind(script) === "click")
+    expect(clickScripts).toHaveLength(1)
+    expect(clickScripts[0]).toContain("CGPointMake(100, 50)")
+  })
+
+  test("AX fallback center stays logical under a 2x snapshot", async () => {
+    const passive = retinaObserve()
+    const button = passive.applications[0]?.nodes[0]?.children[0]
+    if (button === undefined) throw new Error("fixture missing button")
+    button.actions = []
+    const { backend, runner } = createHarness({
+      allowForeground: true,
+      handlers: {
+        observe: () => passive,
+        resolve: () => ({ ...RESOLVED_BUTTON, actions: [] }),
+      },
+    })
+    const snapshot = await backend.snapshot()
+    const element = requireElement(snapshot, "Export")
+    const result = await backend.execute({ type: "invoke", ref: element.ref })
+    expect(result.ok).toBe(true)
+    expect(result.delivery).toBe("pointer")
+    const scripts = runner.calls.filter((script) => scriptKind(script) === "click")
+    expect(scripts).toHaveLength(1)
+    expect(scripts[0]).toContain("CGPointMake(50, 32)")
+  })
+})

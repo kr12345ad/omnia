@@ -248,9 +248,11 @@ func walk(_ element: AXUIElement, index: Int, depth: Int, budget: Budget) -> [St
     return node
 }
 
-func screenSize() -> [String: Int]? {
+func screenSize() -> [String: Any]? {
     guard let screen = NSScreen.main else { return nil }
-    return ["width": Int(screen.frame.width.rounded()), "height": Int(screen.frame.height.rounded())]
+    var scale = Double(screen.backingScaleFactor)
+    if !scale.isFinite || scale <= 0 { scale = 1.0 }
+    return ["width": Int(screen.frame.width.rounded()), "height": Int(screen.frame.height.rounded()), "scale": scale]
 }
 
 func requestedFilter(_ params: [String: Any]) -> String? {

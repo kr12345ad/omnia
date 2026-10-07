@@ -25,6 +25,7 @@ import { executeShellCommand, runProcess, runProcessWithInput, type ProcessResul
 
 export const DARWIN_OBSERVE_TIMEOUT_MS = 45000
 export const DARWIN_SCRIPT_TIMEOUT_MS = 20000
+export const DARWIN_SCREEN_TTL_MS = 60000
 export const DARWIN_MAX_ELEMENTS = 600
 export const DARWIN_MAX_DEPTH = 6
 
@@ -486,6 +487,29 @@ JSON.stringify({ x: Math.round(Number(location.x)), y: Math.round(Number(locatio
 `
 }
 
+function screenSizeScript(): string {
+  return `
+ObjC.import('CoreGraphics')
+var bounds = $.CGDisplayBounds($.CGMainDisplayID())
+JSON.stringify({ width: Math.round(Number(bounds.size.width)), height: Math.round(Number(bounds.size.height)) })
+`
+}
+
+export function parseDarwinScreenSize(text: string): { width: number; height: number } | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text.trim())
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined
+  const record = parsed as { width?: unknown; height?: unknown }
+  if (typeof record.width !== "number" || typeof record.height !== "number") return undefined
+  if (!Number.isFinite(record.width) || !Number.isFinite(record.height)) return undefined
+  if (record.width <= 0 || record.height <= 0) return undefined
+  return { width: Math.round(record.width), height: Math.round(record.height) }
+}
+
 export interface DarwinDriverOptions {
   readonly osascript?: string
   readonly screencapture?: string
@@ -527,6 +551,7 @@ export class DarwinHostDriver {
   private readonly shell: string
   private readonly access: DriverAccess
   private secureInput: { at: number; active: boolean } | undefined
+  private cachedScreen: { at: number; screen: { width: number; height: number } } | undefined
   // Honest accessibility capability: the static "available" claim used to
   // survive a revoked grant, so callers trusted capabilities that the tree
   // could not satisfy. Unknown until the cheap trust probe answers.
@@ -1030,7 +1055,19 @@ JSON.stringify({ ok: true })
     return executeShellCommand(request, { file: this.shell, args: (command) => ["-lc", command] })
   }
 
+  async screenInfo(): Promise<{ width: number; height: number } | undefined> {
+    const cached = this.cachedScreen
+    if (cached !== undefined && Date.now() - cached.at < DARWIN_SCREEN_TTL_MS) return cached.screen
+    const result = await this.script(screenSizeScript()).catch(() => undefined)
+    if (result === undefined || result.code !== 0) return undefined
+    const parsed = parseDarwinScreenSize(result.stdout)
+    if (parsed === undefined) return undefined
+    this.cachedScreen = { at: Date.now(), screen: parsed }
+    return parsed
+  }
+
   async info(): Promise<ComputerInfo> {
+    const screen = await this.screenInfo().catch(() => undefined)
     return {
       id: this.id,
       name: "macOS host",
@@ -1039,6 +1076,7 @@ JSON.stringify({ ok: true })
       architecture: process.arch,
       backend: "macos-ax",
       connected: true,
+      ...(screen === undefined ? {} : { screen: { width: screen.width, height: screen.height } }),
     }
   }
 
