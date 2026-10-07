@@ -48,9 +48,11 @@
   height: 1px;
   width: 16px;
   background-color: var(--icon-base);
-  transition:
-    width 0.2s,
-    background-color 0.2s;
+  @media (prefers-reduced-motion: no-preference) {
+    transition:
+      width 0.2s,
+      background-color 0.2s;
+  }
 }
 
 [data-slot="message-nav-tick-button"]:hover [data-slot="message-nav-tick-line"] {

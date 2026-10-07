@@ -45,12 +45,14 @@
     opacity: var(--indicator-opacity, 1);
     pointer-events: none;
     position: absolute;
-    transition:
-      opacity 200ms ease-out,
-      box-shadow 100ms ease-in-out,
-      width 200ms cubic-bezier(0.22, 1.2, 0.36, 1),
-      height 200ms cubic-bezier(0.22, 1.2, 0.36, 1),
-      transform 300ms cubic-bezier(0.22, 1.2, 0.36, 1);
+    @media (prefers-reduced-motion: no-preference) {
+      transition:
+        opacity 200ms ease-out,
+        box-shadow 100ms ease-in-out,
+        width 200ms cubic-bezier(0.22, 1.2, 0.36, 1),
+        height 200ms cubic-bezier(0.22, 1.2, 0.36, 1),
+        transform 300ms cubic-bezier(0.22, 1.2, 0.36, 1);
+    }
     will-change: transform;
     z-index: 0;
   }
@@ -92,9 +94,11 @@
     line-height: 1;
     padding: var(--radio-group-padding);
     position: relative;
-    transition:
-      color 200ms ease-out,
-      opacity 200ms ease-out;
+    @media (prefers-reduced-motion: no-preference) {
+      transition:
+        color 200ms ease-out,
+        opacity 200ms ease-out;
+    }
     user-select: none;
   }
 
@@ -106,7 +110,9 @@
     justify-content: center;
     min-width: 0;
     padding: var(--radio-group-control-padding, 0 10px);
-    transition: background-color 200ms ease-out;
+    @media (prefers-reduced-motion: no-preference) {
+      transition: background-color 200ms ease-out;
+    }
     width: 100%;
   }
 

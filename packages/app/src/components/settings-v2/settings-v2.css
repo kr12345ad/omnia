@@ -5,6 +5,36 @@
   height: 100%;
 }
 
+/* Keep tab switches entrance-only; never retain an outgoing settings panel. */
+@media (prefers-reduced-motion: reduce) {
+  [data-component="tabs-v2"][data-variant="settings"] [data-slot="tabs-v2-content"][data-selected] {
+    animation: none;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-slot="settings-v2-row-description"] a.settings-v2-link,
+  .settings-v2-providers-view-all {
+    transition: color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+  }
+
+  .settings-v2-models-group-trigger,
+  .settings-v2-keybind-button {
+    transition: background-color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="settings-v2-row-description"] a.settings-v2-link,
+  .settings-v2-providers-view-all,
+  .settings-v2-models-group-trigger,
+  .settings-v2-keybind-button,
+  .settings-v2-provider-env-hint {
+    transition: none;
+  }
+}
+
 [data-component="dialog-v2"][data-variant="settings"] [data-slot="dialog-container"] {
   background: var(--v2-background-bg-base);
 }
@@ -293,11 +323,13 @@
   line-height: 1;
   color: var(--v2-text-text-muted);
   opacity: 0;
-  transition: opacity 200ms ease;
+  @media (prefers-reduced-motion: no-preference) {
+    transition: opacity var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+  }
   cursor: default;
 }
 
-.group:hover .settings-v2-provider-env-hint {
+.group:is(:hover, :focus-within) .settings-v2-provider-env-hint {
   opacity: 1;
 }
 

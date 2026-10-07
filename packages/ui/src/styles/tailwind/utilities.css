@@ -35,8 +35,15 @@
 }
 
 @utility fade-up-text {
-  animation: fadeUp 0.4s ease-out forwards;
   opacity: 0;
+
+  @media (prefers-reduced-motion: no-preference) {
+    animation: fadeUp 0.4s ease-out forwards;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    opacity: 1;
+  }
 
   &:nth-child(1) {
     animation-delay: 0.1s;

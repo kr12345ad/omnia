@@ -147,7 +147,9 @@
     opacity: 0;
     will-change: opacity;
     transform: translateZ(0);
-    transition: opacity 0.15s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition: opacity 0.15s ease;
+    }
 
     &:hover {
       color: var(--text-strong);
@@ -171,7 +173,9 @@
     display: inline-flex;
     color: var(--icon-weaker);
     transform: rotate(-90deg);
-    transition: transform 0.15s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition: transform 0.15s ease;
+    }
   }
 
   [data-slot="accordion-item"][data-expanded] [data-slot="session-review-diff-chevron"] {

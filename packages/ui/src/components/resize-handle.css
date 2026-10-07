@@ -6,7 +6,9 @@
     content: "";
     position: absolute;
     opacity: 0;
-    transition: opacity 0.15s ease-in-out;
+    @media (prefers-reduced-motion: no-preference) {
+      transition: opacity 0.15s ease-in-out;
+    }
   }
 
   &:hover::after,

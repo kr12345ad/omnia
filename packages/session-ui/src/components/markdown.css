@@ -206,7 +206,9 @@
     top: 4px;
     inset-inline-end: 4px;
     opacity: 0;
-    transition: opacity 0.15s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition: opacity 0.15s ease;
+    }
     z-index: 1;
   }
 

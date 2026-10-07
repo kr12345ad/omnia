@@ -124,7 +124,9 @@
     text-align: inherit;
     cursor: pointer;
     opacity: 0;
-    transition: opacity 0.15s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition: opacity 0.15s ease;
+    }
     margin-left: 4px;
   }
 
@@ -151,7 +153,9 @@
     margin-top: 12px;
     padding: 0 0 6px;
     cursor: pointer;
-    transition: color 0.15s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition: color 0.15s ease;
+    }
 
     &:hover,
     &:focus-visible {
@@ -220,7 +224,9 @@
     display: inline-flex;
     color: var(--icon-weaker);
     transform: rotate(-90deg);
-    transition: transform 0.15s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition: transform 0.15s ease;
+    }
   }
 
   [data-slot="accordion-item"][data-expanded] [data-slot="session-turn-diff-chevron"] {

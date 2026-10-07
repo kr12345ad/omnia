@@ -32,15 +32,17 @@
   }
 
   .group\/prompt-input {
-    transition: box-shadow .22s, border-color .22s;
+    @media (prefers-reduced-motion: no-preference) {
+      transition:
+        box-shadow var(--ui-motion-duration-fast) var(--ui-motion-ease-out),
+        border-color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+    }
   }
 
   .group\/prompt-input:focus-within {
-    box-shadow: 0 0 0 1px #7dd3fc73, 0 8px 32px #0ea5e91f;
-  }
-
-  .home-qa-card {
-    transition: transform .22s var(--spring-gentle, cubic-bezier(.25, 1.1, .35, 1)), box-shadow .22s ease, background-color .15s ease;
+    box-shadow:
+      0 0 0 1px #7dd3fc73,
+      0 8px 32px #0ea5e91f;
   }
 
   .home-qa-card:hover {
@@ -49,64 +51,64 @@
   }
 
   .home-qa-card:active {
-    transform: translateY(0) scale(.97);
+    transform: translateY(0) scale(0.985);
   }
 
   .home-slide-in-right {
-    animation: home-slide-in-right .38s var(--spring-bouncy, cubic-bezier(.34, 1.56, .64, 1)) backwards;
-    will-change: transform, opacity;
+    @media (prefers-reduced-motion: no-preference) {
+      animation: home-slide-in-right var(--ui-motion-duration-slow) var(--ui-motion-ease-out) backwards;
+    }
     max-width: 100%;
     overflow: clip;
   }
 
   .home-slide-in-left {
-    animation: home-slide-in-left .38s var(--spring-bouncy, cubic-bezier(.34, 1.56, .64, 1)) backwards;
-    will-change: transform, opacity;
+    @media (prefers-reduced-motion: no-preference) {
+      animation: home-slide-in-left var(--ui-motion-duration-slow) var(--ui-motion-ease-out) backwards;
+    }
     max-width: 100%;
     overflow: clip;
   }
 
   @keyframes home-slide-in-right {
-    0% {
+    from {
       opacity: 0;
-      transform: translateX(56px) scale(.995);
+      transform: translateX(12px);
     }
 
-    60% {
+    to {
       opacity: 1;
-      transform: translateX(-6px) scale(1);
-    }
-
-    100% {
-      opacity: 1;
-      transform: translateX(0) scale(1);
+      transform: translateX(0);
     }
   }
 
   @keyframes home-slide-in-left {
-    0% {
+    from {
       opacity: 0;
-      transform: translateX(-56px) scale(.995);
+      transform: translateX(-12px);
     }
 
-    60% {
+    to {
       opacity: 1;
-      transform: translateX(6px) scale(1);
-    }
-
-    100% {
-      opacity: 1;
-      transform: translateX(0) scale(1);
+      transform: translateX(0);
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .home-qa-card:hover, .home-qa-card:active {
+    .home-qa-card:hover,
+    .home-qa-card:active {
       transform: none;
     }
 
-    .home-slide-in-right, .home-slide-in-left {
+    .home-slide-in-right,
+    .home-slide-in-left {
       animation: none;
+      opacity: 1;
+      transform: none;
+    }
+
+    .group\/prompt-input {
+      transition: none;
     }
 
     .group\/prompt-input:focus-within {
@@ -414,6 +416,30 @@
       animation: home-projects-fade-top linear both;
       animation-timeline: --manage-models-scroll;
       animation-range: 0 0.1px;
+    }
+  }
+}
+
+/* These cards also carry transition-colors and anim-rise utilities. */
+@layer utilities {
+  @media (prefers-reduced-motion: no-preference) {
+    .home-qa-card {
+      transition:
+        transform var(--ui-motion-duration-fast) var(--ui-motion-ease-out),
+        box-shadow var(--ui-motion-duration-fast) var(--ui-motion-ease-out),
+        background-color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+    }
+
+    .home-qa-card.anim-rise {
+      animation: ui-motion-fade-in var(--ui-motion-duration-fast) var(--ui-motion-ease-out) backwards;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .home-qa-card {
+      animation: none;
+      transition: none;
+      opacity: 1;
     }
   }
 }

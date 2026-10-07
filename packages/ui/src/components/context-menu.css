@@ -1,3 +1,5 @@
+@import "../styles/motion.css";
+
 [data-component="context-menu-content"],
 [data-component="context-menu-sub-content"] {
   min-width: 8rem;
@@ -16,15 +18,23 @@
     outline: none;
   }
 
-  animation: contextMenuContentHide var(--transition-duration) var(--transition-easing) forwards;
-
-  @starting-style {
-    animation: none;
+  &[data-closed] {
+    opacity: 0;
+    pointer-events: none;
   }
 
   &[data-expanded] {
-    pointer-events: auto;
-    animation: contextMenuContentShow var(--transition-duration) var(--transition-easing) forwards;
+    opacity: 1;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    &[data-closed] {
+      animation: ui-motion-surface-out var(--ui-motion-duration-exit) var(--ui-motion-ease-in) forwards;
+    }
+
+    &[data-expanded] {
+      animation: ui-motion-surface-in var(--ui-motion-duration-enter) var(--ui-motion-ease-out) backwards;
+    }
   }
 }
 
@@ -50,9 +60,11 @@
     letter-spacing: var(--letter-spacing-normal);
     color: var(--text-strong);
 
-    transition-property: background-color, color;
-    transition-duration: var(--transition-duration);
-    transition-timing-function: var(--transition-easing);
+    @media (prefers-reduced-motion: no-preference) {
+      transition:
+        background-color var(--ui-motion-duration-fast) var(--ui-motion-ease-out),
+        color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+    }
     user-select: none;
 
     &:hover {
@@ -111,24 +123,10 @@
   }
 }
 
-@keyframes contextMenuContentShow {
-  from {
-    opacity: 0;
-    transform: scaleY(0.95);
-  }
-  to {
-    opacity: 1;
-    transform: scaleY(1);
-  }
-}
-
-@keyframes contextMenuContentHide {
-  from {
-    opacity: 1;
-    transform: scaleY(1);
-  }
-  to {
-    opacity: 0;
-    transform: scaleY(0.95);
+@media (prefers-reduced-motion: reduce) {
+  [data-component="context-menu-content"],
+  [data-component="context-menu-sub-content"] {
+    animation: none;
+    transition: none;
   }
 }

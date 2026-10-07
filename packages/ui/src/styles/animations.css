@@ -45,8 +45,15 @@
 }
 
 .fade-up-text {
-  animation: fadeUp 0.4s ease-out forwards;
   opacity: 0;
+
+  @media (prefers-reduced-motion: no-preference) {
+    animation: fadeUp 0.4s ease-out forwards;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    opacity: 1;
+  }
 
   &:nth-child(1) {
     animation-delay: 0.1s;
@@ -249,19 +256,27 @@
 }
 
 .anim-pop {
-  animation: spring-pop .42s var(--spring-bouncy) backwards;
+  @media (prefers-reduced-motion: no-preference) {
+    animation: spring-pop .42s var(--spring-bouncy) backwards;
+  }
 }
 
 .anim-rise {
-  animation: spring-rise .45s var(--spring-smooth) backwards;
+  @media (prefers-reduced-motion: no-preference) {
+    animation: spring-rise .45s var(--spring-smooth) backwards;
+  }
 }
 
 .anim-fade-scale {
-  animation: spring-fade-scale .38s var(--spring-bouncy) backwards;
+  @media (prefers-reduced-motion: no-preference) {
+    animation: spring-fade-scale .38s var(--spring-bouncy) backwards;
+  }
 }
 
 .anim-lift {
-  transition: transform .22s var(--spring-gentle), box-shadow .22s ease, background-color .15s ease;
+  @media (prefers-reduced-motion: no-preference) {
+    transition: transform .22s var(--spring-gentle), box-shadow .22s ease, background-color .15s ease;
+  }
 }
 
 .anim-lift:hover {
@@ -269,7 +284,9 @@
 }
 
 .anim-press {
-  transition: transform .16s var(--spring-bouncy);
+  @media (prefers-reduced-motion: no-preference) {
+    transition: transform .16s var(--spring-bouncy);
+  }
 }
 
 .anim-press:active {
@@ -288,7 +305,9 @@
   border-radius: 999px;
   width: 6px;
   height: 6px;
-  animation: 1.2s ease-in-out infinite typing-bounce;
+  @media (prefers-reduced-motion: no-preference) {
+    animation: 1.2s ease-in-out infinite typing-bounce;
+  }
 }
 
 .typing-dots > span:nth-child(2) {
@@ -311,5 +330,11 @@
   .typing-dots > span {
     opacity: .7;
     animation: none;
+  }
+
+  /* Inline spinner keyframes cannot be preference-gated at the call site,
+     so the reduced-motion kill lives here next to the keyframes. */
+  [data-component="spinner"] rect {
+    animation: none !important;
   }
 }

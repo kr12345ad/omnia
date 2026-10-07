@@ -2527,7 +2527,7 @@ ToolRegistry.register({
               <button
                 type="button"
                 disabled={data.navigateToSession === undefined}
-                class="flex items-center gap-1.5 rounded-md border border-v2-border-border-muted bg-v2-background-bg-base px-2 py-1 text-[11px] font-[530] text-v2-text-text-base transition-colors enabled:hover:bg-v2-overlay-simple-overlay-hover disabled:cursor-default disabled:opacity-70"
+                class="flex items-center gap-1.5 rounded-md border border-v2-border-border-muted bg-v2-background-bg-base px-2 py-1 text-[11px] font-[530] text-v2-text-text-base transition-colors enabled:hover:bg-v2-overlay-simple-overlay-hover disabled:cursor-default disabled:opacity-70 motion-reduce:transition-none"
                 onClick={() => open(participant.id)}
               >
                 <span

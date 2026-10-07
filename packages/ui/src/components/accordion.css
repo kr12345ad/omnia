@@ -1,3 +1,5 @@
+@import "../styles/motion.css";
+
 [data-component="accordion"] {
   display: flex;
   flex-direction: column;
@@ -41,7 +43,9 @@
         box-shadow: none;
         overflow: clip;
         color: var(--v2-text-text-base);
-        transition: background-color 0.15s ease;
+        @media (prefers-reduced-motion: no-preference) {
+          transition: background-color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+        }
 
         /* text-12-regular */
         font-family: var(--font-family-sans);
@@ -100,6 +104,12 @@
       width: 100%;
       border: 0;
       background-color: transparent;
+
+      @media (prefers-reduced-motion: no-preference) {
+        &[data-expanded] {
+          animation: ui-motion-fade-in var(--ui-motion-duration-fast) var(--ui-motion-ease-out) backwards;
+        }
+      }
     }
   }
 }
@@ -128,20 +138,13 @@ body:not([data-new-layout]) [data-component="accordion"] {
   }
 }
 
-@keyframes slideDown {
-  from {
-    height: 0;
+@media (prefers-reduced-motion: reduce) {
+  [data-component="accordion"] [data-slot="accordion-trigger"] {
+    transition: none;
   }
-  to {
-    height: var(--kb-accordion-content-height);
-  }
-}
 
-@keyframes slideUp {
-  from {
-    height: var(--kb-accordion-content-height);
-  }
-  to {
-    height: 0;
+  [data-component="accordion"] [data-slot="accordion-content"][data-expanded] {
+    animation: none;
+    opacity: 1;
   }
 }

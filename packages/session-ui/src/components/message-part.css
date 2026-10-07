@@ -44,9 +44,11 @@
     background: var(--v2-background-bg-layer-02);
     border: 0.5px solid var(--v2-border-border-base);
     cursor: default;
-    transition:
-      border-color 0.15s ease,
-      opacity 0.3s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition:
+        border-color 0.15s ease,
+        opacity 0.3s ease;
+    }
 
     &:hover {
       border-color: var(--v2-border-border-strong);
@@ -169,7 +171,9 @@
     width: 100%;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.15s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition: opacity 0.15s ease;
+    }
     will-change: opacity;
 
     [data-component="tooltip-trigger"] {
@@ -237,7 +241,9 @@
     gap: 10px;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.15s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition: opacity 0.15s ease;
+    }
     will-change: opacity;
 
     [data-component="tooltip-trigger"] {
@@ -384,7 +390,9 @@
     right: 4px;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 0.15s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition: opacity 0.15s ease;
+    }
   }
 
   &:hover [data-slot="bash-copy"],
@@ -903,7 +911,9 @@
       height: 2px;
       border-radius: 999px;
       background-color: var(--v2-icon-icon-muted);
-      transition: background-color 0.2s ease;
+      @media (prefers-reduced-motion: no-preference) {
+        transition: background-color 0.2s ease;
+      }
     }
 
     &[data-active="true"]::after {
@@ -979,10 +989,12 @@
     text-align: left;
     width: 100%;
     cursor: pointer;
-    transition:
-      background-color 0.15s ease,
-      border-color 0.15s ease,
-      box-shadow 0.15s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition:
+        background-color 0.15s ease,
+        border-color 0.15s ease,
+        box-shadow 0.15s ease;
+    }
 
     &:hover:not([data-picked="true"]) {
       background-color: var(--v2-background-bg-base);
@@ -1016,9 +1028,11 @@
     justify-content: center;
     flex-shrink: 0;
     background-color: transparent;
-    transition:
-      background-color 0.15s ease,
-      border-color 0.15s ease;
+    @media (prefers-reduced-motion: no-preference) {
+      transition:
+        background-color 0.15s ease,
+        border-color 0.15s ease;
+    }
 
     [data-component="icon"] {
       opacity: 0;

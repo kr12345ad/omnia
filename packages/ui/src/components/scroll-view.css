@@ -1,3 +1,5 @@
+@import "../styles/motion.css";
+
 .scroll-view {
   position: relative;
   display: flex;
@@ -24,7 +26,9 @@
   inset-inline-end: 0;
   top: 0;
   width: 12px;
-  transition: opacity 200ms ease;
+  @media (prefers-reduced-motion: no-preference) {
+    transition: opacity var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+  }
   cursor: default;
   user-select: none;
   pointer-events: auto;
@@ -42,7 +46,9 @@
   border-radius: 9999px;
   background-color: var(--border-weak-base);
   backdrop-filter: blur(4px);
-  transition: background-color 150ms ease;
+  @media (prefers-reduced-motion: no-preference) {
+    transition: background-color var(--ui-motion-duration-fast) var(--ui-motion-ease-out);
+  }
 }
 
 .scroll-view__thumb:hover::after,
@@ -64,4 +70,11 @@
 
 .scroll-view__thumb[data-visible="true"] {
   opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-view__thumb,
+  .scroll-view__thumb::after {
+    transition: none;
+  }
 }
