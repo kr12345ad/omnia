@@ -124,6 +124,12 @@ export class RemoteComputerDriver implements ServerComputerDriver {
     select: (target, value, text) =>
       this.browserCall<Awaited<ReturnType<NonNullable<BrowserController["select"]>>>>("select", { target, value, text }),
     drag: (from, to) => this.browserCall<Awaited<ReturnType<NonNullable<BrowserController["drag"]>>>>("drag", { from, to }),
+    scroll: (input) =>
+      this.browserCall<Awaited<ReturnType<NonNullable<BrowserController["scroll"]>>>>("scroll", { input }),
+    scrollPosition: (input) =>
+      this.browserCall<Awaited<ReturnType<NonNullable<BrowserController["scrollPosition"]>>>>("scrollPosition", {
+        input,
+      }),
     readValue: (target) =>
       this.browserCall<Awaited<ReturnType<NonNullable<BrowserController["readValue"]>>>>("readValue", { target }),
     key: (key, tabId, sessionId) => this.browserCall<void>("key", { key, tabId, sessionId }),

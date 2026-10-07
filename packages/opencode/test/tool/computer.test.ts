@@ -440,6 +440,8 @@ describe("computer action policy", () => {
     expect(() => validateAction({ action: "click", x: 4 })).toThrow("target, query, or x/y")
     expect(() => validateAction({ action: "click", x: 4, y: 5 })).not.toThrow()
     expect(() => validateAction({ action: "drag", from: { x: 1, y: 2 }, to: { x: 3, y: 4 } })).not.toThrow()
+    expect(() => validateAction({ action: "browser_scroll" })).toThrow("deltaX or deltaY")
+    expect(() => validateAction({ action: "browser_scroll", deltaY: 800 })).not.toThrow()
   })
 
   test("scopes each action to its capability class", () => {

@@ -227,6 +227,20 @@ export interface BrowserController {
     from: { tabId?: string; sessionId?: string; id?: string; x?: number; y?: number },
     to: { tabId?: string; sessionId?: string; id?: string; x?: number; y?: number },
   ): Promise<{ dragged: boolean; method?: "drag_events" | "mouse" }>
+  // Scroll is optional like hover: partial controllers stay injectable, and the
+  // server answers an explicit operation_unavailable when it is missing.
+  scroll?(input: {
+    tabId?: string
+    sessionId?: string
+    deltaX?: number
+    deltaY?: number
+    x?: number
+    y?: number
+  }): Promise<void>
+  // The scrolled offset after a wheel event. The scroll case reads it before
+  // and after so verification is an independent measurement, not trust in the
+  // dispatched input.
+  scrollPosition?(input: { tabId?: string; sessionId?: string }): Promise<{ x: number; y: number }>
   type(target: { tabId?: string; sessionId?: string; id: string; text: string }): Promise<{ typed: boolean; value?: string }>
   // Optional independent value read-back. Sensitive fields answer
   // `sensitive: true` without a value so verification can never echo a secret.
@@ -368,6 +382,9 @@ export interface ServerActionRequest {
   readonly expectedMessage?: string
   readonly from?: DragEndpoint
   readonly to?: DragEndpoint
+  // browser_scroll: wheel deltas in CSS pixels; at least one must be non-zero.
+  readonly deltaX?: number
+  readonly deltaY?: number
   readonly value?: string
   readonly x?: number
   readonly y?: number
@@ -5257,6 +5274,89 @@ export class ComputerManager {
               dragged: {
                 ...(dragged.method === undefined ? {} : { method: dragged.method }),
                 ...(dragged.dragged === undefined ? {} : { dragged: dragged.dragged }),
+              },
+              ...(current === undefined ? {} : { tab: current }),
+            },
+            verification,
+          )
+        }
+        case "browser_scroll": {
+          const denied = requireOwnedTab(tab)
+          if (denied !== undefined) return denied
+          const deltaX = typeof request.deltaX === "number" ? request.deltaX : 0
+          const deltaY = typeof request.deltaY === "number" ? request.deltaY : 0
+          if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY) || (deltaX === 0 && deltaY === 0)) {
+            return fail(
+              "invalid_action",
+              "Scrolling needs a non-zero deltaX or deltaY in CSS pixels, for example deltaY 800.",
+            )
+          }
+          if (Math.abs(deltaX) > 20000 || Math.abs(deltaY) > 20000) {
+            return fail("invalid_action", "Scroll deltas are capped at 20000 pixels per call; repeat for more.")
+          }
+          if (browser.scroll === undefined) {
+            return fail("operation_unavailable", "This browser runtime cannot scroll.", false)
+          }
+          const beforeOffset =
+            browser.scrollPosition === undefined
+              ? undefined
+              : await browser
+                  .scrollPosition({ ...(tab === undefined ? {} : { tabId: tab }), ...readOptions })
+                  .catch(() => undefined)
+          const scrolled = await browser.scroll({
+            ...(tab === undefined ? {} : { tabId: tab }),
+            deltaX: Math.round(deltaX),
+            deltaY: Math.round(deltaY),
+            ...(typeof request.x === "number" ? { x: request.x } : {}),
+            ...(typeof request.y === "number" ? { y: request.y } : {}),
+            ...readOptions,
+          })
+          void scrolled
+          const current = activeTab(tab)
+          recordTab(current)
+          // The offset is read independently before and after: a wheel event
+          // that hits the page edge moves nothing, and only the measured
+          // offset can tell that apart from a real scroll.
+          const afterOffset =
+            browser.scrollPosition === undefined || beforeOffset === undefined
+              ? undefined
+              : await browser
+                  .scrollPosition({ ...(tab === undefined ? {} : { tabId: tab }), ...readOptions })
+                  .catch(() => undefined)
+          const moved =
+            beforeOffset !== undefined &&
+            afterOffset !== undefined &&
+            (beforeOffset.x !== afterOffset.x || beforeOffset.y !== afterOffset.y)
+          const verification: Verification = moved
+            ? {
+                status: "verified" as const,
+                message: "An independent scroll-position read shows the page offset moved.",
+                method: "browser-scroll-readback",
+                evidence: [
+                  {
+                    kind: "browser-scroll",
+                    value: JSON.stringify({ before: beforeOffset, after: afterOffset }),
+                  },
+                ],
+              }
+            : unverified(
+                beforeOffset === undefined || afterOffset === undefined
+                  ? "The scroll position could not be read back after the scroll."
+                  : "The scroll offset did not move; the page may already be at its edge in that direction.",
+                "browser-scroll-readback",
+              )
+          return ok(
+            `Scrolled the page by ${Math.round(deltaX)},${Math.round(deltaY)} pixels${
+              afterOffset === undefined ? "" : ` to offset ${Math.round(afterOffset.x)},${Math.round(afterOffset.y)}`
+            }.`,
+            {
+              scrolled: {
+                deltaX: Math.round(deltaX),
+                deltaY: Math.round(deltaY),
+                ...(beforeOffset === undefined
+                  ? {}
+                  : { before: { x: beforeOffset.x, y: beforeOffset.y } }),
+                ...(afterOffset === undefined ? {} : { after: { x: afterOffset.x, y: afterOffset.y } }),
               },
               ...(current === undefined ? {} : { tab: current }),
             },

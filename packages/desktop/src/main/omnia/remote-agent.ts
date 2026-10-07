@@ -417,6 +417,7 @@ interface BrowserParams {
   expectedMessage?: string
   from?: { tabId?: string; sessionId?: string; id?: string; x?: number; y?: number }
   to?: { tabId?: string; sessionId?: string; id?: string; x?: number; y?: number }
+  input?: { tabId?: string; sessionId?: string; deltaX?: number; deltaY?: number; x?: number; y?: number }
   options?: { offset?: number; limit?: number; maxChars?: number; role?: string; sessionId?: string }
   target?: {
     tabId?: string
@@ -490,6 +491,28 @@ export function createRemoteBrowserHandler(runtime: Browser.BrowserRuntime): Rem
           return Promise.reject(new Error("The drag command needs a to element id or coordinates."))
         }
         return runtime.drag(from, to)
+      }
+      case "scroll": {
+        const input: NonNullable<BrowserParams["input"]> = params.input ?? {}
+        return runtime.scroll({
+          ...(stringOrUndefined(input.tabId) === undefined ? {} : { tabId: stringOrUndefined(input.tabId) }),
+          ...(stringOrUndefined(input.sessionId) === undefined
+            ? {}
+            : { sessionId: stringOrUndefined(input.sessionId) }),
+          ...(typeof input.deltaX === "number" ? { deltaX: input.deltaX } : {}),
+          ...(typeof input.deltaY === "number" ? { deltaY: input.deltaY } : {}),
+          ...(typeof input.x === "number" ? { x: input.x } : {}),
+          ...(typeof input.y === "number" ? { y: input.y } : {}),
+        })
+      }
+      case "scrollPosition": {
+        const input: NonNullable<BrowserParams["input"]> = params.input ?? {}
+        return runtime.scrollPosition({
+          ...(stringOrUndefined(input.tabId) === undefined ? {} : { tabId: stringOrUndefined(input.tabId) }),
+          ...(stringOrUndefined(input.sessionId) === undefined
+            ? {}
+            : { sessionId: stringOrUndefined(input.sessionId) }),
+        })
       }
       case "type": {
         const target = browserTarget(params.target)

@@ -206,6 +206,33 @@ describe("computer browser parameters", () => {
     }),
   )
 
+  it.instance("scroll needs a delta and forwards it with the position", () =>
+    Effect.gen(function* () {
+      resetMock()
+      const exit = yield* withEnv(() => execBrowser({ action: "scroll" })).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      const message = Exit.isFailure(exit) ? Cause.pretty(exit.cause) : ""
+      expect(message).toContain("deltaX or deltaY")
+      expect(mock.bodies).toHaveLength(0)
+
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          result: {
+            success: true,
+            message: "Scrolled the page by 0,800 pixels to offset 0,800.",
+            metadata: { scrolled: { deltaX: 0, deltaY: 800, before: { x: 0, y: 0 }, after: { x: 0, y: 800 } } },
+            verification: { status: "verified", message: "An independent scroll-position read shows the page offset moved." },
+          },
+        })
+      const output = yield* withEnv(() => execBrowser({ action: "scroll", deltaY: 800, x: 400, y: 300 }))
+      expect(output.title).toContain("Scrolled page by 0,800")
+      expect(output.output).toContain("to offset 0,800")
+      expect(mock.bodies).toHaveLength(1)
+      expect(mock.bodies[0]).toMatchObject({ action: "browser_scroll", deltaY: 800, x: 400, y: 300 })
+    }),
+  )
+
   it.instance("rejects unsafe save_image paths before calling the server", () =>
     Effect.gen(function* () {
       resetMock()

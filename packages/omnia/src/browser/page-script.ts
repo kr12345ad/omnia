@@ -520,6 +520,10 @@ export function buildViewportExpression(): string {
   return `JSON.stringify({ width: window.innerWidth, height: window.innerHeight })`
 }
 
+export function buildScrollPositionExpression(): string {
+  return `JSON.stringify({ x: window.scrollX, y: window.scrollY })`
+}
+
 export function buildDocumentIdExpression(): string {
   return `(() => {
     ${REF_HELPERS}

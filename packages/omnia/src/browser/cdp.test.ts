@@ -631,6 +631,28 @@ describe("cdp runtime", () => {
     expect(transport.callsOf("Input.dispatchMouseEvent")).not.toEqual([])
   })
 
+  test("scroll dispatches a wheel event and reads the scroll position independently", async () => {
+    const transport = tabbedTransport(new FakeTransport(), [{ id: "tab-1", url: "https://example.test" }])
+    transport.handle("Runtime.evaluate", (params) => {
+      if (isReadyState(params.expression)) return readyState()
+      if (typeof params.expression === "string" && params.expression.includes("innerWidth")) {
+        return jsonValue({ width: 800, height: 600 })
+      }
+      if (typeof params.expression === "string" && params.expression.includes("scrollX")) {
+        return jsonValue({ x: 0, y: 120 })
+      }
+      return jsonValue({})
+    })
+    const runtime = new CdpRuntime({ endpoint: "ws://127.0.0.1:9", token: "bridge-token", transport })
+
+    await runtime.scroll({ deltaY: 800 })
+    expect(transport.callsOf("Input.dispatchMouseEvent").map((call) => call.params)).toEqual([
+      { type: "mouseWheel", x: 400, y: 300, deltaX: 0, deltaY: 800 },
+    ])
+    expect(await runtime.scrollPosition()).toEqual({ x: 0, y: 120 })
+    expect(transport.callsOf("Input.dispatchMouseEvent").every((call) => call.tabId === "tab-1")).toBe(true)
+  })
+
   test("activates a tab before navigating and lists embedded tabs", async () => {
     const order: string[] = []
     const transport = new FakeTransport()

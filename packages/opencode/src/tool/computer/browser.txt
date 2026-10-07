@@ -44,6 +44,10 @@ Actions:
   Each endpoint is a target id (fromTarget/toTarget) or x/y pixels
   (fromX/fromY/toX/toY). A page re-render alone does not prove the right item
   landed in the right target: re-read both after the drag to verify the effect.
+- scroll: scroll the page by deltaX/deltaY CSS pixels with a real wheel event
+  (positive deltaY scrolls down), optionally at an x/y position. Verified only
+  when an independent scroll-position read shows the offset moved; an unmoved
+  offset means the page is already at its edge.
 - type: type into a found field; the result reports whether the value was
   read back as verified. Pass credential to enter a stored credential
   instead of text: "auto" matches by page URL, or an id/name picks one

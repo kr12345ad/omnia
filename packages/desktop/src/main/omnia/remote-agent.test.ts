@@ -675,3 +675,32 @@ describe("agent working input freeze", () => {
     }
   })
 })
+
+describe("remote browser scroll dispatch", () => {
+  test("scroll and scrollPosition reach the embedded runtime with intact params", async () => {
+    const calls: Array<{ method: string; params: unknown }> = []
+    const runtime = {
+      scroll: async (options: unknown) => {
+        calls.push({ method: "scroll", params: options })
+      },
+      scrollPosition: async (options: unknown) => {
+        calls.push({ method: "scrollPosition", params: options })
+        return { x: 0, y: 800 }
+      },
+    }
+    const dispatch = remoteAgent.createRemoteBrowserHandler(
+      runtime as unknown as Parameters<typeof remoteAgent.createRemoteBrowserHandler>[0],
+    )
+    await dispatch({
+      operation: "scroll",
+      params: { input: { tabId: "tab-1", deltaY: 800, x: 400, y: 300 } },
+    })
+    expect(calls).toEqual([
+      { method: "scroll", params: { tabId: "tab-1", deltaY: 800, x: 400, y: 300 } },
+    ])
+    await expect(
+      dispatch({ operation: "scrollPosition", params: { input: { tabId: "tab-1" } } }),
+    ).resolves.toEqual({ x: 0, y: 800 })
+    expect(calls[1]).toEqual({ method: "scrollPosition", params: { tabId: "tab-1" } })
+  })
+})

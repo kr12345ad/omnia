@@ -52,6 +52,8 @@ export interface ActionFields {
   rows?: readonly (readonly unknown[])[]
   x?: number
   y?: number
+  deltaX?: number
+  deltaY?: number
   from?: ActionEndpoint
   to?: ActionEndpoint
   command?: string
@@ -370,4 +372,6 @@ export function validateAction(fields: ActionFields): void {
     throw new Error("The browser_select action requires target and value or text.")
   if (action === "browser_drag" && (!endpointDefined(fields.from) || !endpointDefined(fields.to)))
     throw new Error("The browser_drag action requires from and to endpoints with an elementId or x/y coordinates.")
+  if (action === "browser_scroll" && fields.deltaX === undefined && fields.deltaY === undefined)
+    throw new Error("The browser_scroll action requires deltaX or deltaY in CSS pixels.")
 }

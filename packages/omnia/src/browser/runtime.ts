@@ -255,6 +255,12 @@ export class BrowserRuntime {
     return this.embeddedRuntime().scroll(options)
   }
 
+  async scrollPosition(
+    options: { tabId?: string; sessionId?: string } = {},
+  ): Promise<{ x: number; y: number }> {
+    return this.embeddedRuntime().scrollPosition(options)
+  }
+
   async screenshot(tabId?: string, sessionId?: string): Promise<{ mimeType: string; data: string }> {
     return this.embeddedRuntime().screenshot(tabId, sessionId)
   }

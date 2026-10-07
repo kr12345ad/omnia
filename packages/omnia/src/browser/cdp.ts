@@ -31,6 +31,7 @@ import {
   buildReadExpression,
   buildRectExpression,
   buildSelectExpression,
+  buildScrollPositionExpression,
   buildTypeExpression,
   buildTypeFocusExpression,
   buildValueExpression,
@@ -1857,6 +1858,22 @@ export class CdpRuntime {
       },
       context,
     )
+  }
+
+  // The scrolled offset after a wheel event, so a scroll can be verified by an
+  // independent read instead of assumed from the dispatched input.
+  async scrollPosition(
+    options: { tabId?: string; sessionId?: string } = {},
+  ): Promise<{ x: number; y: number }> {
+    await this.authorizeBrowserOperation()
+    const context = await this.resolveTab(options.tabId, options.sessionId)
+    const position = (await this.evaluateJsonOn(context, buildScrollPositionExpression()).catch(() => undefined)) as
+      | { x?: number; y?: number }
+      | undefined
+    if (typeof position?.x !== "number" || typeof position?.y !== "number") {
+      throw new CdpError("scroll_unavailable", "The page did not report its scroll position.")
+    }
+    return { x: position.x, y: position.y }
   }
 
   async screenshot(tabId?: string, sessionId?: string): Promise<{ mimeType: string; data: string }> {

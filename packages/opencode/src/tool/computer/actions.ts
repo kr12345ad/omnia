@@ -78,6 +78,7 @@ export const BROWSER_ACTIONS = [
   "browser_hover",
   "browser_select",
   "browser_drag",
+  "browser_scroll",
   "browser_upload",
 ] as const
 

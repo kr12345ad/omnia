@@ -24,6 +24,7 @@ export const Parameters = Schema.Struct({
     "hover",
     "select",
     "drag",
+    "scroll",
     "type",
     "login",
     "key",
@@ -150,6 +151,12 @@ export const Parameters = Schema.Struct({
   y: Schema.optional(
     Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(MAX_COORDINATE)),
   ).annotate({ description: "Viewport pixel y for click." }),
+  deltaX: Schema.optional(
+    Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(-20000), Schema.isLessThanOrEqualTo(20000)),
+  ).annotate({ description: "Horizontal scroll pixels for the scroll action; positive scrolls right." }),
+  deltaY: Schema.optional(
+    Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(-20000), Schema.isLessThanOrEqualTo(20000)),
+  ).annotate({ description: "Vertical scroll pixels for the scroll action; positive scrolls down." }),
 })
 
 type BrowserResponse = {
@@ -185,6 +192,12 @@ type BrowserResponse = {
         x?: number
         y?: number
         rect?: { x: number; y: number; width: number; height: number }
+      }
+      scrolled?: {
+        deltaX: number
+        deltaY: number
+        before?: { x: number; y: number }
+        after?: { x: number; y: number }
       }
       tabs?: Array<{ id: string; url: string; title?: string }>
       images?: Array<{
@@ -308,6 +321,9 @@ export const ComputerBrowserTool = Tool.define<typeof Parameters, Record<string,
           ) {
             throw new Error("The drag action requires from/to as a target id or x/y coordinates.")
           }
+          if (params.action === "scroll" && params.deltaX === undefined && params.deltaY === undefined) {
+            throw new Error("The scroll action requires deltaX or deltaY in CSS pixels.")
+          }
           if (
             (params.action === "save_image" || params.action === "copy_image") &&
             !params.target &&
@@ -398,6 +414,8 @@ export const ComputerBrowserTool = Tool.define<typeof Parameters, Record<string,
             ...(params.offset === undefined ? {} : { offset: params.offset }),
             ...(params.x === undefined ? {} : { x: params.x }),
             ...(params.y === undefined ? {} : { y: params.y }),
+            ...(params.deltaX === undefined ? {} : { deltaX: params.deltaX }),
+            ...(params.deltaY === undefined ? {} : { deltaY: params.deltaY }),
             ...(params.path === undefined ? {} : { path: params.path }),
             ...(params.name === undefined ? {} : { name: params.name }),
             ...(params.files === undefined ? {} : { files: params.files }),
@@ -496,6 +514,9 @@ function renderMetadata(lines: string[], metadata: NonNullable<BrowserResponse["
   }
   if (metadata.clicked !== undefined && metadata.clicked.x !== undefined) {
     lines.push(untrustedEnvelope({ kind: "browser-click", clicked: metadata.clicked }))
+  }
+  if (metadata.scrolled !== undefined) {
+    lines.push(untrustedEnvelope({ kind: "browser-scroll", scrolled: metadata.scrolled }))
   }
   if (typeof metadata.tab === "string") lines.push(`tab=${escapeUntrusted(metadata.tab)}`)
   else if (metadata.tab !== undefined) {
@@ -613,6 +634,13 @@ function browserTitle(action: string, metadata: NonNullable<BrowserResponse["res
       ? `Browser running (${escapeUntrusted(metadata.status.browser ?? "unknown")})`
       : "Browser not running"
   if (action === "dialog") return `Answered ${escapeUntrusted(metadata.dialog?.type ?? "page")} dialog`
+  if (action === "scroll" && metadata.scrolled !== undefined) {
+    const after =
+      metadata.scrolled.after === undefined
+        ? ""
+        : ` to ${Math.round(metadata.scrolled.after.x)},${Math.round(metadata.scrolled.after.y)}`
+    return `Scrolled page by ${metadata.scrolled.deltaX},${metadata.scrolled.deltaY}${after}`
+  }
   if (action === "upload") return `Uploaded ${metadata.files?.length ?? 0} file(s) to the page`
   if (action === "downloads") return `${metadata.downloads?.length ?? 0} browser download(s)`
   if (action === "auth") return `Answered HTTP auth${metadata.host === undefined ? "" : ` for ${escapeUntrusted(metadata.host)}`}`

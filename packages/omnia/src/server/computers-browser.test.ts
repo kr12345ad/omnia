@@ -254,6 +254,63 @@ describe("browser verification uses per-action readback", () => {
     expect(state.readCalls).toBe(2)
   })
 
+  test("scroll verifies when an independent position read shows the offset moved", async () => {
+    const positions = [
+      { x: 0, y: 0 },
+      { x: 0, y: 800 },
+    ]
+    const { browser } = browserHarness({
+      scroll: async () => undefined,
+      scrollPosition: async () => positions.shift() ?? { x: 0, y: 800 },
+    })
+    const { manager } = createManager(baseDriver(), { browser })
+
+    const outcome = await manager.execute("local", {
+      action: "browser_scroll",
+      deltaY: 800,
+      sessionId: "s",
+    })
+
+    expect(outcome.result.success).toBe(true)
+    expect(outcome.result.verification?.status).toBe("verified")
+    expect(outcome.result.verification?.method).toBe("browser-scroll-readback")
+    expect(outcome.result.metadata).toMatchObject({
+      scrolled: { deltaX: 0, deltaY: 800, before: { x: 0, y: 0 }, after: { x: 0, y: 800 } },
+    })
+  })
+
+  test("scroll stays unverified at the page edge instead of claiming movement", async () => {
+    const { browser } = browserHarness({
+      scroll: async () => undefined,
+      scrollPosition: async () => ({ x: 0, y: 0 }),
+    })
+    const { manager } = createManager(baseDriver(), { browser })
+
+    const outcome = await manager.execute("local", {
+      action: "browser_scroll",
+      deltaY: 800,
+      sessionId: "s",
+    })
+
+    expect(outcome.result.success).toBe(true)
+    expect(outcome.result.verification?.status).toBe("unverified")
+    expect(outcome.result.verification?.method).toBe("browser-scroll-readback")
+    expect(outcome.result.verification?.message).toContain("at its edge")
+  })
+
+  test("scroll without deltas is rejected before touching the page", async () => {
+    const { browser, state } = browserHarness({
+      scroll: async () => undefined,
+      scrollPosition: async () => ({ x: 0, y: 0 }),
+    })
+    const { manager } = createManager(baseDriver(), { browser })
+
+    const outcome = await manager.execute("local", { action: "browser_scroll", sessionId: "s" })
+
+    expect(outcome.result.success).toBe(false)
+    expect(state.readCalls).toBe(0)
+  })
+
   test("back/forward verify on an independent URL change", async () => {
     const { browser } = browserHarness({
       back: async () => {
