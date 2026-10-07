@@ -19,6 +19,7 @@ import PROMPT_DISCUSSION_STRATEGIST from "./prompt/discussion-strategist.txt"
 import PROMPT_DISCUSSION_BUILDER from "./prompt/discussion-builder.txt"
 import PROMPT_DISCUSSION_RESEARCHER from "./prompt/discussion-researcher.txt"
 import PROMPT_DISCUSSION_CRITIC from "./prompt/discussion-critic.txt"
+import PROMPT_DISCUSSION_SPECIALIST from "./prompt/discussion-specialist.txt"
 import { Permission } from "@/permission"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
 import { Global } from "@opencode-ai/core/global"
@@ -274,7 +275,7 @@ const layer = Layer.effect(
           "discussion-manager": {
             name: "discussion-manager",
             description:
-              "Manager of a five-agent discussion room. Frames the problem, runs the rounds, decides, and assigns one piece of work to each specialist.",
+              "Manager of a discussion room. Frames the problem, runs the rounds, decides, and assigns one piece of work to each specialist.",
             prompt: PROMPT_DISCUSSION_MANAGER,
             options: {},
             temperature: 0.2,
@@ -287,6 +288,25 @@ const layer = Layer.effect(
                 task: {
                   "*": "deny",
                 },
+              }),
+              user,
+            ),
+          },
+          "discussion-specialist": {
+            name: "discussion-specialist",
+            description:
+              "Specialist in a discussion room with a role card supplied by the tool. Executes assigned work and can delegate independent parts.",
+            prompt: PROMPT_DISCUSSION_SPECIALIST,
+            options: {},
+            temperature: 0.2,
+            mode: "subagent",
+            native: true,
+            hidden: true,
+            permission: Permission.merge(
+              defaults,
+              Permission.fromConfig({
+                todowrite: "allow",
+                task: "allow",
               }),
               user,
             ),

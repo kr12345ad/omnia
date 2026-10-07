@@ -1,6 +1,6 @@
 Run an autonomous discussion room for a topic.
 
-A discussion room is a meeting of five agents: one manager and four specialists (strategist, builder, researcher, critic). The manager frames the problem, the specialists give positions in rounds, the manager synthesizes a decision and assigns one concrete piece of work to each specialist, and then every specialist breaks off to execute its assignment — spawning its own subagents when the work splits into independent parts.
+A discussion room is a meeting of a manager and a roster of specialists (four by default; Pro and above can customize). The manager frames the problem, the specialists give positions in rounds, the manager synthesizes a decision and assigns one concrete piece of work to each specialist, and then every specialist breaks off to execute its assignment — spawning its own subagents when the work splits into independent parts.
 
 Use this tool when a task needs a real decision plus parallel execution: strategy calls, architecture choices, research plans, launch plans, incident postmortems, or any request that benefits from several independent viewpoints converging before work starts.
 
