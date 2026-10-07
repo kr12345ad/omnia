@@ -207,6 +207,22 @@ describe("websocket bridge", () => {
     socket.destroy()
     await bridge.close()
   })
+
+  test("fires onClose when a client disconnects", async () => {
+    const closed: unknown[] = []
+    const bridge = await startWebSocketBridge({
+      token: "test-token",
+      onMessage: () => undefined,
+      onClose: (client) => closed.push(client),
+    })
+    const socket = new WebSocket(`${bridge.endpoint}/?token=test-token`)
+    await opened(socket)
+    await waitUntil(() => bridge.clients === 1)
+    socket.close()
+    await waitUntil(() => closed.length === 1)
+    expect(bridge.clients).toBe(0)
+    await bridge.close()
+  })
 })
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<void> {

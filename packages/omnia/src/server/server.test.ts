@@ -1268,6 +1268,100 @@ describe("omnia server", () => {
     }
   })
 
+  test("a disabled superskill cannot be called through the API", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omnia-superskill-disabled-"))
+    writeFileSync(
+      join(dir, "echo.py"),
+      `import json\nimport sys\nfor line in sys.stdin:\n    request = json.loads(line)\n    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": request.get("params")}), flush=True)\n`,
+    )
+    const server = await startOmniaServer({
+      drivers: [createFakeDriver()],
+      browser: createFakeBrowser(),
+      superskillFile: join(dir, "superskills.json"),
+    })
+    try {
+      const saved = await fetch(`${server.url}/v1/superskills`, {
+        method: "POST",
+        headers: headers(server),
+        body: JSON.stringify({
+          id: "off",
+          name: "Off",
+          description: "Disabled.",
+          enabled: false,
+          bridge: { type: "stdio", command: `python3 ${join(dir, "echo.py")}` },
+          methods: [{ name: "ping", description: "Echo." }],
+        }),
+      })
+      expect(saved.status).toBe(200)
+
+      const called = await fetch(`${server.url}/v1/superskills/off/call`, {
+        method: "POST",
+        headers: headers(server),
+        body: JSON.stringify({ method: "ping", params: {} }),
+      })
+      expect(called.status).toBe(403)
+    } finally {
+      await server.stop()
+    }
+  })
+
+  test("declared superskill scopes cannot relax the bridge-type requirement", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omnia-superskill-relax-"))
+    writeFileSync(
+      join(dir, "echo.py"),
+      `import json\nimport sys\nfor line in sys.stdin:\n    request = json.loads(line)\n    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": request.get("params")}), flush=True)\n`,
+    )
+    const server = await startOmniaServer({
+      drivers: [createFakeDriver()],
+      browser: createFakeBrowser(),
+      superskillFile: join(dir, "superskills.json"),
+    })
+    try {
+      const saved = await fetch(`${server.url}/v1/superskills`, {
+        method: "POST",
+        headers: headers(server),
+        body: JSON.stringify({
+          id: "sneaky",
+          name: "Sneaky",
+          description: "Claims a weaker scope on a command bridge.",
+          enabled: true,
+          bridge: { type: "stdio", command: `python3 ${join(dir, "echo.py")}` },
+          methods: [{ name: "ping", description: "Echo.", scopes: ["SCREEN_READ"] }],
+        }),
+      })
+      expect(saved.status).toBe(200)
+
+      const denied = await fetch(`${server.url}/v1/superskills/sneaky/call`, {
+        method: "POST",
+        headers: headers(server, "session-skill"),
+        body: JSON.stringify({
+          method: "ping",
+          approve: true,
+          approvedScopes: ["SCREEN_READ"],
+          sessionId: "session-skill",
+        }),
+      })
+      expect(denied.status).toBe(428)
+      const deniedBody = (await denied.json()) as { result?: { error?: { details?: { missing?: string[] } } } }
+      expect(deniedBody.result?.error?.details?.missing).toContain("PROCESS_EXECUTE")
+
+      const allowed = await fetch(`${server.url}/v1/superskills/sneaky/call`, {
+        method: "POST",
+        headers: headers(server, "session-skill"),
+        body: JSON.stringify({
+          method: "ping",
+          params: { value: 3 },
+          approve: true,
+          approvedScopes: ["SCREEN_READ", "PROCESS_EXECUTE"],
+          sessionId: "session-skill",
+        }),
+      })
+      expect(allowed.status).toBe(200)
+    } finally {
+      await server.stop()
+    }
+  })
+
   test("stores and recalls memories with permission checks", async () => {
     const dir = mkdtempSync(join(tmpdir(), "omnia-memory-api-"))
     const server = await startOmniaServer({

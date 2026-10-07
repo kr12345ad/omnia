@@ -128,6 +128,11 @@ interface ManagedPage {
   pageEnabled: boolean
   dialog: BrowserPanelDialog | undefined
   fileChooser: { readonly backendNodeId: number; readonly mode?: string } | undefined
+  // The controller's Fetch interception pauses every request the page makes
+  // until a continue/fail command arrives. Both pieces of state are tracked so
+  // a controller whose socket drops cannot strand the page mid-navigation.
+  fetchArmed: boolean
+  readonly fetchPaused: Map<string, string>
 }
 
 interface PendingOpen {
@@ -251,6 +256,13 @@ export class EmbeddedBrowserManager {
     const bridge = await startWebSocketBridge({
       token,
       onMessage: (client, message) => void this.handleBridgeMessage(client, message),
+      // A paused Fetch request waits on a continue/fail command that only a
+      // connected controller can send. With no client left those pauses never
+      // resolve, so the last disconnect disarms interception and settles the
+      // pending requests here instead of hanging the tab forever.
+      onClose: () => {
+        if (bridge.clients === 0) this.releaseInterceptions()
+      },
     })
     this.bridge = bridge
     return { endpoint: bridge.endpoint, token }
@@ -661,7 +673,45 @@ export class EmbeddedBrowserManager {
       this.removePage(page.id)
       throw new CdpBridgeError("not_available", "The embedded browser page is closed.")
     }
-    return this.ensurePageDebugger(page).sendCommand(method, params)
+    const result = this.ensurePageDebugger(page).sendCommand(method, params)
+    void Promise.resolve(result).then(() => this.trackFetchCommand(page, method, params), () => undefined)
+    return result
+  }
+
+  private trackFetchCommand(page: ManagedPage, method: string, params: Record<string, unknown>): void {
+    if (method === "Fetch.enable") {
+      page.fetchArmed = true
+      return
+    }
+    if (method === "Fetch.disable") {
+      page.fetchArmed = false
+      page.fetchPaused.clear()
+      return
+    }
+    if (
+      (method === "Fetch.continueRequest" || method === "Fetch.failRequest" || method === "Fetch.fulfillRequest") &&
+      typeof params.requestId === "string"
+    ) {
+      page.fetchPaused.delete(params.requestId)
+    }
+  }
+
+  private releaseInterceptions(): void {
+    for (const page of this.pages.values()) {
+      if ((!page.fetchArmed && page.fetchPaused.size === 0) || page.webContents.isDestroyed()) continue
+      for (const [requestId, url] of page.fetchPaused) {
+        void page.webContents.debugger
+          .sendCommand(
+            isAllowedBrowserUrl(url) ? "Fetch.continueRequest" : "Fetch.failRequest",
+            isAllowedBrowserUrl(url) ? { requestId } : { requestId, errorReason: "BlockedByClient" },
+          )
+          .catch(() => undefined)
+      }
+      page.fetchPaused.clear()
+      if (!page.fetchArmed) continue
+      page.fetchArmed = false
+      void page.webContents.debugger.sendCommand("Fetch.disable").catch(() => undefined)
+    }
   }
 
   // Electron's <webview> runs JavaScript dialogs through the embedder unless a
@@ -699,6 +749,8 @@ export class EmbeddedBrowserManager {
         // The controller's Fetch interception and its isolated world live in
         // this debugger, so a detach has to be reported: keeping either would
         // leave a paused request or a ref map the page can no longer reach.
+        page.fetchArmed = false
+        page.fetchPaused.clear()
         this.broadcastEvent(page, "Inspector.detached", { reason: "target_closed" })
       })
     }
@@ -728,6 +780,16 @@ export class EmbeddedBrowserManager {
   }
 
   private handleDebuggerEvent(page: ManagedPage, method: string, params: unknown): void {
+    if (method === "Fetch.requestPaused") {
+      const record = typeof params === "object" && params !== null ? (params as Record<string, unknown>) : {}
+      const request =
+        typeof record.request === "object" && record.request !== null
+          ? (record.request as Record<string, unknown>)
+          : {}
+      if (typeof record.requestId === "string") {
+        page.fetchPaused.set(record.requestId, typeof request.url === "string" ? request.url : "")
+      }
+    }
     if (method === "Page.javascriptDialogOpening") {
       page.dialog = dialogFromEvent(params)
       this.broadcastEvent(page, method, params)
@@ -1063,6 +1125,8 @@ export class EmbeddedBrowserManager {
       pageEnabled: false,
       dialog: undefined,
       fileChooser: undefined,
+      fetchArmed: false,
+      fetchPaused: new Map(),
     }
     this.pages.set(page.id, page)
     const sync = () => {

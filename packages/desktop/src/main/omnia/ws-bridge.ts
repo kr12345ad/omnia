@@ -63,7 +63,10 @@ export async function startWebSocketBridge(options: WebSocketBridgeOptions): Pro
         "",
       ].join("\r\n"),
     )
-    const connection = new BridgeConnection(socket, options, () => open.delete(connection))
+    const connection = new BridgeConnection(socket, options, () => {
+      open.delete(connection)
+      options.onClose?.(connection)
+    })
     open.add(connection)
   })
   await new Promise<void>((resolve, reject) => {
