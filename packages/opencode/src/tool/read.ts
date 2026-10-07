@@ -15,7 +15,10 @@ const MAX_LINE_LENGTH = 2000
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 const MAX_BYTES = 50 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
-const SAMPLE_BYTES = 4096
+// Inspect every byte that could later be emitted. Sampling only the first 4 KB
+// let a JavaScript bundle with an embedded PNG after that point pass as text and
+// leak raw image bytes into the conversation.
+const SAMPLE_BYTES = MAX_BYTES
 const SUPPORTED_IMAGE_MIMES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"])
 // An attachment is base64-encoded into a single `data:` URL, so the process
 // holds roughly 2.3x the file size as one string. Matches the cap the session
@@ -219,6 +222,12 @@ export const ReadTool = Tool.define<
       }
 
       if (bytes.length === 0) return false
+
+      try {
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+      } catch {
+        return true
+      }
 
       let nonPrintableCount = 0
       for (let i = 0; i < bytes.length; i++) {

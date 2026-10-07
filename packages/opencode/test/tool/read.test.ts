@@ -605,4 +605,19 @@ describe("tool.read binary detection", () => {
       expect(err.message).toContain("Cannot read binary file")
     }),
   )
+
+  it.live("rejects binary bytes after a text bundle prefix", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      // The old 4 KB probe saw only this plausible JavaScript/grammar prefix,
+      // then streamed the embedded PNG bytes as chat text.
+      const prefix = Buffer.from(`export default ${JSON.stringify("x".repeat(5_000))};\n`, "utf8")
+      const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d])
+      const file = path.join(dir, "grammar-bundle.js")
+      yield* put(file, Buffer.concat([prefix, png, Buffer.from("trailing")]))
+
+      const err = yield* fail(dir, { filePath: file })
+      expect(err.message).toBe(`Cannot read binary file: ${file}`)
+    }),
+  )
 })
