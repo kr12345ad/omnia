@@ -1182,4 +1182,15 @@ export const dict = {
   "workspace.reset.archived.many": "{{count}} ဆက်ရှင်များကို သိမ်းဆည်းထားပါမည်။",
   "workspace.reset.note": "၎င်းသည် မူရင်းဌာနခွဲနှင့် ကိုက်ညီစေရန် အလုပ်ခွင်ကို ပြန်လည်သတ်မှတ်ပါမည်။",
   "dialog.usageExceeded.dontShowAgain": "ထပ်မပြပါနှင့်",
+  "settings.usage.title": "Usage limits", // TODO(i18n): needs a native review
+  "settings.usage.description": "What your plan allows, before a limit stops you.", // TODO(i18n): needs a native review
+  "settings.usage.unavailable": "Sign in to see what your plan allows.", // TODO(i18n): needs a native review
+  "settings.usage.unlimited": "Unlimited", // TODO(i18n): needs a native review
+  "settings.usage.allowed": "{{limit}} allowed", // TODO(i18n): needs a native review
+  "settings.usage.used": "{{used}} of {{limit}} used", // TODO(i18n): needs a native review
+  "settings.usage.usedPerDay": "{{used}} of {{limit}} used per day", // TODO(i18n): needs a native review
+  "settings.usage.usedPerMonth": "{{used}} of {{limit}} used this month", // TODO(i18n): needs a native review
+  "settings.usage.sessionLength": "{{minutes}} minutes per remote session", // TODO(i18n): needs a native review
+  "settings.usage.computersUsed": "{{used}} of {{limit}} computers", // TODO(i18n): needs a native review
+  "settings.usage.resetsOn": "Resets {{date}}", // TODO(i18n): needs a native review
 }

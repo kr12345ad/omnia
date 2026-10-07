@@ -2,6 +2,8 @@ import { dict as en } from "./en"
 
 export const dict = {
   // TODO(i18n): needs a native review
+  ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.usage."))),
+  // TODO(i18n): needs a native review
   ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("work.home.discussion.specialists."))),
   "command.category.suggested": "Suggeriti",
   "command.category.view": "Visualizzazione",
