@@ -344,3 +344,118 @@ describe("money is never taken and then dropped", () => {
     })
   })
 })
+
+describe("a dispute withdraws the plan", () => {
+  test("charge.dispute.created revokes the disputed customer's subscription", async () => {
+    await withServer(async (server) => {
+      // The customer pays and holds pro.
+      await deliver(server, {
+        id: "evt_grant",
+        type: "customer.subscription.updated",
+        created: 0,
+        data: { object: subscription({ metadata: { profileId: "230746284" } }) },
+      })
+      const granted = await fetch(`${server.url}/v1/billing/check`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json", "x-omnia-profile": "230746284" },
+        body: JSON.stringify({ capability: "remote_shell" }),
+      })
+      expect((await granted.json()).plan).toBe("pro")
+
+      // Stripe disputes the charge. The dispute payload names the charge, not
+      // the customer, so the webhook must resolve it: the stub asserts the one
+      // lookup it is allowed to make.
+      stubStripe((url) => {
+        expect(url).toBe("https://api.stripe.com/v1/charges/ch_disputed")
+        return new Response(JSON.stringify({ customer: "cus_1" }), { status: 200 })
+      })
+      const delivered = await deliver(server, {
+        id: "evt_dispute",
+        type: "charge.dispute.created",
+        created: 1,
+        data: { object: { id: "dp_1", charge: "ch_disputed", status: "warning_needs_response" } },
+      })
+      expect(delivered.status).toBe(200)
+      expect((await delivered.json()).disputed).toEqual(["sub_1"])
+
+      const revoked = await fetch(`${server.url}/v1/billing/check`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json", "x-omnia-profile": "230746284" },
+        body: JSON.stringify({ capability: "remote_shell" }),
+      })
+      expect(revoked.status).toBe(402)
+    })
+  })
+
+  test("an unattributable dispute fails closed so Stripe retries instead of leaving the plan active", async () => {
+    await withServer(async (server) => {
+      await deliver(server, {
+        id: "evt_grant",
+        type: "customer.subscription.updated",
+        created: 0,
+        data: { object: subscription({ metadata: { profileId: "230746284" } }) },
+      })
+      stubStripe(() => new Response("stripe is down", { status: 500 }))
+      const delivered = await deliver(server, {
+        id: "evt_dispute_down",
+        type: "charge.dispute.created",
+        created: 1,
+        data: { object: { id: "dp_2", charge: "ch_down", status: "warning_needs_response" } },
+      })
+      expect(delivered.status).toBe(503)
+      // The plan survives for now; the retry must land the revocation.
+      const stillActive = await fetch(`${server.url}/v1/billing/check`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json", "x-omnia-profile": "230746284" },
+        body: JSON.stringify({ capability: "remote_shell" }),
+      })
+      expect(stillActive.status).toBe(200)
+
+      stubStripe((url) => {
+        expect(url).toBe("https://api.stripe.com/v1/charges/ch_down")
+        return new Response(JSON.stringify({ customer: "cus_1" }), { status: 200 })
+      })
+      const retried = await deliver(server, {
+        id: "evt_dispute_down_retry",
+        type: "charge.dispute.created",
+        created: 2,
+        data: { object: { id: "dp_2", charge: "ch_down", status: "warning_needs_response" } },
+      })
+      expect(retried.status).toBe(200)
+      const revoked = await fetch(`${server.url}/v1/billing/check`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json", "x-omnia-profile": "230746284" },
+        body: JSON.stringify({ capability: "remote_shell" }),
+      })
+      expect(revoked.status).toBe(402)
+    })
+  })
+
+  test("a dispute with no STRIPE_SECRET_KEY fails closed rather than being acknowledged", async () => {
+    delete process.env.STRIPE_SECRET_KEY
+    await withServer(async (server) => {
+      const delivered = await deliver(server, {
+        id: "evt_dispute_nokey",
+        type: "charge.dispute.created",
+        created: 1,
+        data: { object: { id: "dp_3", charge: "ch_nokey", status: "warning_needs_response" } },
+      })
+      expect(delivered.status).toBe(503)
+    })
+  })
+
+  test("a won dispute never restores the plan from a dispute event alone", async () => {
+    await withServer(async (server) => {
+      // funds_reinstated carries no attribution power: it resolves to no charge
+      // id here, so it must land on the deliberate-ignore path.
+      const delivered = await deliver(server, {
+        id: "evt_dispute_won",
+        type: "charge.dispute.funds_reinstated",
+        created: 3,
+        data: { object: { id: "dp_4", charge: "ch_won", status: "won" } },
+      })
+      expect(delivered.status).toBe(200)
+      expect((await delivered.json()).ignored).toBe(true)
+    })
+  })
+})

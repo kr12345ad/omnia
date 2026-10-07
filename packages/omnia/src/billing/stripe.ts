@@ -445,6 +445,27 @@ export function refundedSubscriptions(
 }
 
 /**
+ * The charge id a dispute event is about, so the caller can attribute it.
+ *
+ * A dispute object names a charge and nothing else: no customer, no
+ * subscription. The events that withdraw money (`charge.dispute.created` and
+ * `charge.dispute.funds_withdrawn`) are the only ones that can justify a
+ * revocation, so those yield the charge id and everything else yields
+ * undefined. `charge.dispute.closed` and `charge.dispute.funds_reinstated`
+ * deliberately yield undefined too: winning a dispute must never restore a
+ * plan from this function, because the withdrawal revoked it and only a real
+ * new purchase should entitle again.
+ */
+export function disputeChargeId(event: StripeEvent): string | undefined {
+  if (event.type !== "charge.dispute.created" && event.type !== "charge.dispute.funds_withdrawn") return undefined
+  if (!isRecord(event.data)) return undefined
+  const object = event.data.object
+  if (!isRecord(object)) return undefined
+  const charge = object.charge
+  return typeof charge === "string" && charge.length > 0 ? charge : undefined
+}
+
+/**
  * Whether an event is acknowledged WITHOUT touching entitlements.
  *
  * THE POLICY for `invoice.payment_failed`: Stripe smart-retries a failed payment

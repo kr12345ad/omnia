@@ -25,6 +25,7 @@ import {
   newOrderingLedger,
   parseStripeEvent,
   planForPrice,
+  disputeChargeId,
   priceIdFromObject,
   recordApplied,
   REFUNDED,
@@ -134,6 +135,32 @@ function loadState(file: string | undefined): { state: BillingState; readable: b
 function stripeSecret(): string | undefined {
   const key = process.env.STRIPE_SECRET_KEY
   return key !== undefined && key.length > 0 ? key : undefined
+}
+
+/**
+ * Resolves the customer behind a charge with one pinned API call. Returns
+ * undefined when the key is missing, Stripe is unreachable, or the payload
+ * does not carry a customer - never guesses, because a wrong attribution
+ * revokes somebody else's plan.
+ */
+async function customerForCharge(chargeId: string): Promise<string | undefined> {
+  const secret = stripeSecret()
+  if (secret === undefined) return undefined
+  try {
+    const response = await fetch(`${STRIPE_API}/charges/${encodeURIComponent(chargeId)}`, {
+      method: "GET",
+      headers: stripeRequestHeaders({ authorization: `Bearer ${secret}` }),
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (response.status !== 200) return undefined
+    const body: unknown = await response.json().catch(() => undefined)
+    if (!isRecord(body)) return undefined
+    const customer = body.customer
+    const id = typeof customer === "string" ? customer : isRecord(customer) ? customer.id : undefined
+    return typeof id === "string" && id.length > 0 ? id : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function priceIdFor(plan: PlanId): string | undefined {
@@ -382,6 +409,33 @@ export async function handleBillingRoute(
         recordApplied(ordering, subscription.subscriptionId, event.created)
       }
       json(response, 200, { ok: true, duplicate: applied.duplicate })
+      return true
+    }
+    // A dispute withdraws the money now, with no refund event: the only sound
+    // attribution is the disputed charge's customer, which Stripe does not put
+    // in the payload, so one pinned lookup resolves it. Failing closed (503)
+    // keeps Stripe retrying rather than leaving a disputed plan active.
+    const disputedCharge = disputeChargeId(event)
+    if (disputedCharge !== undefined) {
+      const customerId = await customerForCharge(disputedCharge)
+      if (customerId === undefined) {
+        json(response, 503, {
+          ok: false,
+          error: "The disputed charge could not be attributed, so no plan was revoked.",
+        })
+        return true
+      }
+      const disputed = state.subscriptions.filter((entry) => entry.customerId === customerId)
+      if (disputed.length > 0) {
+        try {
+          writeBillingState(file, refundSubscriptions(state, disputed, event.id))
+        } catch {
+          json(response, 503, { ok: false, error: "Billing state could not be stored." })
+          return true
+        }
+        for (const entry of disputed) recordApplied(ordering, entry.subscriptionId, event.created)
+      }
+      json(response, 200, { ok: true, disputed: disputed.map((entry) => entry.subscriptionId) })
       return true
     }
     // A refunded charge and a failed invoice payment describe no subscription of
