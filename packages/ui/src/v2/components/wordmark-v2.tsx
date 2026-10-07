@@ -3,6 +3,7 @@ import { createUniqueId, type ComponentProps } from "solid-js"
 export function WordmarkV2(props: Pick<ComponentProps<"svg">, "class">) {
   const mask = createUniqueId()
   const maskGradient = createUniqueId()
+  const gutter = createUniqueId()
 
   return (
     <svg
@@ -13,32 +14,28 @@ export function WordmarkV2(props: Pick<ComponentProps<"svg">, "class">) {
     >
       <g opacity="0.6">
         <g mask={`url(#${mask})`}>
-          <g opacity="0.16" fill-rule="evenodd">
-            <path
-              opacity="0.7"
-              d="M139 18H213V110H139V18ZM157 36H195V92H157V36Z"
-              fill="currentColor"
-            />
-            <path
-              opacity="0.7"
-              d="M231 110V18H249L268 55L287 18H305V110H287V54L268 91L249 54V110H231Z"
-              fill="currentColor"
-            />
-            <path
-              opacity="0.7"
-              d="M323 110V18H341L379 74V18H397V110H379L341 54V110H323Z"
-              fill="currentColor"
-            />
-            <path opacity="0.7" d="M443 18H461V110H443V18Z" fill="currentColor" />
-            <path
-              opacity="0.7"
-              d="M507 110L535 18H553L581 110H563L557.5 91H530.5L525 110H507ZM536 73H552L544 45L536 73Z"
-              fill="currentColor"
-            />
+          <g opacity="0.16" transform="translate(360 64) scale(9.2) translate(-8 -8)">
+            <g opacity="0.7">
+              <rect
+                x="3.5"
+                y="3.5"
+                width="9"
+                height="9"
+                rx="1.5"
+                stroke="currentColor"
+                stroke-width="1"
+                mask={`url(#${gutter})`}
+              />
+              <rect x="9" y="9" width="4" height="4" rx="1" fill="currentColor" />
+            </g>
           </g>
         </g>
       </g>
       <defs>
+        <mask id={gutter} style="mask-type:luminance" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
+          <rect width="16" height="16" fill="white" />
+          <rect x="7.6" y="7.6" width="6" height="6" rx="1.6" fill="black" />
+        </mask>
         <mask id={mask} style="mask-type:alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="720" height="129">
           <rect width="720" height="129" fill={`url(#${maskGradient})`} />
         </mask>
