@@ -5,20 +5,21 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { app } from "electron"
+import { migrateOmniaStorage } from "./omnia-storage"
 
 const execFileAsync = promisify(execFile)
 const root = dirname(fileURLToPath(import.meta.url))
-const desktopStateNames = ["ai.opencode.desktop.dev", "ai.opencode.desktop.beta", "ai.opencode.desktop"]
 
 type Logger = {
   log(message: string, meta?: Record<string, unknown>): void
   error(message: string, meta?: Record<string, unknown>): void
 }
 
-export async function startBackgroundCli(logger: Logger, shellStateHome?: string) {
+export async function startBackgroundCli(logger: Logger, _shellStateHome?: string) {
   // Read here, not at module load: the app assigns its own XDG_STATE_HOME
   // during startup, after this module has already been evaluated.
   const stateHome = process.env.XDG_STATE_HOME
+  await migrateOmniaStorage(process.env.OPENCODE_DB!, process.env.OMNIA_LEGACY_DB)
   const bundled = app.isPackaged
     ? join(process.resourcesPath, executableName())
     : join(root, "../../resources", executableName())
@@ -26,9 +27,7 @@ export async function startBackgroundCli(logger: Logger, shellStateHome?: string
   const version = await run(bundled, ["--version"], logger)
   const binary = app.isPackaged ? await installCli(bundled, version, logger) : bundled
 
-  const candidates = [
-    ...new Set([stateHome, shellStateHome, ...desktopStateNames.map((name) => join(app.getPath("appData"), name))]),
-  ].filter((candidate) => candidate === undefined || existsSync(candidate))
+  const candidates = [stateHome]
   // A candidate without a running service exits non-zero, and a state home
   // that disappears between the check and the probe fails to spawn: one
   // failing probe must not abort the whole startup.

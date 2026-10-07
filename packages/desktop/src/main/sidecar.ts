@@ -1,5 +1,6 @@
 import * as http from "node:http"
 import * as tls from "node:tls"
+import { migrateOmniaStorage, omniaStorageEnv } from "./omnia-storage"
 
 type NodeHttpWithEnvProxy = typeof http & {
   setGlobalProxyFromEnv: () => void
@@ -51,6 +52,7 @@ parentPort.on("message", (event) => {
 async function start(command: StartCommand) {
   try {
     prepareSidecarEnv(command.password, command.userDataPath)
+    await migrateOmniaStorage(process.env.OPENCODE_DB!, process.env.OMNIA_LEGACY_DB)
     ensureLoopbackNoProxy()
     useSystemCertificates()
     useEnvProxy()
@@ -81,11 +83,15 @@ async function stop() {
 }
 
 function prepareSidecarEnv(password: string, userDataPath: string) {
+  const storage = omniaStorageEnv(userDataPath)
   Object.assign(process.env, {
+    ...storage,
     OPENCODE_SERVER_USERNAME: "opencode",
     OPENCODE_SERVER_PASSWORD: password,
-    XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? userDataPath,
   })
+  delete process.env.OPENCODE_CONFIG
+  delete process.env.OPENCODE_CONFIG_DIR
+  delete process.env.OPENCODE_CONFIG_CONTENT
 }
 
 function ensureLoopbackNoProxy() {

@@ -61,7 +61,10 @@ export default defineConfig({
   main: {
     define: {
       "import.meta.env.OPENCODE_CHANNEL": JSON.stringify(channel),
-      "import.meta.env.OMNIA_DISABLE_UPDATES": JSON.stringify(process.env.OMNIA_DISABLE_UPDATES === "1"),
+      // This checkout builds with the updater off: unset or "1" disables it, and
+      // OMNIA_DISABLE_UPDATES=0 opts back in. Packaged builds would otherwise
+      // check the release feed every ten minutes and replace the local build.
+      "import.meta.env.OMNIA_DISABLE_UPDATES": JSON.stringify(process.env.OMNIA_DISABLE_UPDATES !== "0"),
     },
     esbuild: {
       drop: ["console", "debugger"],

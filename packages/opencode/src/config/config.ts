@@ -138,6 +138,8 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Co
 export const use = serviceUse(Service)
 
 function globalConfigFile() {
+  const omnia = ConfigPaths.omniaConfigFile()
+  if (omnia) return omnia
   const candidates = ["opencode.jsonc", "opencode.json", "config.json"].map((file) =>
     path.join(Global.Path.config, file),
   )
@@ -184,6 +186,10 @@ const layer = Layer.effect(
     const http = yield* HttpClient.HttpClient
 
     const readConfigFile = (filepath: string) => fs.readFileStringSafe(filepath).pipe(Effect.orDie)
+    const writeConfigFile = (file: string, contents: string) =>
+      ConfigPaths.omniaConfigFile()
+        ? Effect.promise(() => ConfigPaths.writeOmniaConfig(file, contents))
+        : fs.writeFileString(file, contents)
 
     const decodeConfig = Effect.fnUntraced(function* (input: unknown, source: string) {
       const result = ConfigV2Compat.lower(normalizeLoadedConfig(input), source)
@@ -245,7 +251,9 @@ const layer = Layer.effect(
       if (!data.$schema) {
         data.$schema = "https://opencode.ai/config.json"
         const updated = text.replace(/^\s*\{/, '{\n  "$schema": "https://opencode.ai/config.json",')
-        yield* fs.writeFileString(options.path, updated).pipe(Effect.catch(() => Effect.void))
+        if (!ConfigPaths.omniaConfigFile() || path.basename(options.path) === "OMNIA.json") {
+          yield* writeConfigFile(options.path, updated).pipe(Effect.catch(() => Effect.void))
+        }
       }
       return data
     })
@@ -258,6 +266,13 @@ const layer = Layer.effect(
     })
 
     const loadGlobal = Effect.fnUntraced(function* (env?: Record<string, string>) {
+      const omnia = ConfigPaths.omniaConfigFile()
+      if (omnia) {
+        if (!existsSync(omnia)) {
+          yield* writeConfigFile(omnia, JSON.stringify({ $schema: "https://opencode.ai/config.json" }, null, 2))
+        }
+        return yield* loadFile(omnia, env)
+      }
       let result: Info = {}
       // Seed the default global config with the schema for editor completion, but avoid writing when the user
       // explicitly routes config through env-provided paths or content.
@@ -446,7 +461,9 @@ const layer = Layer.effect(
 
         for (const dir of directories) {
           if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
-            for (const file of ["opencode.json", "opencode.jsonc"]) {
+            for (const file of ConfigPaths.omniaConfigFile()
+              ? ["opencode.json", "opencode.jsonc", "OMNIA.json"]
+              : ["opencode.json", "opencode.jsonc"]) {
               const source = path.join(dir, file)
               yield* Effect.logDebug(`loading config from ${source}`)
               yield* merge(source, yield* loadFile(source, authEnv))
@@ -646,16 +663,14 @@ const layer = Layer.effect(
 
     const update = Effect.fn("Config.update")(function* (config: Info) {
       const dir = yield* InstanceState.directory
-      const file = path.join(dir, "config.json")
+      const file = path.join(dir, ConfigPaths.omniaConfigFile() ? "OMNIA.json" : "config.json")
       const existing = yield* loadFile(file)
       const text = yield* readConfigFile(file)
       const original = text ? ConfigParse.jsonc(text, file) : writable(existing)
-      yield* fs
-        .writeFileString(
-          file,
-          JSON.stringify(mergeDeep(isRecord(original) ? original : writable(existing), writable(config)), null, 2),
-        )
-        .pipe(Effect.orDie)
+      yield* writeConfigFile(
+        file,
+        JSON.stringify(mergeDeep(isRecord(original) ? original : writable(existing), writable(config)), null, 2),
+      ).pipe(Effect.orDie)
     })
 
     const invalidate = Effect.fn("Config.invalidate")(function* () {
@@ -676,12 +691,12 @@ const layer = Layer.effect(
         const serialized = JSON.stringify(merged, null, 2)
         next = yield* decodeConfig(merged, file)
         changed = serialized !== before
-        if (changed) yield* fs.writeFileString(file, serialized).pipe(Effect.orDie)
+        if (changed) yield* writeConfigFile(file, serialized).pipe(Effect.orDie)
       } else {
         const updated = patchJsonc(before, patch)
         next = yield* decodeConfig(ConfigParse.jsonc(updated, file), file)
         changed = updated !== before
-        if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
+        if (changed) yield* writeConfigFile(file, updated).pipe(Effect.orDie)
       }
 
       if (changed) yield* invalidate()

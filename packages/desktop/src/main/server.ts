@@ -8,6 +8,7 @@ import { controlPlaneAuth } from "./omnia/control-plane"
 import { getUserShell, loadShellEnv } from "./shell-env"
 import { getStore } from "./store"
 import { DEFAULT_SERVER_URL_KEY } from "./store-keys"
+import { omniaStorageEnv } from "./omnia-storage"
 
 export type HealthCheck = { wait: Promise<void> }
 
@@ -51,8 +52,11 @@ export function preferAppEnv(userDataPath: string) {
     OPENCODE_EXPERIMENTAL_ICON_DISCOVERY: "true",
     OPENCODE_EXPERIMENTAL_FILEWATCHER: "true",
     OPENCODE_CLIENT: "desktop",
-    XDG_STATE_HOME: process.env.XDG_STATE_HOME ?? userDataPath,
   })
+  Object.assign(process.env, omniaStorageEnv(userDataPath))
+  delete process.env.OPENCODE_CONFIG
+  delete process.env.OPENCODE_CONFIG_DIR
+  delete process.env.OPENCODE_CONFIG_CONTENT
   return shellEnv
 }
 
