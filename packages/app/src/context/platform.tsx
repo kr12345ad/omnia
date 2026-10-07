@@ -67,6 +67,33 @@ export type BrowserPanelPlatform = {
   onCommand(callback: (command: BrowserPanelCommand) => void): () => void
 }
 
+/** Structural copy of packages/omnia/src/specialists/types.ts; the app cannot import Omnia runtime code */
+export type Specialist = {
+  readonly role: string
+  readonly name: string
+  readonly focus: string
+}
+
+export type SpecialistRoster = {
+  readonly entitled: boolean
+  readonly custom: boolean
+  readonly specialists: readonly Specialist[]
+  readonly defaults: readonly Specialist[]
+  readonly limits: {
+    readonly minCount: number
+    readonly maxCount: number
+    readonly maxNameLength: number
+    readonly maxFocusLength: number
+  }
+}
+
+/** Discussion-room specialist roster; save and reset reject with the server's message when refused (desktop only) */
+export type SpecialistsPlatform = {
+  get(): Promise<SpecialistRoster>
+  save(specialists: readonly Specialist[]): Promise<SpecialistRoster>
+  reset(): Promise<SpecialistRoster>
+}
+
 type PickerPaths = string | string[] | null
 type OpenDirectoryPickerOptions = { title?: string; multiple?: boolean }
 type OpenAttachmentPickerOptions = {
@@ -115,6 +142,9 @@ type PlatformBase = {
 
   /** Long-term memory: knowledge the agent keeps across sessions (desktop only) */
   memory?: MemoryPlatform
+
+  /** Discussion-room specialists: custom rosters on Pro and above (desktop only) */
+  specialists?: SpecialistsPlatform
 
   /** GitHub sign-in through the hosted control plane (desktop only) */
   auth?: GitHubAuthPlatform

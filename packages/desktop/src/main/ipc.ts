@@ -27,6 +27,7 @@ import { nativeT } from "./native-translations"
 import { registerOmniaIpcHandlers } from "./omnia/ipc"
 import { registerSuperskillIpcHandlers } from "./omnia/superskills"
 import { registerMemoryIpcHandlers } from "./omnia/memory"
+import { registerSpecialistIpcHandlers } from "./omnia/specialists"
 import { registerGitHubAuthIpcHandlers } from "./omnia/auth"
 import { registerComputerIpcHandlers } from "./omnia/computers"
 import { registerComputerUseIpcHandlers } from "./omnia/computer-use"
@@ -75,6 +76,7 @@ export function registerIpcHandlers(deps: Deps) {
   registerOmniaIpcHandlers()
   registerSuperskillIpcHandlers()
   registerMemoryIpcHandlers()
+  registerSpecialistIpcHandlers()
   registerGitHubAuthIpcHandlers()
   registerComputerIpcHandlers()
   registerComputerUseIpcHandlers()

@@ -310,6 +310,7 @@ const createPlatform = (windowState: DesktopWindowState): Platform => {
     superskills: window.api.superskills,
 
     memory: window.api.memory,
+    specialists: window.api.specialists,
     auth: window.api.auth,
 
     computers: window.api.computers,

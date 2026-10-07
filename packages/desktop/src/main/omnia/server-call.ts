@@ -4,7 +4,7 @@ import { controlPlaneCall } from "./control-plane"
 
 export async function serverCall(
   path: string,
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   body?: unknown,
 ): Promise<Record<string, unknown>> {
   return controlPlaneCall(path, method, body)

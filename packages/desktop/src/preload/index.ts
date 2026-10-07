@@ -45,6 +45,11 @@ const api: ElectronAPI = {
       ipcRenderer.invoke("memories-forget", input),
     stats: () => ipcRenderer.invoke("memories-stats"),
   },
+  specialists: {
+    get: () => invokeWithServerMessage("specialists-get"),
+    save: (specialists) => invokeWithServerMessage("specialists-save", specialists),
+    reset: () => invokeWithServerMessage("specialists-reset"),
+  },
   auth: {
     status: () => ipcRenderer.invoke("omnia-auth-status"),
     signIn: () => ipcRenderer.invoke("omnia-auth-sign-in"),
@@ -278,6 +283,15 @@ const api: ElectronAPI = {
   setForceFocus: (enabled) => ipcRenderer.invoke("set-force-focus", enabled),
   recordFatalRendererError: (error) => ipcRenderer.invoke("record-fatal-renderer-error", error),
   setNativeTranslations: (bundle) => ipcRenderer.invoke("set-native-translations", bundle),
+}
+
+// Electron prefixes a rejected invoke with "Error invoking remote method '<channel>': Error: ",
+// which would hide the server's own sentence behind transport noise.
+function invokeWithServerMessage(channel: string, ...args: unknown[]) {
+  return ipcRenderer.invoke(channel, ...args).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(message.replace(/^Error invoking remote method '[^']*': (?:\w*Error: )?/, ""))
+  })
 }
 
 function createSubscriptionId() {

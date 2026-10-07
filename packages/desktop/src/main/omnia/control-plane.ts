@@ -58,7 +58,7 @@ export class ControlPlaneRequestError extends Error {
 
 export async function controlPlaneRequest(
   path: string,
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   init: ControlPlaneRequestInit = {},
 ): Promise<{ readonly status: number; readonly json: Record<string, unknown> }> {
   const response = await fetchControlPlane(path, {
@@ -87,7 +87,7 @@ export async function controlPlaneRequest(
 
 export async function controlPlaneCall(
   path: string,
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "DELETE",
   body?: unknown,
 ): Promise<Record<string, unknown>> {
   return (await controlPlaneRequest(path, method, { body })).json
@@ -95,6 +95,7 @@ export async function controlPlaneCall(
 
 function errorMessage(json: Record<string, unknown>, text: string, status: number): string {
   if (typeof json.error === "string") return json.error
+  if (isRecord(json.error) && typeof json.error.message === "string") return json.error.message
   const result = isRecord(json.result) ? json.result : undefined
   const resultError = result?.error
   if (typeof resultError === "string") return resultError
