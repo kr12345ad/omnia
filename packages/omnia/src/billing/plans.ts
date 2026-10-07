@@ -51,6 +51,7 @@ export type Capability =
   | "rbac"
   | "sso"
   | "self_hosted"
+  | "custom_specialists"
 
 export interface CapabilityRule {
   /** `hard` means the request is refused once the limit is spent. */
@@ -104,6 +105,7 @@ const BUSINESS: Readonly<Record<Capability, CapabilityRule>> = {
   rbac: UNLIMITED,
   sso: UNLIMITED,
   self_hosted: NEVER,
+  custom_specialists: UNLIMITED,
 }
 
 /**
@@ -161,6 +163,9 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
       rbac: NEVER,
       sso: NEVER,
       self_hosted: NEVER,
+      // Free keeps the four built-in discussion specialists; renaming and
+      // refocusing them is what Pro adds.
+      custom_specialists: NEVER,
     },
   },
   pro: {
@@ -189,6 +194,7 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
       rbac: NEVER,
       sso: NEVER,
       self_hosted: NEVER,
+      custom_specialists: UNLIMITED,
     },
   },
   business: {

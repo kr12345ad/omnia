@@ -111,6 +111,7 @@ const FREE_MATRIX = {
   rbac: { limit: 0, metering: "hard" },
   sso: { limit: 0, metering: "hard" },
   self_hosted: { limit: 0, metering: "hard" },
+  custom_specialists: { limit: 0, metering: "hard" },
   subagents: { limit: UNLIMITED, metering: "soft" },
 } satisfies Record<Capability, Row>
 
@@ -133,6 +134,7 @@ const PRO_MATRIX = {
   rbac: { limit: 0, metering: "hard" },
   sso: { limit: 0, metering: "hard" },
   self_hosted: { limit: 0, metering: "hard" },
+  custom_specialists: { limit: UNLIMITED, metering: "soft" },
   subagents: { limit: UNLIMITED, metering: "soft" },
 } satisfies Record<Capability, Row>
 

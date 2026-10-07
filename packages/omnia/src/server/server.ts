@@ -6,6 +6,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto"
 import { EventBus } from "./events"
 import { SuperskillRegistry, summarizeSuperskill } from "../superskills/registry"
 import { MemoryStore } from "../memory/store"
+import { SpecialistStore } from "../specialists/store"
 import { CredentialStore } from "../credentials"
 import { PairingManager, startPairingDiscovery } from "../pairing"
 import { CalibrationManager } from "../computer-use/calibration"
@@ -53,6 +54,7 @@ export interface OmniaServerOptions {
   readonly drivers?: readonly ServerComputerDriver[]
   readonly superskillFile?: string
   readonly memoryFile?: string
+  readonly specialistsFile?: string
   readonly credentialsFile?: string
   readonly computerUseFile?: string
   readonly pairingsFile?: string
@@ -116,6 +118,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     ...(options.memoryFile === undefined ? {} : { file: options.memoryFile }),
     now,
   })
+  const specialists = new SpecialistStore(options.specialistsFile === undefined ? {} : { file: options.specialistsFile })
   const credentials = new CredentialStore(
     options.credentialsFile === undefined ? {} : { file: options.credentialsFile },
   )
@@ -391,6 +394,9 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       if (removed > 0) events.emit("memory.forgotten", { data: { removed, ...query } })
       return removed
     },
+    specialists: () => specialists.load(),
+    saveSpecialists: (input) => specialists.save(input),
+    resetSpecialists: () => specialists.reset(),
     superskills: () => superskills.list().map((skill) => summarizeSuperskill(skill)),
     superskill: (id) => superskills.get(id),
     saveSuperskill: (input) => superskills.save(input),

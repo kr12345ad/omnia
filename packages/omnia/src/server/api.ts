@@ -10,6 +10,7 @@ import { summarizeSuperskill } from "../superskills/registry"
 import type { Superskill, SuperskillSummary } from "../superskills/types"
 import type { MemoryQuery, MemoryRecord, MemoryStats, MemoryWriteInput } from "../memory/types"
 import { isMemoryScope } from "../memory/store"
+import { DEFAULT_SPECIALISTS, SPECIALIST_LIMITS, type Specialist, type SpecialistRoster } from "../specialists/types"
 import { cuaDriverFor, type ComputerUseService } from "../computer-use/service"
 import type { CalibrationManager, CalibrationMeasurement, CalibrationProfile } from "../computer-use/calibration"
 import type { CuaAction, CuaFindQuery, CuaWaitCondition } from "../cua/types"
@@ -129,6 +130,11 @@ export interface ApiContext {
   readonly writeMemory: (input: MemoryWriteInput) => MemoryRecord
   readonly removeMemory: (id: string) => boolean
   readonly forgetMemories: (query: MemoryQuery) => number
+  readonly specialists: () => readonly Specialist[] | undefined
+  readonly saveSpecialists: (
+    input: unknown,
+  ) => { readonly ok: true; readonly specialists: readonly Specialist[] } | { readonly ok: false; readonly error: string }
+  readonly resetSpecialists: () => void
   readonly sessions: () => readonly ServerSession[]
   readonly computerUse: ComputerUseService
   readonly calibration: CalibrationManager
@@ -735,6 +741,32 @@ function unconfirmed(
         plan: "free",
         retryable: true,
       },
+    },
+  }
+}
+
+/**
+ * The roster a discussion room started now would use.
+ *
+ * Entitlement is decided here, where the roster is read, so a lapsed or
+ * unconfirmed subscription degrades to the defaults instead of running a roster
+ * the plan no longer covers. Any refusal from the billing check - a 402 or a
+ * 503 for an unreachable control plane - reads as "not entitled" for this read:
+ * the defaults are always safe to serve, a custom roster is not.
+ */
+async function specialistRoster(context: Pick<ApiContext, "auth" | "specialists">): Promise<SpecialistRoster> {
+  const entitled = (await capabilityDenied(context, "custom_specialists")) === undefined
+  const saved = entitled ? context.specialists() : undefined
+  return {
+    entitled,
+    custom: saved !== undefined,
+    specialists: saved ?? DEFAULT_SPECIALISTS,
+    defaults: DEFAULT_SPECIALISTS,
+    limits: {
+      minCount: SPECIALIST_LIMITS.minCount,
+      maxCount: SPECIALIST_LIMITS.maxCount,
+      maxNameLength: SPECIALIST_LIMITS.maxNameLength,
+      maxFocusLength: SPECIALIST_LIMITS.maxFocusLength,
     },
   }
 }
@@ -1632,6 +1664,47 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       return true
     }
     json(response, 200, { ok: true, computer: summary })
+    return true
+  }
+
+  if (segments.length === 2 && segments[1] === "specialists") {
+    if (parsed.method === "GET") {
+      const denied = gateAgentAction(context, request, {}, "specialists_read", "specialists", ["FILES_READ"])
+      if (denied !== undefined) {
+        json(response, denied.status, { ok: false, result: denied.result })
+        return true
+      }
+      json(response, 200, { ok: true, ...(await specialistRoster(context)) })
+      return true
+    }
+    if (parsed.method === "PUT") {
+      const body = (await readBoundBody(context, request)) as Record<string, unknown> | undefined
+      if (!isRecord(body)) {
+        json(response, 400, { ok: false, error: "A JSON body is required." })
+        return true
+      }
+      if (!isTrustedDesktopRequest(context, request, body)) {
+        json(response, 403, { ok: false, error: "Only the signed-in desktop can edit the discussion specialists." })
+        return true
+      }
+      const unbilled = await capabilityDenied(context, "custom_specialists")
+      if (unbilled !== undefined) {
+        json(response, unbilled.status, unbilled.payload)
+        return true
+      }
+      if (body.reset === true) {
+        context.resetSpecialists()
+      } else {
+        const saved = context.saveSpecialists(body.specialists)
+        if (!saved.ok) {
+          json(response, 400, { ok: false, error: saved.error })
+          return true
+        }
+      }
+      json(response, 200, { ok: true, ...(await specialistRoster(context)) })
+      return true
+    }
+    json(response, 405, { ok: false, error: "Use GET or PUT." })
     return true
   }
 
