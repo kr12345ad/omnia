@@ -54,7 +54,7 @@ export const ComputerScreenshotTool = Tool.define<typeof Parameters, Record<stri
             always: ["screenshot"],
             metadata: { operation: "screenshot" },
           })
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const result = yield* request<ScreenshotResponse>(
             http,
             config,

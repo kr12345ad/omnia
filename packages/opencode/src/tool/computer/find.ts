@@ -89,7 +89,7 @@ export const ComputerFindTool = Tool.define<typeof Parameters, Record<string, un
             always: ["find:*"],
             metadata: { operation: "find", query: params.query, role: params.role ?? "any" },
           })
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const result = yield* request<FindResponse>(http, config, "POST", `/v1/computers/${id}/find`, {
             query: params.query,
             ...(params.role === undefined ? {} : { role: params.role }),

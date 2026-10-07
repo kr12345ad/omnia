@@ -62,7 +62,7 @@ export const ComputerInspectTool = Tool.define<typeof Parameters, Record<string,
             always: ["inspect:*"],
             metadata: { operation: "inspect", target: params.target, query: params.query },
           })
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const result = yield* request<InspectResponse>(
             http,
             config,

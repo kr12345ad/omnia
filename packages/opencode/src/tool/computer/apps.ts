@@ -37,7 +37,7 @@ export const ComputerAppsTool = Tool.define<typeof Parameters, Record<string, un
             always: ["apps"],
             metadata: { operation: "apps" },
           })
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const result = yield* request<AppsResponse>(http, config, "POST", `/v1/computers/${id}/observe`, {})
           const windows = (result.observation.elements ?? []).filter((element) => element.role === "window")
           if (windows.length === 0) {

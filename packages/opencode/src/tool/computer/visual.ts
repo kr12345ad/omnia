@@ -122,7 +122,7 @@ export const ComputerVisualTool = Tool.define<typeof Parameters, Record<string, 
             always: [`visual:${params.operation}`],
             metadata: { operation: params.operation, target: params.target },
           })
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const response = yield* request<VisualResponse>(http, config, "POST", "/v1/computer-use/analyze", {
             computerId: id,
             requestedOperation: params.operation,

@@ -77,7 +77,7 @@ export const ComputerReadTool = Tool.define<typeof Parameters, Record<string, un
             always: ["read:*"],
             metadata: { operation: "read_text", query: params.query, target: params.target },
           })
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const result = yield* request<ReadResponse>(
             http,
             config,

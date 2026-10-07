@@ -3,6 +3,7 @@ import { EditTool } from "./edit"
 import { WriteTool } from "./write"
 import { ComputerActTool } from "./computer/act"
 import { ComputerAppsTool } from "./computer/apps"
+import { SwitchComputerTool } from "./computer/switch"
 import { ComputerBrowserTool } from "./computer/browser"
 import { ComputerCapabilitiesTool } from "./computer/capabilities"
 import { ComputerContextTool } from "./computer/context"
@@ -28,6 +29,7 @@ export const COMPUTER_TOOL_IDS: ReadonlySet<string> = new Set([
   ComputerFindTool.id,
   ComputerActTool.id,
   ComputerAppsTool.id,
+  SwitchComputerTool.id,
   ComputerCapabilitiesTool.id,
   ComputerScreenshotTool.id,
   ComputerDoTool.id,
@@ -67,4 +69,3 @@ export function toolEnabledInMode(mode: SessionMode | undefined, toolID: string)
   if (mode === "work") return !CODING_EDIT_TOOL_IDS.has(toolID)
   return true
 }
-

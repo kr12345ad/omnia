@@ -228,7 +228,7 @@ export const ComputerActTool = Tool.define<typeof Parameters, Record<string, unk
               ...(params.credential === undefined ? {} : { credential: params.credential }),
             },
           })
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const result = yield* request<ActResponse>(
             http,
             config,

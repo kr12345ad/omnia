@@ -9,6 +9,12 @@ sighted user would see, and you act through the same controls.
 
 Tools:
 
+- switch_computer: list paired devices with no arguments, or select a connected
+  device by computerId for this session. All subsequent computer tools target
+  it; other sessions keep their own choice. This does not grant permissions or
+  change the server URL. After switching, discard previous device refs and tab
+  IDs, then read capabilities and a fresh snapshot before acting.
+
 - computer_context: where you are right now: active window, focused element
   with pixel center, pointer position, open windows, browser tab. Changes
   nothing. Call it first, after every app switch, and whenever an action

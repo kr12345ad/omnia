@@ -47,7 +47,7 @@ export const ComputerCapabilitiesTool = Tool.define<typeof Parameters, Record<st
       execute: (_params, ctx) =>
         Effect.gen(function* () {
           const config = yield* configFromEnv()
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const [computer, health] = yield* Effect.all([
             request<ComputerResponse>(http, config, "GET", `/v1/computers/${id}`).pipe(Effect.exit),
             request<HealthResponse>(http, config, "GET", "/v1/health").pipe(Effect.exit),

@@ -1,0 +1,25 @@
+Choose which paired computer this AI session controls.
+
+Call switch_computer with no arguments to list paired devices, their IDs, platforms,
+connection state, and the session's current explicit target. This only reads the
+control plane; it never moves the pointer or requests POINTER approval.
+
+To switch, pass computerId with the exact device ID from that list. An exact
+computer name or an unambiguous platform (macOS, Windows, Linux) also works.
+Unknown, ambiguous, offline, denied, or cancelled choices leave the previous target
+intact. A successful switch overrides the automatic/default device for this
+session and persists with the session. Other sessions keep their own targets.
+
+Every subsequent computer_* tool targets the selected device, including observe,
+snapshot, apps, actions, plans, screenshots, and browser automation. The server URL
+and credentials stay unchanged. This selects a device served by the current
+control plane, not a different server. It grants no permissions and does not
+launch an application by itself.
+
+Finish any in-flight computer action before switching. Do not run this tool in
+parallel with actions against the old target.
+
+After switching, discard element refs, observation IDs, coordinates and browser tab
+IDs from the previous device. Read computer_capabilities and a fresh
+computer_snapshot before acting on the new device. If it disconnects, report that
+failure rather than silently using another paired computer.

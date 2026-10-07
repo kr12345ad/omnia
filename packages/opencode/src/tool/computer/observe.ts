@@ -92,7 +92,7 @@ export const ComputerObserveTool = Tool.define<typeof Parameters, Record<string,
             always: ["observe", "observe:*"],
             metadata: { operation: "observe", application: app ?? "desktop" },
           })
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const result = yield* request<ObservationResponse>(
             http,
             config,

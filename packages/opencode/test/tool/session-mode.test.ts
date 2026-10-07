@@ -16,6 +16,7 @@ const computerToolIds = [
   "computer_find",
   "computer_act",
   "computer_apps",
+  "switch_computer",
   "computer_capabilities",
   "computer_screenshot",
   "computer_do",

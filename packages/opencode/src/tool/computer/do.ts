@@ -238,7 +238,7 @@ export const ComputerDoTool = Tool.define<typeof Parameters, Record<string, unkn
               actions: params.steps.map((step) => step.action).join(","),
             },
           })
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const response = yield* request<BatchResponse>(
             http,
             config,

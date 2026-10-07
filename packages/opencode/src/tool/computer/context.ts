@@ -35,7 +35,7 @@ export const ComputerContextTool = Tool.define<typeof Parameters, Record<string,
       execute: (_params, ctx) =>
         Effect.gen(function* () {
           const config = yield* configFromEnv()
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const result = yield* request<ContextResponse>(
             http,
             config,

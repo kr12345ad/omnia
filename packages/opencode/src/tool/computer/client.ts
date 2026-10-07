@@ -1,12 +1,40 @@
 import { Cause, Effect, Option, Schema } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
-import { createHmac } from "node:crypto"
+import { createHash, createHmac } from "node:crypto"
+import { Session } from "@/session/session"
+import type { SessionID } from "@/session/schema"
 import { clip } from "./output"
 
 export interface OmniaServerConfig {
   url: string
   token: string
   computerId?: string
+}
+
+export const COMPUTER_SELECTION_METADATA_KEY = "omniaComputer"
+
+export function controlPlaneKey(config: OmniaServerConfig): string {
+  return createHash("sha256").update(config.url).digest("hex")
+}
+
+/** A session's explicit target wins over the environment and automatic discovery. */
+export function selectionFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+  config: OmniaServerConfig,
+): string | undefined {
+  const selection = metadata?.[COMPUTER_SELECTION_METADATA_KEY]
+  if (selection === undefined) return undefined
+  if (typeof selection !== "object" || selection === null || Array.isArray(selection)) {
+    throw new Error("The session's saved computer target is invalid; use switch_computer to choose it again.")
+  }
+  const value = selection as { id?: unknown; server?: unknown }
+  if (typeof value.id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value.id)) {
+    throw new Error("The session's saved computer target is invalid; use switch_computer to choose it again.")
+  }
+  if (value.server !== controlPlaneKey(config)) {
+    throw new Error("The session's target belongs to a different control plane; use switch_computer before controlling a computer.")
+  }
+  return value.id
 }
 
 export function configFromEnv(): Effect.Effect<OmniaServerConfig> {
@@ -195,12 +223,26 @@ const ComputersResponse = Schema.Struct({
   ),
 })
 
-export function computerId(http: HttpClient.HttpClient, config: OmniaServerConfig): Effect.Effect<string> {
-  if (config.computerId !== undefined && config.computerId.length > 0) return Effect.succeed(config.computerId)
-  const cacheKey = `${config.url}\n${config.token}`
-  const cached = computerCache.get(cacheKey)
-  if (cached !== undefined && cached.expiresAt > Date.now()) return Effect.succeed(cached.id)
+export function computerId(
+  http: HttpClient.HttpClient,
+  config: OmniaServerConfig,
+  sessionID?: SessionID,
+): Effect.Effect<string> {
   return Effect.gen(function* () {
+    if (sessionID !== undefined) {
+      const sessions = yield* Effect.serviceOption(Session.Service)
+      if (Option.isSome(sessions)) {
+        const session = yield* sessions.value.get(sessionID).pipe(Effect.orDie)
+        const selected = selectionFromMetadata(session.metadata, config)
+        // Never fall back to another device when an explicit target goes offline.
+        // The selected driver's own request reports that failure to the caller.
+        if (selected !== undefined) return selected
+      }
+    }
+    if (config.computerId !== undefined && config.computerId.length > 0) return config.computerId
+    const cacheKey = `${config.url}\n${config.token}`
+    const cached = computerCache.get(cacheKey)
+    if (cached !== undefined && cached.expiresAt > Date.now()) return cached.id
     const response = yield* request<{ ok: true; computers: Array<{ id?: string; connected?: boolean }> }>(
       http,
       config,

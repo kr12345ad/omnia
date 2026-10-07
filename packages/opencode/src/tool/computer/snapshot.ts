@@ -136,7 +136,7 @@ export const ComputerSnapshotTool = Tool.define<typeof Parameters, Record<string
             always: ["snapshot", "snapshot:*"],
             metadata: { operation: "snapshot", application: app ?? "desktop" },
           })
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const result = yield* request<ObservationResponse>(
             http,
             config,

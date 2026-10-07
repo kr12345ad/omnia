@@ -21,6 +21,7 @@ import { ComputerObserveTool } from "./computer/observe"
 import { ComputerFindTool } from "./computer/find"
 import { ComputerActTool } from "./computer/act"
 import { ComputerAppsTool } from "./computer/apps"
+import { SwitchComputerTool } from "./computer/switch"
 import { ComputerCapabilitiesTool } from "./computer/capabilities"
 import { ComputerScreenshotTool } from "./computer/screenshot"
 import { ComputerDoTool } from "./computer/do"
@@ -137,6 +138,7 @@ const layer = Layer.effect(
     const computerFind = yield* ComputerFindTool
     const computerAct = yield* ComputerActTool
     const computerApps = yield* ComputerAppsTool
+    const switchComputer = yield* SwitchComputerTool
     const computerCapabilities = yield* ComputerCapabilitiesTool
     const computerScreenshot = yield* ComputerScreenshotTool
     const computerDo = yield* ComputerDoTool
@@ -258,6 +260,7 @@ const layer = Layer.effect(
           computerFind: Tool.init(computerFind),
           computerAct: Tool.init(computerAct),
           computerApps: Tool.init(computerApps),
+          switchComputer: Tool.init(switchComputer),
           computerCapabilities: Tool.init(computerCapabilities),
           computerScreenshot: Tool.init(computerScreenshot),
           computerDo: Tool.init(computerDo),
@@ -298,6 +301,7 @@ const layer = Layer.effect(
             tool.computerFind,
             tool.computerAct,
             tool.computerApps,
+            tool.switchComputer,
             tool.computerCapabilities,
             tool.computerScreenshot,
             tool.computerDo,

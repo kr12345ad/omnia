@@ -334,7 +334,7 @@ export const ComputerBrowserTool = Tool.define<typeof Parameters, Record<string,
             always: [`browser:${params.action}:*`],
             metadata: { operation: "browser", action: params.action, url: params.url, query: params.query },
           })
-          const id = yield* computerId(http, config)
+          const id = yield* computerId(http, config, ctx.sessionID)
           const readLimit = params.action === "read" ? (params.maxChars ?? params.limit) : params.limit
           const result = yield* request<BrowserResponse>(http, config, "POST", `/v1/computers/${id}/actions`, {
             action: `browser_${params.action}`,
