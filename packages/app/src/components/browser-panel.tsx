@@ -70,6 +70,7 @@ export function BrowserPanel() {
   const [tabs, setTabs] = createStore({ items: [] as BrowserTabState[], active: undefined as string | undefined })
   const [dialogs, setDialogs] = createStore<{ byTab: Record<number, BrowserDialogState | undefined> }>({ byTab: {} })
   const [address, setAddress] = createSignal("")
+  const [blocked, setBlocked] = createSignal(false)
   const [promptText, setPromptText] = createSignal("")
   const elements = new Map<string, WebviewElement>()
 
@@ -103,6 +104,13 @@ export function BrowserPanel() {
   }
 
   const createTab = (url = "about:blank", requestId?: string) => {
+    // The main process re-sends an open until the guest registers. Slow pages
+    // must not mount a fresh webview on every retry and close targets in flight.
+    const existing = requestId === undefined ? undefined : tabs.items.find((tab) => tab.requestId === requestId)
+    if (existing !== undefined) {
+      setTabs("active", existing.key)
+      return existing.key
+    }
     const key = crypto.randomUUID()
     const tab: BrowserTabState = {
       key,
@@ -158,10 +166,14 @@ export function BrowserPanel() {
     element.addEventListener("did-navigate", (event) => {
       const url = eventField(event, "url")
       if (url !== undefined) updateTab(key, { url })
+      const id = tabs.items.find((tab) => tab.key === key)?.webContentsId
+      if (id !== undefined) setDialogs("byTab", id, undefined)
     })
     element.addEventListener("did-navigate-in-page", (event) => {
       const url = eventField(event, "url")
       if (url !== undefined) updateTab(key, { url })
+      const id = tabs.items.find((tab) => tab.key === key)?.webContentsId
+      if (id !== undefined) setDialogs("byTab", id, undefined)
     })
     element.addEventListener("page-title-updated", (event) => {
       const title = eventField(event, "title")
@@ -172,7 +184,14 @@ export function BrowserPanel() {
 
   const navigateActive = (value: string) => {
     const url = normalizeAddress(value)
-    if (url === undefined) return
+    // A refused address must say so: silently doing nothing reads as a broken
+    // address bar, and the reason (a private host, or text that is not a URL)
+    // is not something the user can infer from an unchanged page.
+    if (url === undefined) {
+      setBlocked(true)
+      return
+    }
+    setBlocked(false)
     const tab = activeTab()
     if (tab === undefined) {
       createTab(url)
@@ -208,6 +227,7 @@ export function BrowserPanel() {
   createEffect(() => {
     const url = activeUrl()
     setAddress(url === "about:blank" ? "" : url)
+    setBlocked(false)
   })
 
   createEffect(() => {
@@ -245,7 +265,13 @@ export function BrowserPanel() {
       const tab = tabs.items.find((item) => item.webContentsId === command.tabId)
       if (tab !== undefined) closeTab(tab.key)
     })
-    onCleanup(dispose)
+    onCleanup(() => {
+      dispose()
+      tabs.items.forEach((tab) => {
+        if (tab.webContentsId !== undefined) void api.unregister(tab.webContentsId)
+      })
+      elements.clear()
+    })
   })
 
   return (
@@ -300,8 +326,17 @@ export function BrowserPanel() {
             autocomplete="off"
             placeholder={language.t("browser.panel.address.placeholder")}
             aria-label={language.t("browser.panel.address.placeholder")}
-            class="flex-1 min-w-0 h-6 rounded-md border border-v2-border-border-base bg-v2-background-bg-deep px-2 text-12-regular text-text-strong outline-none focus:border-v2-border-border-focus"
-            onInput={(event) => setAddress(event.currentTarget.value)}
+            aria-invalid={blocked()}
+            classList={{
+              "flex-1 min-w-0 h-6 rounded-md border bg-v2-background-bg-deep px-2 text-12-regular text-text-strong outline-none focus:border-v2-border-border-focus":
+                true,
+              "border-v2-border-border-base": !blocked(),
+              "border-icon-critical-base": blocked(),
+            }}
+            onInput={(event) => {
+              setBlocked(false)
+              setAddress(event.currentTarget.value)
+            }}
             onKeyDown={(event) => {
               if (event.key !== "Enter") return
               navigateActive(event.currentTarget.value)
@@ -321,6 +356,14 @@ export function BrowserPanel() {
             aria-label={language.t("browser.panel.close")}
           />
         </div>
+        <Show when={blocked()}>
+          <div
+            role="alert"
+            class="shrink-0 border-b border-v2-border-border-base bg-v2-background-bg-deep px-2 py-1.5 text-11-regular text-text-strong"
+          >
+            {language.t("browser.panel.address.blocked")}
+          </div>
+        </Show>
         <div class="h-8 shrink-0 flex items-center gap-1 px-2 border-b border-v2-border-border-base overflow-x-auto no-scrollbar">
           <For each={tabs.items}>
             {(tab) => (

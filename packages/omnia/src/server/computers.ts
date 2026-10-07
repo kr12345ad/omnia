@@ -6343,6 +6343,7 @@ const BROWSER_SAFE_MESSAGES = new Set([
   "not_available",
   "connection_closed",
   "connection_failed",
+  "target_closed",
   "open_failed",
   "timeout",
   "load_timeout",

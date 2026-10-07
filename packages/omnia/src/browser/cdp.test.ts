@@ -1194,6 +1194,70 @@ describe("cdp runtime churn recovery", () => {
     await expect(runtime.navigate("https://missing.test", "tab-1")).rejects.toMatchObject({ code: "cdp_-32000" })
   })
 
+  test("navigate does not report success when CDP returns a navigation error", async () => {
+    const transport = tabbedTransport(new FakeTransport(), [{ id: "tab-1", url: "https://old.test" }])
+    transport.handle("Page.navigate", () => ({ errorText: "net::ERR_NAME_NOT_RESOLVED" }))
+    transport.handle("Runtime.evaluate", (params) => isReadyState(params.expression) ? readyState() : { result: { value: "https://old.test" } })
+    const runtime = new CdpRuntime({ endpoint: "ws://127.0.0.1:9", token: "bridge-token", transport })
+
+    await expect(runtime.navigate("https://missing.test", "tab-1")).rejects.toMatchObject({ code: "cdp_error" })
+  })
+
+  test("read retries a closed target with a fresh world without reconnecting the bridge", async () => {
+    const transport = tabbedTransport(new FakeTransport(), [{ id: "tab-1", url: "https://example.test" }])
+    let reads = 0
+    let worlds = 0
+    transport.handle("Page.getFrameTree", () => ({ frameTree: { frame: { id: "frame-1" } } }))
+    transport.handle("Page.createIsolatedWorld", () => ({ executionContextId: ++worlds }))
+    transport.handle("Runtime.evaluate", (params) => {
+      if (isReadyState(params.expression)) return readyState()
+      reads += 1
+      if (reads === 1) throw new CdpError("target_closed", "The embedded browser page changed while handling the command.")
+      return pagePayload("https://example.test")
+    })
+    const runtime = new CdpRuntime({ endpoint: "ws://127.0.0.1:9", token: "bridge-token", transport })
+
+    expect((await runtime.read("tab-1")).url).toBe("https://example.test")
+    expect(worlds).toBe(2)
+    expect(reads).toBe(2)
+    expect(transport.callsOf("Fetch.enable")).toHaveLength(2)
+    expect(transport.connected).toBe(true)
+  })
+
+  test("selection and scripted typing never replay after a closed target", async () => {
+    const transport = tabbedTransport(new FakeTransport(), [{ id: "tab-1", url: "https://example.test" }])
+    let mutations = 0
+    transport.handle("Runtime.evaluate", (params) => {
+      if (isReadyState(params.expression)) return readyState()
+      if (String(params.expression).includes("const focusOnly = true")) return jsonValue({ ok: true, editable: false })
+      mutations += 1
+      throw new CdpError("target_closed", "The embedded browser page changed while handling the command.")
+    })
+    const runtime = new CdpRuntime({ endpoint: "ws://127.0.0.1:9", token: "bridge-token", transport })
+
+    await expect(runtime.select({ id: "omnia-1@doc1" }, "value")).rejects.toMatchObject({ code: "target_closed" })
+    expect(mutations).toBe(1)
+    await expect(runtime.type({ id: "omnia-1@doc1", text: "value" })).rejects.toMatchObject({ code: "target_closed" })
+    expect(mutations).toBe(2)
+  })
+
+  test("a failed interception setup is retried on the next action", async () => {
+    const transport = tabbedTransport(new FakeTransport(), [{ id: "tab-1", url: "https://example.test" }])
+    let attempts = 0
+    transport.handle("Fetch.enable", () => {
+      attempts += 1
+      if (attempts === 1) throw new CdpError("cdp_error", "temporary setup failure")
+      return {}
+    })
+    transport.handle("Runtime.evaluate", (params) => isReadyState(params.expression) ? readyState() : pagePayload("https://example.test"))
+    const runtime = new CdpRuntime({ endpoint: "ws://127.0.0.1:9", token: "bridge-token", transport })
+
+    await runtime.read("tab-1")
+    await runtime.read("tab-1")
+    await runtime.read("tab-1")
+    expect(transport.callsOf("Fetch.enable")).toHaveLength(2)
+  })
+
   test("closeTab forgets a tab the bridge no longer has", async () => {
     const transport = new FakeTransport().handle("Omnia.close", () => {
       throw new CdpError("not_available", "The embedded browser tab is not open.")
@@ -1534,6 +1598,36 @@ describe("cdp runtime navigation policy", () => {
       await waitUntil(() => callsOf(bridge, "Omnia.close").length === 1)
       expect(callsOf(bridge, "Omnia.close")[0]?.params).toEqual({ tabId: "tab-1" })
       expect(runtime.currentTab()).toBeUndefined()
+    } finally {
+      runtime.closeRuntime()
+      bridge.stop()
+    }
+  })
+
+  test("a debugger detach drops isolated worlds and re-arms interception", async () => {
+    const bridge = startFakeBridge({ tabs: [{ id: "tab-1", url: "https://example.test/page" }] })
+    const runtime = new CdpRuntime({ endpoint: bridge.endpoint, token: bridge.token })
+    try {
+      await runtime.read()
+      bridge.emit("Inspector.detached", { reason: "target_closed" }, "tab-1")
+      await runtime.read()
+      expect(callsOf(bridge, "Fetch.enable")).toHaveLength(2)
+      expect(callsOf(bridge, "Page.createIsolatedWorld")).toHaveLength(2)
+    } finally {
+      runtime.closeRuntime()
+      bridge.stop()
+    }
+  })
+
+  test("an interception release re-arms the controller policy without replacing its world", async () => {
+    const bridge = startFakeBridge({ tabs: [{ id: "tab-1", url: "https://example.test/page" }] })
+    const runtime = new CdpRuntime({ endpoint: bridge.endpoint, token: bridge.token })
+    try {
+      await runtime.read()
+      bridge.emit("Omnia.interceptionReleased", { reason: "controller released" }, "tab-1")
+      await runtime.read()
+      expect(callsOf(bridge, "Fetch.enable")).toHaveLength(2)
+      expect(callsOf(bridge, "Page.createIsolatedWorld")).toHaveLength(1)
     } finally {
       runtime.closeRuntime()
       bridge.stop()

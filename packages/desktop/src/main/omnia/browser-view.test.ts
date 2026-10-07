@@ -11,9 +11,13 @@ import { join } from "node:path"
 interface FakeDebugger {
   attached: boolean
   enabled: number
+  detaches: number
+  /** Rejects one sendCommand per entry, in order, before the next succeeds. */
+  readonly failures: Array<{ method: string; error: Error }>
   readonly commands: Array<{ method: string; params?: Record<string, unknown> }>
   readonly listeners: Map<string, Set<(...args: unknown[]) => void>>
   attach(version: string): void
+  detach(): void
   isAttached(): boolean
   sendCommand(method: string, params?: Record<string, unknown>): Promise<unknown>
   on(event: string, listener: (...args: unknown[]) => void): void
@@ -91,16 +95,29 @@ function createDebugger(): FakeDebugger {
   const debugger_: FakeDebugger = {
     attached: false,
     enabled: 0,
+    detaches: 0,
+    failures: [],
     commands: [],
     listeners,
     attach() {
       if (debugger_.attached) throw new Error("Debugger is already attached.")
       debugger_.attached = true
     },
+    detach() {
+      if (!debugger_.attached) throw new Error("Debugger is not attached.")
+      debugger_.attached = false
+      debugger_.detaches += 1
+      debugger_.emit("detach", undefined, "target_closed")
+    },
     isAttached: () => debugger_.attached,
     sendCommand: (method, params) => {
-      if (method === "Page.enable") debugger_.enabled += 1
       debugger_.commands.push({ method, ...(params === undefined ? {} : { params }) })
+      const failure = debugger_.failures[0]
+      if (failure?.method === method) {
+        debugger_.failures.shift()
+        return Promise.reject(failure.error)
+      }
+      if (method === "Page.enable") debugger_.enabled += 1
       return Promise.resolve({})
     },
     on: (event, listener) => addListener(listeners, event, listener),
@@ -273,12 +290,13 @@ function registerGuest(manager: InstanceType<typeof EmbeddedBrowserManager>, own
   return { guest, registered }
 }
 
-function manager(options: { hostLoadWaitMs?: number } = {}) {
+function manager(options: { hostLoadWaitMs?: number; pausedRequestTimeoutMs?: number } = {}) {
   return new EmbeddedBrowserManager({
     openTimeoutMs: 300,
     openRetryMs: 20,
     hostWindowWaitMs: 80,
     hostLoadWaitMs: options.hostLoadWaitMs ?? 80,
+    pausedRequestTimeoutMs: options.pausedRequestTimeoutMs ?? 15000,
   })
 }
 
@@ -892,6 +910,160 @@ describe("embedded browser fetch interception cleanup", () => {
     expect(continued?.params).toEqual({ requestId: "r-1" })
     expect(failed?.params).toEqual({ requestId: "r-2", errorReason: "BlockedByClient" })
 
+    await browser.destroy()
+  })
+})
+
+describe("embedded browser target recovery", () => {
+  test("a read that dies with the target is replayed once on a fresh session", async () => {
+    const browser = manager()
+    const host = createWindow()
+    const { guest } = registerGuest(browser, host.webContents, "req-replay")
+    expect(guest.debugger.enabled).toBe(1)
+
+    guest.debugger.failures.push({ method: "Page.getFrameTree", error: new Error("target closed while handling command") })
+
+    await expect(dispatch(browser, "Page.getFrameTree", {}, guest.id)).resolves.toEqual({})
+    // The dead session was dropped and the command replayed against a new one,
+    // so the tab keeps working instead of failing every later command.
+    expect(guest.debugger.detaches).toBe(1)
+    expect(guest.debugger.attached).toBe(true)
+    expect(guest.debugger.enabled).toBe(2)
+    expect(guest.debugger.commands.map((command) => command.method)).toEqual([
+      "Page.enable",
+      "Page.setInterceptFileChooserDialog",
+      "Page.getFrameTree",
+      "Page.enable",
+      "Page.setInterceptFileChooserDialog",
+      "Page.getFrameTree",
+    ])
+
+    // The recovered session serves the next command without another reset.
+    await expect(dispatch(browser, "Runtime.evaluate", { expression: "2" }, guest.id)).resolves.toEqual({})
+    expect(guest.debugger.detaches).toBe(1)
+  })
+
+  test("a command a page can feel is never replayed and reports a retryable failure", async () => {
+    const browser = manager()
+    const host = createWindow()
+    const { guest } = registerGuest(browser, host.webContents, "req-no-replay")
+
+    guest.debugger.failures.push({ method: "Input.dispatchMouseEvent", error: new Error("target closed while handling command") })
+    await expect(
+      dispatch(browser, "Input.dispatchMouseEvent", { type: "mousePressed", x: 1, y: 2 }, guest.id),
+    ).rejects.toMatchObject({ code: "target_closed" })
+    expect(guest.debugger.detaches).toBe(1)
+    expect(guest.debugger.commands.map((command) => command.method)).toEqual([
+      "Page.enable",
+      "Page.setInterceptFileChooserDialog",
+      "Input.dispatchMouseEvent",
+    ])
+
+    // The reset still happened, so retrying the action reaches a live page.
+    await expect(dispatch(browser, "Runtime.evaluate", { expression: "1" }, guest.id)).resolves.toEqual({})
+    expect(guest.debugger.attached).toBe(true)
+    expect(guest.debugger.enabled).toBe(2)
+  })
+
+  test("a replay that also dies with the target reports the retryable failure", async () => {
+    const browser = manager()
+    const host = createWindow()
+    const { guest } = registerGuest(browser, host.webContents, "req-replay-twice")
+
+    guest.debugger.failures.push(
+      { method: "Page.getFrameTree", error: new Error("target closed while handling command") },
+      { method: "Page.getFrameTree", error: new Error("target closed while handling command") },
+    )
+
+    await expect(dispatch(browser, "Page.getFrameTree", {}, guest.id)).rejects.toMatchObject({
+      code: "target_closed",
+    })
+    // Both attempts saw a dead target, and each one dropped its session.
+    expect(guest.debugger.detaches).toBe(2)
+  })
+
+  test("JavaScript is never replayed because it may have submitted a form", async () => {
+    const browser = manager()
+    const host = createWindow()
+    const broadcasts = captureBroadcasts(browser)
+    const { guest } = registerGuest(browser, host.webContents, "req-script")
+    guest.debugger.failures.push({ method: "Runtime.evaluate", error: new Error("target closed while handling command") })
+
+    await expect(dispatch(browser, "Runtime.evaluate", { expression: "submitForm()" }, guest.id)).rejects.toMatchObject({
+      code: "target_closed",
+    })
+    expect(guest.debugger.commands.filter((command) => command.method === "Runtime.evaluate")).toHaveLength(1)
+    expect(broadcasts).toContainEqual({ method: "Inspector.detached", params: { reason: "target_closed" }, tabId: String(guest.id) })
+    await browser.destroy()
+  })
+
+  test("an unrelated page failure keeps its own error", async () => {
+    const browser = manager()
+    const host = createWindow()
+    const { guest } = registerGuest(browser, host.webContents, "req-other-error")
+
+    guest.debugger.failures.push({ method: "Runtime.evaluate", error: new Error("Some other protocol failure") })
+    await expect(dispatch(browser, "Runtime.evaluate", { expression: "1" }, guest.id)).rejects.toThrow(
+      "Some other protocol failure",
+    )
+    expect(guest.debugger.detaches).toBe(0)
+  })
+})
+
+describe("embedded browser request interception release", () => {
+  test("a disconnected controller releases the requests it left paused", async () => {
+    const browser = manager()
+    const host = createWindow()
+    const { guest } = registerGuest(browser, host.webContents, "req-paused-leave")
+    const bridge = await browser.start()
+    const socket = new WebSocket(`${bridge.endpoint}?token=${bridge.token}`)
+    await new Promise((resolve) => socket.addEventListener("open", resolve, { once: true }))
+
+    guest.debugger.emit("message", undefined, "Fetch.requestPaused", {
+      requestId: "paused-1",
+      request: { url: "https://example.test/next" },
+    })
+    const paused = guest.debugger.commands.filter((command) => command.method === "Fetch.continueRequest")
+    expect(paused).toHaveLength(0)
+
+    socket.close()
+    await waitUntil(() => guest.debugger.commands.some((command) => command.method === "Fetch.disable"))
+    // Nothing can answer a paused request without a controller, so the far end
+    // is released instead of leaving the tab loading forever.
+    expect(guest.debugger.commands).toContainEqual({ method: "Fetch.continueRequest", params: { requestId: "paused-1" } })
+    await browser.destroy()
+  })
+
+  test("a paused request the controller never answers is released by the watchdog", async () => {
+    const browser = manager({ pausedRequestTimeoutMs: 20 })
+    const host = createWindow()
+    const { guest } = registerGuest(browser, host.webContents, "req-paused-watchdog")
+
+    guest.debugger.emit("message", undefined, "Fetch.requestPaused", {
+      requestId: "paused-2",
+      request: { url: "https://example.test/slow" },
+    })
+    await waitUntil(() => guest.debugger.commands.some((command) => command.method === "Fetch.continueRequest"))
+    expect(guest.debugger.commands).toContainEqual({ method: "Fetch.continueRequest", params: { requestId: "paused-2" } })
+    await browser.destroy()
+  })
+
+  test("a request the controller answered is never released again", async () => {
+    const browser = manager({ pausedRequestTimeoutMs: 20 })
+    const host = createWindow()
+    const { guest } = registerGuest(browser, host.webContents, "req-paused-answered")
+
+    guest.debugger.emit("message", undefined, "Fetch.requestPaused", {
+      requestId: "paused-3",
+      request: { url: "https://example.test/answer" },
+    })
+    await dispatch(browser, "Fetch.continueRequest", { requestId: "paused-3" }, guest.id)
+    await new Promise((resolve) => setTimeout(resolve, 60))
+
+    const continues = guest.debugger.commands.filter((command) => command.method === "Fetch.continueRequest")
+    // Exactly the controller's own reply: the watchdog must not answer a
+    // second time for a request that is already on its way.
+    expect(continues).toHaveLength(1)
     await browser.destroy()
   })
 })

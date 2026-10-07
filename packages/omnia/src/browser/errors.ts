@@ -84,6 +84,7 @@ const KNOWN_BROWSER_CODES = new Set([
   "stale_image_reference",
   "tab_limit",
   "tab_not_found",
+  "target_closed",
   "timeout",
   "url_blocked",
 ])
@@ -126,6 +127,7 @@ export function browserFailureStatus(code: string): number {
     case "not_available":
     case "connection_closed":
     case "connection_failed":
+    case "target_closed":
     case "open_failed":
     case "busy":
     case "activate_failed":

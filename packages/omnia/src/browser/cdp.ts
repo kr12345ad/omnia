@@ -526,7 +526,7 @@ export class CdpRuntime {
       ...(this.options.timeoutMs === undefined ? {} : { timeoutMs: this.options.timeoutMs }),
       // Dialog and auth state come from Page/Omnia events; without an explicit
       // subscription the client drops every event and both are invisible.
-      eventDomains: ["Fetch", "Page", "Omnia"],
+      eventDomains: ["Fetch", "Page", "Omnia", "Inspector"],
       onEvent: (method, params, tabId) => this.handleBrowserEvent(method, params, tabId),
       onClose: () => {
         this.transport = undefined
@@ -537,6 +537,9 @@ export class CdpRuntime {
         // behind with no page to answer it, so nothing survives the close.
         this.dialogs.clear()
         this.isolatedWorlds.clear()
+        // The bridge releases its interception when the controller disconnects,
+        // so the fresh connection must arm it again instead of trusting the
+        // cache of the connection that just died.
         this.intercepted.clear()
       },
     })
@@ -597,7 +600,7 @@ export class CdpRuntime {
     return contextId
   }
 
-  private async evaluateValueOn(tabId: string, expression: string): Promise<unknown> {
+  private async evaluateValueOn(tabId: string, expression: string, retry = true): Promise<unknown> {
     const contextId = await this.isolatedContext(tabId)
     try {
       return await this.evaluateOn(tabId, expression, contextId)
@@ -605,8 +608,12 @@ export class CdpRuntime {
       // A cross-document navigation destroys the world the context id belongs
       // to, which races the command reply; the retry re-creates the world once
       // instead of failing a command that ran against a valid document.
-      if (contextId === undefined || !isStaleContextError(error)) throw error
+      if (!retry || (!isStaleContextError(error) && !isClosedTargetError(error))) throw error
       this.isolatedWorlds.delete(tabId)
+      if (isClosedTargetError(error)) {
+        this.intercepted.delete(tabId)
+        await this.armNavigationPolicy(tabId)
+      }
       return this.evaluateOn(tabId, expression, await this.isolatedContext(tabId))
     }
   }
@@ -628,8 +635,8 @@ export class CdpRuntime {
     return result.result?.value
   }
 
-  private async evaluateJsonOn(tabId: string, expression: string): Promise<unknown> {
-    const value = await this.evaluateValueOn(tabId, expression)
+  private async evaluateJsonOn(tabId: string, expression: string, retry = true): Promise<unknown> {
+    const value = await this.evaluateValueOn(tabId, expression, retry)
     if (typeof value !== "string") throw new CdpError("evaluate_failed", "The page returned an unexpected value.")
     try {
       return JSON.parse(value) as unknown
@@ -747,13 +754,16 @@ export class CdpRuntime {
   // partition webRequest filter when no controller is attached.
   private async armNavigationPolicy(tabId: string): Promise<void> {
     if (this.intercepted.has(tabId)) return
-    await this.send("Fetch.enable", { patterns: [{ requestStage: "Request" }] }, tabId).catch((error) => {
-      this.options.log?.("embedded browser request interception could not be armed", {
-        tabId,
-        error: redactToken(error instanceof Error ? error.message : String(error), this.options.token),
+    const armed = await this.send("Fetch.enable", { patterns: [{ requestStage: "Request" }] }, tabId)
+      .then(() => true)
+      .catch((error) => {
+        this.options.log?.("embedded browser request interception could not be armed", {
+          tabId,
+          error: redactToken(error instanceof Error ? error.message : String(error), this.options.token),
+        })
+        return false
       })
-    })
-    this.intercepted.add(tabId)
+    if (armed) this.intercepted.add(tabId)
   }
 
   private handlePausedRequest(key: string, params: unknown): void {
@@ -954,7 +964,10 @@ export class CdpRuntime {
     const before = await this.evaluateValueOn(context, "location.href").catch(() => undefined)
     let failure: CdpError | undefined
     try {
-      await this.send("Page.navigate", { url: target }, context)
+      const result = await this.send<{ errorText?: string }>("Page.navigate", { url: target }, context)
+      if (typeof result?.errorText === "string" && result.errorText.length > 0) {
+        failure = new CdpError("cdp_error", result.errorText)
+      }
     } catch (error) {
       if (!(error instanceof CdpError)) throw error
       failure = error
@@ -1102,12 +1115,18 @@ export class CdpRuntime {
       this.isolatedWorlds.delete(key)
       return
     }
+    if (method === "Omnia.interceptionReleased") {
+      this.intercepted.delete(key)
+      return
+    }
     // The debugger owns the Fetch interception and the isolated world; when it
     // detaches both are gone with it.
     if (method === "Inspector.detached") {
       this.intercepted.delete(key)
       this.isolatedWorlds.delete(key)
       this.dialogs.delete(key)
+      this.fileChoosers.delete(key)
+      this.authChallenges.delete(key)
       return
     }
     if (method === "Omnia.authRequired") {
@@ -1447,6 +1466,7 @@ export class CdpRuntime {
         ...(value === undefined ? {} : { value }),
         ...(text === undefined ? {} : { text }),
       }),
+      false,
     )) as { ok?: boolean; reason?: string; value?: string }
     if (result.reason === "stale_element_reference") {
       throw new CdpError(
@@ -1557,7 +1577,7 @@ export class CdpRuntime {
     await this.authorizeBrowserOperation()
     const context = await this.resolveTab(target.tabId, target.sessionId)
     await this.ensureReadyOn(context)
-    const focus = (await this.evaluateJsonOn(context, buildTypeFocusExpression(requireElementRef(target.id)))) as {
+    const focus = (await this.evaluateJsonOn(context, buildTypeFocusExpression(requireElementRef(target.id)), false)) as {
       ok?: boolean
       reason?: string
       editable?: boolean
@@ -1586,7 +1606,7 @@ export class CdpRuntime {
         return { typed: true, value: escapeUntrustedText(target.text) }
       }
     }
-    const result = (await this.evaluateJsonOn(context, buildTypeExpression(requireElementRef(target.id), target.text))) as {
+    const result = (await this.evaluateJsonOn(context, buildTypeExpression(requireElementRef(target.id), target.text), false)) as {
       ok?: boolean
       reason?: string
       value?: string
@@ -2022,7 +2042,14 @@ function requireImageTarget(target: BrowserImageTarget): BrowserImageTarget {
 // A destroyed execution context is reported as a CDP error, not a page failure;
 // the caller re-creates the isolated world and retries once.
 function isStaleContextError(error: unknown): boolean {
-  return error instanceof CdpError && typeof error.message === "string" && /context/iu.test(error.message)
+  return error instanceof CdpError && /context.*(destroyed|not found|cannot find)|cannot find.*context/iu.test(error.message)
+}
+
+function isClosedTargetError(error: unknown): boolean {
+  return (
+    error instanceof CdpError &&
+    (error.code === "target_closed" || /target closed while handling command/iu.test(error.message))
+  )
 }
 
 // A missing tab is recoverable churn; every other bridge failure is real.

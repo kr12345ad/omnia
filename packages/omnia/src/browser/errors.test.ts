@@ -25,6 +25,11 @@ describe("browser failure mapping", () => {
       retryable: true,
     })
     expect(browserFailure(new CdpError("load_timeout", "slow"))).toMatchObject({ httpStatus: 504, retryable: true })
+    expect(browserFailure(Object.assign(new Error("page changed"), { code: "target_closed" }))).toMatchObject({
+      code: "target_closed",
+      httpStatus: 503,
+      retryable: true,
+    })
     expect(browserFailure(new CdpError("busy", "too many commands"))).toMatchObject({
       httpStatus: 503,
       retryable: true,

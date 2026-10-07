@@ -503,6 +503,23 @@ describe("browser error taxonomy and tab ownership", () => {
     expect(errorCode(blockedOutcome.result.error)).toBe("url_blocked")
   })
 
+  test("a closed target retains its retryable code across the remote boundary", async () => {
+    const { browser } = browserHarness({
+      navigate: async () => {
+        throw Object.assign(new Error("The embedded browser page changed while handling the command."), { code: "target_closed" })
+      },
+    })
+    const outcome = await createManager(baseDriver(), { browser }).manager.execute("local", {
+      action: "browser_navigate",
+      url: "https://target.example",
+      sessionId: "s",
+    })
+    expect(outcome.httpStatus).toBe(503)
+    expect(outcome.result.success).toBe(false)
+    expect(outcome.result.error).toMatchObject({ code: "target_closed", retryable: true })
+    expect(outcome.result.message).toBe("The embedded browser page changed while handling the command.")
+  })
+
   test("unknown failures stay generic and do not leak messages", async () => {
     const { browser } = browserHarness({
       navigate: async () => {

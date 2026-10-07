@@ -36,6 +36,29 @@ const OPEN_RETRY_MS = 2000
 const HOST_WINDOW_WAIT_MS = 5000
 const HOST_LOAD_WAIT_MS = 5000
 const MAX_TRACKED_DOWNLOADS = 100
+// The controller pauses every request in a tab it drives (Fetch.enable) so it
+// can re-assert the navigation policy on each one. Paused requests are held by
+// this process, so a controller that goes away mid-request would strand the tab
+// on a blank page forever: the last pause of a request is always released here,
+// by a watchdog if the controller never answers.
+const PAUSED_REQUEST_TIMEOUT_MS = 15000
+// Commands that mean a paused request no longer needs this process to hold it.
+const INTERCEPTION_COMMANDS = new Set(["Fetch.continueRequest", "Fetch.failRequest", "Fetch.disable"])
+
+// A navigation or renderer crash can close a DevTools target mid-command.
+// Reset its debugger session, but only replay commands without page effects:
+// Runtime.evaluate can submit forms via input/change handlers and is NOT safe.
+const TARGET_CLOSED_MESSAGE = "The embedded browser page changed while handling the command."
+
+const IDEMPOTENT_PAGE_COMMANDS = new Set([
+  "Fetch.enable",
+  "Page.captureScreenshot",
+  "Page.createIsolatedWorld",
+  "Page.enable",
+  "Page.getFrameTree",
+  "Page.getLayoutMetrics",
+  "Page.setInterceptFileChooserDialog",
+])
 
 export interface BrowserPanelTabInfo {
   readonly id: number
@@ -133,6 +156,10 @@ interface ManagedPage {
   // a controller whose socket drops cannot strand the page mid-navigation.
   fetchArmed: boolean
   readonly fetchPaused: Map<string, string>
+  // Requests the controller paused in this tab, with the watchdog that releases
+  // each one. A request that is answered is removed here, so only requests
+  // still waiting on the controller are ever released by this process.
+  readonly pausedRequests: Map<string, ReturnType<typeof setTimeout>>
 }
 
 interface PendingOpen {
@@ -152,6 +179,7 @@ export interface EmbeddedBrowserManagerOptions {
   readonly openRetryMs?: number
   readonly hostWindowWaitMs?: number
   readonly hostLoadWaitMs?: number
+  readonly pausedRequestTimeoutMs?: number
 }
 
 class CdpBridgeError extends Error {
@@ -175,6 +203,7 @@ export class EmbeddedBrowserManager {
   private readonly openRetryMs: number
   private readonly hostWindowWaitMs: number
   private readonly hostLoadWaitMs: number
+  private readonly pausedRequestTimeoutMs: number
   private bridge: WebSocketBridge | undefined
   private started: Promise<BrowserViewBridge> | undefined
   private watching = false
@@ -202,6 +231,7 @@ export class EmbeddedBrowserManager {
     this.openRetryMs = options.openRetryMs ?? OPEN_RETRY_MS
     this.hostWindowWaitMs = options.hostWindowWaitMs ?? HOST_WINDOW_WAIT_MS
     this.hostLoadWaitMs = options.hostLoadWaitMs ?? HOST_LOAD_WAIT_MS
+    this.pausedRequestTimeoutMs = options.pausedRequestTimeoutMs ?? PAUSED_REQUEST_TIMEOUT_MS
   }
 
   watch(): void {
@@ -357,7 +387,12 @@ export class EmbeddedBrowserManager {
     if (method.startsWith("Omnia.")) return this.dispatchOmnia(method, params, tabId)
     const page = tabId === undefined ? this.activePage() : this.pages.get(tabId)
     if (page === undefined) throw new CdpBridgeError("not_available", "The embedded browser has no matching page.")
-    return this.sendToPage(page, method, params)
+    const result = await this.sendToPage(page, method, params)
+    // A command that answers or disarms the interception is the only proof a
+    // paused request no longer needs this process to hold it, so the tracking
+    // is cleared here rather than in the transport wrapper.
+    if (INTERCEPTION_COMMANDS.has(method)) this.settlePausedRequests(page, params, method)
+    return result
   }
 
   private async dispatchOmnia(method: string, params: Record<string, unknown>, tabId?: number): Promise<unknown> {
@@ -673,7 +708,7 @@ export class EmbeddedBrowserManager {
       this.removePage(page.id)
       throw new CdpBridgeError("not_available", "The embedded browser page is closed.")
     }
-    const result = this.ensurePageDebugger(page).sendCommand(method, params)
+    const result = this.sendPageCommand(page, method, params)
     void Promise.resolve(result).then(() => this.trackFetchCommand(page, method, params), () => undefined)
     return result
   }
@@ -698,19 +733,36 @@ export class EmbeddedBrowserManager {
 
   private releaseInterceptions(): void {
     for (const page of this.pages.values()) {
-      if ((!page.fetchArmed && page.fetchPaused.size === 0) || page.webContents.isDestroyed()) continue
-      for (const [requestId, url] of page.fetchPaused) {
-        void page.webContents.debugger
-          .sendCommand(
-            isAllowedBrowserUrl(url) ? "Fetch.continueRequest" : "Fetch.failRequest",
-            isAllowedBrowserUrl(url) ? { requestId } : { requestId, errorReason: "BlockedByClient" },
-          )
-          .catch(() => undefined)
+      if (!page.fetchArmed && page.fetchPaused.size === 0 && page.pausedRequests.size === 0) continue
+      this.releasePageInterception(page, "the browser controller disconnected")
+    }
+  }
+
+  // A command that dies with the target is retried once against a fresh session
+  // when replaying it is invisible to the page. Anything else fails as a typed
+  // connection failure: the caller retries and the next command re-attaches,
+  // instead of every later command being sent into a dead target.
+  private async sendPageCommand(
+    page: ManagedPage,
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<unknown> {
+    const attempts = IDEMPOTENT_PAGE_COMMANDS.has(method) ? 2 : 1
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await this.ensurePageDebugger(page).sendCommand(method, params)
+      } catch (error) {
+        if (!isTargetClosedError(error)) throw error
+        // The target is gone, so a dialog or file chooser recorded on the page
+        // cannot still be open and must not block the next action.
+        page.dialog = undefined
+        page.fileChooser = undefined
+        this.detachDebugger(page)
+        if (page.webContents.isDestroyed() || this.pages.get(page.id) !== page) {
+          throw new CdpBridgeError("not_available", "The embedded browser page is closed.")
+        }
+        if (attempt + 1 >= attempts) throw new CdpBridgeError("target_closed", TARGET_CLOSED_MESSAGE)
       }
-      page.fetchPaused.clear()
-      if (!page.fetchArmed) continue
-      page.fetchArmed = false
-      void page.webContents.debugger.sendCommand("Fetch.disable").catch(() => undefined)
     }
   }
 
@@ -741,17 +793,22 @@ export class EmbeddedBrowserManager {
       debugger_.on("message", (_event, eventMethod, eventParams) =>
         this.handleDebuggerEvent(page, eventMethod, eventParams),
       )
-      debugger_.on("detach", () => {
+      debugger_.on("detach", (_event, reason) => {
         page.debuggerAttached = false
         page.pageEnabled = false
         page.dialog = undefined
         page.fileChooser = undefined
+        // The domain went with the debugger. Chromium releases its own paused
+        // requests on detach, so the timers are dropped without answering: a
+        // continue here would re-attach a debugger the detach just removed.
+        for (const timer of page.pausedRequests.values()) clearTimeout(timer)
+        page.pausedRequests.clear()
         // The controller's Fetch interception and its isolated world live in
         // this debugger, so a detach has to be reported: keeping either would
         // leave a paused request or a ref map the page can no longer reach.
         page.fetchArmed = false
         page.fetchPaused.clear()
-        this.broadcastEvent(page, "Inspector.detached", { reason: "target_closed" })
+        this.broadcastEvent(page, "Inspector.detached", { reason })
       })
     }
     if (!page.pageEnabled) {
@@ -789,6 +846,9 @@ export class EmbeddedBrowserManager {
       if (typeof record.requestId === "string") {
         page.fetchPaused.set(record.requestId, typeof request.url === "string" ? request.url : "")
       }
+      if (typeof record.requestId === "string") this.trackPausedRequest(page, record.requestId)
+      this.broadcastEvent(page, method, params)
+      return
     }
     if (method === "Page.javascriptDialogOpening") {
       page.dialog = dialogFromEvent(params)
@@ -855,8 +915,7 @@ export class EmbeddedBrowserManager {
     // will-prevent-unload is already forced through so the navigation continues;
     // there is no native dialog left to answer.
     if (dialog.type !== "beforeunload") {
-      const debugger_ = this.ensurePageDebugger(page)
-      await debugger_.sendCommand("Page.handleJavaScriptDialog", {
+      await this.sendPageCommand(page, "Page.handleJavaScriptDialog", {
         accept: input.accept,
         ...(input.promptText === undefined ? {} : { promptText: input.promptText }),
       })
@@ -1127,6 +1186,7 @@ export class EmbeddedBrowserManager {
       fileChooser: undefined,
       fetchArmed: false,
       fetchPaused: new Map(),
+      pausedRequests: new Map<string, ReturnType<typeof setTimeout>>(),
     }
     this.pages.set(page.id, page)
     const sync = () => {
@@ -1232,6 +1292,7 @@ export class EmbeddedBrowserManager {
   private removePage(tabId: number): void {
     const existing = this.pages.get(tabId)
     if (existing === undefined) return
+    this.releasePageInterception(existing, "the tab closed")
     // A tab that goes away can never answer its pending dialog, chooser, or auth
     // challenge: clearing them here is what keeps a closed or crashed tab from
     // blocking every later action as dialog_open forever.
@@ -1251,6 +1312,72 @@ export class EmbeddedBrowserManager {
   private preferredPage(): ManagedPage | undefined {
     const candidates = [...this.pages.values()]
     return candidates.find((page) => isNavigableBrowserUrl(page.url)) ?? candidates[0]
+  }
+
+  // A request can only be held while this process can still answer it, so every
+  // paused request is tracked with a watchdog: a controller that stops
+  // answering (or never answers) releases the request instead of hanging the
+  // tab. `Fetch.disable` then stops new requests from being paused, which is
+  // what the controller re-arms when it connects again.
+  private trackPausedRequest(page: ManagedPage, requestId: string): void {
+    const existing = page.pausedRequests.get(requestId)
+    if (existing !== undefined) clearTimeout(existing)
+    page.pausedRequests.set(
+      requestId,
+      setTimeout(() => this.continuePausedRequest(page, requestId), this.pausedRequestTimeoutMs),
+    )
+  }
+
+  private continuePausedRequest(page: ManagedPage, requestId: string): void {
+    const timer = page.pausedRequests.get(requestId)
+    if (timer === undefined) return
+    clearTimeout(timer)
+    page.pausedRequests.delete(requestId)
+    const url = page.fetchPaused.get(requestId) ?? ""
+    page.fetchPaused.delete(requestId)
+    if (page.webContents.isDestroyed()) return
+    try {
+      const debugger_ = page.webContents.debugger
+      if (!debugger_.isAttached()) return
+      const allowed = isAllowedBrowserUrl(url)
+      void Promise.resolve(debugger_.sendCommand(
+        allowed ? "Fetch.continueRequest" : "Fetch.failRequest",
+        allowed ? { requestId } : { requestId, errorReason: "BlockedByClient" },
+      )).catch(() => undefined)
+    } catch {
+      // the page is gone with the request
+    }
+  }
+
+  private settlePausedRequests(page: ManagedPage, params: Record<string, unknown>, method: string): void {
+    if (method === "Fetch.disable") {
+      this.releasePageInterception(page, "the browser controller stopped intercepting")
+      return
+    }
+    if (typeof params.requestId !== "string") return
+    const timer = page.pausedRequests.get(params.requestId)
+    if (timer === undefined) return
+    clearTimeout(timer)
+    page.pausedRequests.delete(params.requestId)
+  }
+
+  private releasePageInterception(page: ManagedPage, reason: string): void {
+    for (const requestId of [...page.pausedRequests.keys()]) this.continuePausedRequest(page, requestId)
+    page.fetchArmed = false
+    page.fetchPaused.clear()
+    if (page.webContents.isDestroyed()) return
+    try {
+      const debugger_ = page.webContents.debugger
+      if (!debugger_.isAttached()) return
+      void Promise.resolve(debugger_.sendCommand("Fetch.disable")).catch(() => undefined)
+    } catch {
+      // the page is already gone
+    }
+    this.logInterceptionRelease(page, reason)
+  }
+
+  private logInterceptionRelease(page: ManagedPage, reason: string): void {
+    this.bridge?.broadcast({ method: "Omnia.interceptionReleased", params: { reason }, tabId: String(page.id) })
   }
 
   private detachDebugger(page: ManagedPage): void {
@@ -1419,6 +1546,16 @@ function redirectTarget(from: string, location: string): string | undefined {
   } catch {
     return undefined
   }
+}
+
+// Chromium reports a closed DevTools target as a transport failure, and
+// Electron surfaces the raw text. Only Electron raises errors here, so page
+// content cannot reach this test.
+function isTargetClosedError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return /target closed|target is closed|session is closed|inspector is detached|inspector\.detached/iu.test(
+    error.message,
+  )
 }
 
 function navigableOrThrow(value: string): string {

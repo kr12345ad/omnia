@@ -30,6 +30,7 @@ export const dict = {
   "browser.panel.forward": "Forward",
   "browser.panel.reload": "Reload",
   "browser.panel.address.placeholder": "Enter a URL",
+  "browser.panel.address.blocked": "Only public web addresses can be opened here.",
   "browser.panel.loading": "Loading page",
   "browser.panel.empty": "Enter a URL to browse the web",
   "browser.panel.dialog.title": "Page dialog",
