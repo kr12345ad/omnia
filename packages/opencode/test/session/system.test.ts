@@ -102,6 +102,28 @@ describe("session.system", () => {
     }
   })
 
+  test("code mode contributes an operational playbook for code sessions", () => {
+    const playbook = SystemPrompt.codeMode().join("\n")
+    expect(playbook).toContain("# Code mode")
+    // The disciplines that decide whether a coding agent's change actually
+    // works: read before editing, verify before claiming, and report honestly.
+    expect(playbook).toContain("Read a file end to end before editing it")
+    expect(playbook).toContain("Run the project's tests, lint, and typecheck after editing")
+    expect(playbook).toContain("Never report a task complete on the strength of an edit that was never")
+    // Symbol navigation must be advertised, or agents grep instead of following
+    // real definitions and call sites.
+    expect(playbook).toContain("goToDefinition")
+    expect(playbook).toContain("findReferences")
+  })
+
+  test("the code-mode playbook is a system-prompt section, not a base prompt", () => {
+    // It must not leak into a base provider prompt: that would change every
+    // session, including non-code ones.
+    for (const id of ["anthropic/claude-sonnet-4-5", "openai/gpt-5"]) {
+      expect(SystemPrompt.provider({ api: { id } } as Provider.Model)[0]).not.toContain("# Code mode")
+    }
+  })
+
   test("selects the Kimi prompt for official provider model IDs", () => {
     for (const providerID of ["kimi-for-coding", "moonshotai", "moonshotai-cn"]) {
       const prompt = SystemPrompt.provider({ providerID, api: { id: "k3" } } as Provider.Model)[0]

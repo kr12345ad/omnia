@@ -17,7 +17,34 @@ export function isNavigableBrowserUrl(value: string): boolean {
   if (!URL.canParse(value)) return false
   const url = new URL(value)
   if (url.protocol !== "http:" && url.protocol !== "https:") return false
-  return !isPrivateHost(url.hostname)
+  return !isPrivateHost(url.hostname) || isTrustedOrigin(url)
+}
+
+// Operator opt-in for privately addressed hosts, used to reach a locally hosted
+// benchmark or development server (WebArena, a preview deployment).
+//
+// Empty unless OMNIA_BROWSER_TRUSTED_ORIGINS is set, so the SSRF guard is
+// unchanged for everyone who does not configure it. Matching is on scheme, host
+// and port together: a trusted `http://localhost:8012` must not silently make
+// `http://localhost:22` or `https://localhost:8012` navigable either, and a
+// wildcard host is refused outright rather than half-honoured.
+export function isTrustedOrigin(url: URL): boolean {
+  const configured = process.env.OMNIA_BROWSER_TRUSTED_ORIGINS
+  if (configured === undefined || configured.trim().length === 0) return false
+  for (const entry of configured.split(",")) {
+    const candidate = entry.trim()
+    if (candidate.length === 0) continue
+    if (!URL.canParse(candidate)) continue
+    const trusted = new URL(candidate)
+    if (trusted.protocol !== "http:" && trusted.protocol !== "https:") continue
+    // A path or credentials in the configured entry are ignored for matching:
+    // only the origin is ever trusted, so an operator cannot widen the grant
+    // with `http://localhost:8012/admin`.
+    if (trusted.hostname.length === 0 || trusted.hostname.includes("*")) continue
+    if (trusted.origin !== url.origin) continue
+    return true
+  }
+  return false
 }
 
 // Tab identity follows the same allowlist as navigation. about:blank is a

@@ -11,6 +11,7 @@ import PROMPT_GPT from "./prompt/gpt.txt"
 import PROMPT_ASTRA from "./prompt/gpt-astra.txt"
 import PROMPT_KIMI from "./prompt/kimi.txt"
 import PROMPT_META from "./prompt/meta.txt"
+import PROMPT_CODE_MODE from "./prompt/code.txt"
 
 import PROMPT_CODEX from "./prompt/codex.txt"
 import PROMPT_TRINITY from "./prompt/trinity.txt"
@@ -24,6 +25,11 @@ import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/l
 import { Reference } from "@opencode-ai/core/reference"
 import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+
+// Code sessions get an operational playbook on top of whatever base prompt the
+// model uses. It encodes the discipline that decides benchmark outcomes: read
+// before editing, verify before claiming, and report what actually ran.
+export const codeMode = () => [PROMPT_CODE_MODE]
 
 export function provider(model: Provider.Model) {
   if (model.api.id.includes("muse")) {
@@ -54,6 +60,7 @@ export interface Interface {
   readonly environment: (model: Provider.Model) => Effect.Effect<string[]>
   readonly skills: (agent: Agent.Info) => Effect.Effect<string | undefined>
   readonly mcp: (agent: Agent.Info, permission?: PermissionV1.Ruleset) => Effect.Effect<string | undefined>
+  readonly codeMode: () => readonly string[]
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SystemPrompt") {}
@@ -66,6 +73,7 @@ const layer = Layer.effect(
     const locations = yield* LocationServiceMap.Service
 
     return Service.of({
+      codeMode,
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model) {
         const ctx = yield* InstanceState.context
         const references = yield* Effect.gen(function* () {

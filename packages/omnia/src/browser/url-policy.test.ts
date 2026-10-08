@@ -5,6 +5,7 @@ import {
   isNavigableBrowserUrl,
   isNavigableTabUrl,
   isPrivateHost,
+  isTrustedOrigin,
 } from "./url-policy"
 
 describe("browser url policy", () => {
@@ -200,5 +201,78 @@ describe("browser url policy", () => {
       expect(error).toBeInstanceOf(BrowserUrlError)
       expect((error as BrowserUrlError).code).toBe("url_blocked")
     }
+  })
+})
+
+describe("operator trusted origins", () => {
+  const withEnv = (value: string | undefined, fn: () => void) => {
+    const previous = process.env.OMNIA_BROWSER_TRUSTED_ORIGINS
+    if (value === undefined) delete process.env.OMNIA_BROWSER_TRUSTED_ORIGINS
+    else process.env.OMNIA_BROWSER_TRUSTED_ORIGINS = value
+    try {
+      fn()
+    } finally {
+      if (previous === undefined) delete process.env.OMNIA_BROWSER_TRUSTED_ORIGINS
+      else process.env.OMNIA_BROWSER_TRUSTED_ORIGINS = previous
+    }
+  }
+
+  test("private hosts stay blocked when nothing is configured", () => {
+    withEnv(undefined, () => {
+      expect(isNavigableBrowserUrl("http://localhost:8012/")).toBe(false)
+      expect(isNavigableBrowserUrl("http://127.0.0.1:8012/")).toBe(false)
+    })
+  })
+
+  test("an empty or blank value trusts nothing", () => {
+    for (const value of ["", "   "]) {
+      withEnv(value, () => {
+        expect(isNavigableBrowserUrl("http://localhost:8012/")).toBe(false)
+      })
+    }
+  })
+
+  test("a configured origin makes exactly that origin navigable", () => {
+    withEnv("http://localhost:8012", () => {
+      expect(isNavigableBrowserUrl("http://localhost:8012/simulator")).toBe(true)
+      // Public sites are unaffected by the opt-in.
+      expect(isNavigableBrowserUrl("https://example.com/")).toBe(true)
+    })
+  })
+
+  test("the grant is per scheme, host, and port, never widened", () => {
+    withEnv("http://localhost:8012", () => {
+      expect(isNavigableBrowserUrl("http://localhost:22/")).toBe(false)
+      expect(isNavigableBrowserUrl("https://localhost:8012/")).toBe(false)
+      expect(isNavigableBrowserUrl("http://127.0.0.1:8012/")).toBe(false)
+      expect(isNavigableBrowserUrl("http://evil.localhost:8012/")).toBe(false)
+    })
+  })
+
+  test("a path, credentials, or wildcard in the entry cannot widen the grant", () => {
+    withEnv("http://localhost:8012/admin", () => {
+      // Only the origin is trusted, so the path is ignored rather than honoured.
+      expect(isTrustedOrigin(new URL("http://localhost:8012/anything-else"))).toBe(true)
+    })
+    withEnv("http://user:pass@localhost:8012", () => {
+      expect(isNavigableBrowserUrl("http://localhost:8012/")).toBe(true)
+    })
+    withEnv("http://*.localhost:8012", () => {
+      expect(isNavigableBrowserUrl("http://localhost:8012/")).toBe(false)
+    })
+  })
+
+  test("several origins may be listed", () => {
+    withEnv("http://localhost:8012, https://internal.test:9000", () => {
+      expect(isNavigableBrowserUrl("http://localhost:8012/")).toBe(true)
+      expect(isNavigableBrowserUrl("https://internal.test:9000/x")).toBe(true)
+      expect(isNavigableBrowserUrl("http://localhost:9999/")).toBe(false)
+    })
+  })
+
+  test("malformed entries are skipped rather than fatal", () => {
+    withEnv("not a url, http://localhost:8012", () => {
+      expect(isNavigableBrowserUrl("http://localhost:8012/")).toBe(true)
+    })
   })
 })
