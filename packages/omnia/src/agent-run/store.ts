@@ -24,6 +24,7 @@ export const RUN_LIMITS = {
 
 export interface ScheduledRun {
   readonly id: string
+  readonly profileId: string
   readonly name: string
   readonly prompt: string
   readonly intervalMinutes: number
@@ -65,6 +66,7 @@ export class ScheduledRunStore {
   }
 
   save(input: {
+    profileId: string
     name: string
     prompt: string
     intervalMinutes: number
@@ -79,6 +81,7 @@ export class ScheduledRunStore {
     const now = Date.now()
     const run: ScheduledRun = {
       id: randomUUID(),
+      profileId: input.profileId,
       name: input.name.trim(),
       prompt: input.prompt.trim(),
       intervalMinutes: input.intervalMinutes,
@@ -175,6 +178,8 @@ function isRun(value: unknown): value is ScheduledRun {
   const run = value as Record<string, unknown>
   return (
     typeof run.id === "string" &&
+    typeof run.profileId === "string" &&
+    run.profileId.length > 0 &&
     typeof run.name === "string" &&
     typeof run.prompt === "string" &&
     typeof run.intervalMinutes === "number" &&
@@ -186,10 +191,13 @@ function isRun(value: unknown): value is ScheduledRun {
 }
 
 function validate(input: {
+  profileId?: string
   name?: string
   prompt?: string
   intervalMinutes?: number
 }): string | undefined {
+  const profileId = input.profileId?.trim() ?? ""
+  if (profileId.length === 0) return "A scheduled run needs an owner."
   const name = input.name?.trim() ?? ""
   if (name.length === 0) return "A scheduled run needs a name."
   if (name.length > RUN_LIMITS.maxNameLength) return `The name is longer than ${RUN_LIMITS.maxNameLength} characters.`

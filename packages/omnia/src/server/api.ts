@@ -140,6 +140,7 @@ export interface ApiContext {
   readonly resetSpecialists: () => void
   readonly runs: () => readonly ScheduledRun[]
   readonly saveRun: (input: {
+    profileId: string
     name: string
     prompt: string
     intervalMinutes: number
@@ -761,6 +762,11 @@ function unconfirmed(
       },
     },
   }
+}
+
+function runOwner(context: Pick<ApiContext, "auth">): string | undefined {
+  const profile = context.auth.status().profile
+  return profile === undefined ? undefined : String(profile.id)
 }
 
 /**
@@ -1695,7 +1701,12 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, denied.status, { ok: false, result: denied.result })
         return true
       }
-      json(response, 200, { ok: true, runs: context.runs() })
+      const owner = runOwner(context)
+      if (owner === undefined) {
+        json(response, 401, { ok: false, error: "Sign in to view scheduled runs." })
+        return true
+      }
+      json(response, 200, { ok: true, runs: context.runs().filter((run) => run.profileId === owner) })
       return true
     }
     if (parsed.method === "POST" && segments.length === 3 && segments[2] === "once") {
@@ -1745,12 +1756,18 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 403, { ok: false, error: "Only the signed-in desktop can schedule runs." })
         return true
       }
+      const owner = runOwner(context)
+      if (owner === undefined) {
+        json(response, 401, { ok: false, error: "Sign in to schedule runs." })
+        return true
+      }
       const unbilled = await capabilityDenied(context, "scheduled_runs", { consume: false })
       if (unbilled !== undefined) {
         json(response, unbilled.status, unbilled.payload)
         return true
       }
       const saved = context.saveRun({
+        profileId: owner,
         name: typeof body.name === "string" ? body.name : "",
         prompt: typeof body.prompt === "string" ? body.prompt : "",
         intervalMinutes: typeof body.intervalMinutes === "number" ? body.intervalMinutes : 0,
@@ -1768,6 +1785,12 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       const body = (await readBoundBody(context, request)) as Record<string, unknown> | undefined
       if (!isTrustedDesktopRequest(context, request, isRecord(body) ? body : {})) {
         json(response, 403, { ok: false, error: "Only the signed-in desktop can edit scheduled runs." })
+        return true
+      }
+      const owner = runOwner(context)
+      const current = owner === undefined ? undefined : context.runs().find((run) => run.id === id && run.profileId === owner)
+      if (current === undefined) {
+        json(response, 404, { ok: false, error: `Unknown scheduled run ${id}.` })
         return true
       }
       if (parsed.method === "DELETE") {

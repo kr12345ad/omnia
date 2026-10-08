@@ -133,7 +133,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       scheduler = new RunScheduler({
         config: runnerConfig,
         store: runs,
-        gate: async () => {
+        gate: async (run) => {
           // Every execution is billed on its own, against the CURRENT store:
           // a lapsed plan stops firing even when the entry predates the lapse,
           // and a hard allowance cannot be honored while the counter is unknown.
@@ -144,11 +144,10 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
               : { allowed: true }
           }
           const state = readBillingState(file)
-          // A server fires unattended, so the profile is whoever holds the
-          // subscription on this store; when nobody pays, the anonymous-free
-          // rules decide (scheduled_runs is NEVER on free).
-          const profile = state.subscriptions.find((entry) => entry.profileId)?.profileId
-          const result = billingCheck(state, profile, "scheduled_runs")
+          // Each queued run stays bound to its creator, even when the control
+          // plane hosts several profiles. Never charge or authorize the first
+          // subscription in the store for somebody else's unattended work.
+          const result = billingCheck(state, run.profileId, "scheduled_runs")
           if (!result.decision.allowed) {
             return { allowed: false, reason: result.decision.reason ?? "Scheduled runs are not included in this plan." }
           }

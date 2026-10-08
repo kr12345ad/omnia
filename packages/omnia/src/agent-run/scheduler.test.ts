@@ -34,7 +34,7 @@ describe("run scheduler", () => {
   test("fires a due run once and records the outcome", async () => {
     const { store, config, cleanup } = harness()
     try {
-      const saved = store.save({ name: "tick", prompt: "go", intervalMinutes: 15 })
+      const saved = store.save({ profileId: "profile-1", name: "tick", prompt: "go", intervalMinutes: 15 })
       expect(saved.ok).toBe(true)
       if (!saved.ok) return
       const scheduler = new RunScheduler({
@@ -60,7 +60,7 @@ describe("run scheduler", () => {
     const dir = mkdtempSync(join(tmpdir(), "omnia-sched-gate-"))
     const store = new ScheduledRunStore({ file: join(dir, "runs.json") })
     try {
-      store.save({ name: "tick", prompt: "go", intervalMinutes: 15 })
+      store.save({ profileId: "profile-1", name: "tick", prompt: "go", intervalMinutes: 15 })
       const config = { url: "http://127.0.0.1:9", username: "opencode", password: "x" } as const
       const scheduler = new RunScheduler({
         config,
@@ -81,7 +81,7 @@ describe("run scheduler", () => {
   test("skips disabled runs and re-checks enablement between fires", async () => {
     const { store, config, cleanup } = harness()
     try {
-      const saved = store.save({ name: "tick", prompt: "go", intervalMinutes: 15 })
+      const saved = store.save({ profileId: "profile-1", name: "tick", prompt: "go", intervalMinutes: 15 })
       if (!saved.ok) return
       store.update(saved.run.id, { enabled: false })
       const scheduler = new RunScheduler({

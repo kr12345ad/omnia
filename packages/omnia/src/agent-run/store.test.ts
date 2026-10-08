@@ -14,7 +14,7 @@ function makeStore(): { store: ScheduledRunStore; file: string } {
   return { store: new ScheduledRunStore({ file }), file }
 }
 
-const valid = { name: "Morning summary", prompt: "Summarize my unread email.", intervalMinutes: 60 }
+const valid = { profileId: "profile-1", name: "Morning summary", prompt: "Summarize my unread email.", intervalMinutes: 60 }
 
 describe("scheduled run store", () => {
   test("saves, lists, updates, and removes runs", () => {
