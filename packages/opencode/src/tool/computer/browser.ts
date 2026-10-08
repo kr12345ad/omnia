@@ -4,7 +4,7 @@ import { assertNavigableBrowserUrl } from "@opencode-ai/omnia/browser/url-policy
 import * as Tool from "../tool"
 import DESCRIPTION from "./browser.txt"
 import { configFromEnv, computerId, request } from "./client"
-import { renderFailure } from "./output"
+import { CAPS, renderFailure } from "./output"
 import { scopesForAct } from "./policy"
 
 const MAX_COORDINATE = 100_000
@@ -16,6 +16,7 @@ export const Parameters = Schema.Struct({
     "open",
     "navigate",
     "read",
+    "screenshot",
     "find",
     "images",
     "save_image",
@@ -41,7 +42,7 @@ export const Parameters = Schema.Struct({
   ]).annotate({ description: "The browser operation to perform." }),
   url: Schema.optional(Schema.String).annotate({ description: "URL for open and navigate." }),
   query: Schema.optional(Schema.String).annotate({
-    description: "What to find on the page, for example 'Search suppliers'.",
+    description: "What to find on the page, for example 'Search suppliers'. Use '*' with role 'textbox' to list all editable fields, including unnamed JavaScript controls.",
   }),
   role: Schema.optional(Schema.String).annotate({
     description: "Optional role filter for find, for example button or textbox.",
@@ -146,11 +147,11 @@ export const Parameters = Schema.Struct({
   x: Schema.optional(
     Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(MAX_COORDINATE)),
   ).annotate({
-    description: "Viewport pixel x for click when no element id is available. Use coordinates from browser_find.",
+    description: "CSS viewport pixel x for click, hover, or type when no element id is available. Use browser screenshot or find coordinates, never desktop screen coordinates.",
   }),
   y: Schema.optional(
     Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(MAX_COORDINATE)),
-  ).annotate({ description: "Viewport pixel y for click." }),
+  ).annotate({ description: "CSS viewport pixel y for click, hover, or type." }),
   deltaX: Schema.optional(
     Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(-20000), Schema.isLessThanOrEqualTo(20000)),
   ).annotate({ description: "Horizontal scroll pixels for the scroll action; positive scrolls right." }),
@@ -166,6 +167,7 @@ type BrowserResponse = {
     message?: string
     verification?: { status?: string; message?: string }
     metadata?: {
+      screenshot?: { mimeType: string; data: string; viewport?: { width: number; height: number } }
       url?: string
       title?: string
       text?: string
@@ -292,9 +294,10 @@ export const ComputerBrowserTool = Tool.define<typeof Parameters, Record<string,
           if (params.action === "upload" && (params.files === undefined || params.files.length === 0)) {
             throw new Error("The upload action requires files.")
           }
-          if (params.action === "type" && (!params.target || (params.text === undefined && params.credential === undefined))) {
-            throw new Error("The type action requires target and text or a stored credential.")
+          if (params.action === "type" && ((!params.target && (params.x === undefined || params.y === undefined)) || (params.text === undefined && params.credential === undefined))) {
+            throw new Error("The type action requires a target or viewport x/y coordinates, and text or a stored credential.")
           }
+          if (params.action === "type" && params.credential !== undefined && params.credential !== "none" && !params.target) throw new Error("Stored credentials require a named page field; use find before typing a credential.")
           if (params.action === "login") {
             // The secret is only ever taken from the vault on the computer:
             // accepting one here would put it in the conversation.
@@ -455,6 +458,11 @@ export const ComputerBrowserTool = Tool.define<typeof Parameters, Record<string,
               `verification: ${escapeUntrusted(outcome.verification.status ?? "")} — ${escapeUntrusted(outcome.verification.message)}`,
             )
           }
+          const image = metadata.screenshot
+          const attached = image?.mimeType === "image/png" && image.data.length > 0 &&
+            image.data.length <= Math.ceil(CAPS.screenshotBytes * 4 / 3) && /^[A-Za-z0-9+/]+={0,2}$/.test(image.data)
+          if (image?.viewport) lines.push(`viewport: ${image.viewport.width} × ${image.viewport.height} CSS pixels`)
+          if (params.action === "screenshot" && !attached) lines.push("The screenshot could not be attached within the inline image limit.")
           return {
             title,
             output: lines.join("\n"),
@@ -467,6 +475,7 @@ export const ComputerBrowserTool = Tool.define<typeof Parameters, Record<string,
               hash: metadata.hash,
               verification: outcome.verification?.status,
             },
+            ...(attached ? { attachments: [{ type: "file" as const, mime: "image/png", url: `data:image/png;base64,${image!.data}` }] } : {}),
           }
         }),
     }
@@ -623,6 +632,7 @@ function assertSavePath(value: string): void {
 }
 
 function browserTitle(action: string, metadata: NonNullable<BrowserResponse["result"]["metadata"]>): string {
+  if (action === "screenshot") return "Captured browser viewport"
   if (action === "read") return `Read page: ${escapeUntrusted(metadata.title ?? metadata.url ?? "page")}`
   if (action === "find") return `Found ${metadata.candidates?.length ?? 0} page element(s)`
   if (action === "tabs") return `${metadata.tabs?.length ?? 0} browser tab(s)`

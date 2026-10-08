@@ -7,6 +7,7 @@ import {
   buildRectExpression,
   buildSelectExpression,
   buildTypeExpression,
+  buildTypeFocusExpression,
   parseBrowserCandidates,
   parseFindCoverage,
 } from "./page-script"
@@ -34,6 +35,8 @@ class FakeElement {
   isContentEditable = false
   rect: FakeRect = { left: 10, top: 20, width: 100, height: 30, right: 110, bottom: 50 }
   parentElement: FakeElement | null = null
+  children: FakeElement[] = []
+  readOnly = false
   shadowRoot: FakeShadowRoot | null = null
   contentDocument: FakeDocument | null = null
 
@@ -66,6 +69,16 @@ class FakeElement {
 
   focus(): void {}
 
+  querySelectorAll(selector: string): FakeElement[] {
+    return this.children.flatMap((child) => [child, ...child.querySelectorAll(selector)]).filter((child) =>
+      selector.includes(child.tagName.toLowerCase()) || (selector.includes("[contenteditable]") && child.getAttribute("contenteditable") !== null),
+    )
+  }
+
+  contains(element: FakeElement): boolean {
+    return this === element || this.children.some((child) => child.contains(element))
+  }
+
   dispatchEvent(_event: unknown): boolean {
     return true
   }
@@ -94,6 +107,7 @@ interface FakeDocument {
   title: string
   querySelectorAll: (selector: string) => FakeElement[]
   querySelector: (selector: string) => FakeElement | null
+  getElementById: (id: string) => FakeElement | null
 }
 
 function makeDocument(elements: FakeElement[], options: { bodyText?: string; title?: string } = {}): FakeDocument {
@@ -103,6 +117,7 @@ function makeDocument(elements: FakeElement[], options: { bodyText?: string; tit
       textContent: options.bodyText ?? elements.map((el) => el.innerText || el.textContent).filter(Boolean).join("\n"),
     },
     title: options.title ?? "",
+    getElementById: (id: string) => elements.find((element) => element.getAttribute("id") === id) ?? null,
     querySelectorAll: (selector: string) => {
       // Be selector-aware for frame collection: only real frames match.
       if (selector.includes("iframe") || selector.includes("frame")) {
@@ -193,6 +208,44 @@ function findResult(expression: string, elements: FakeElement[], window: FakeWin
 }
 
 describe("page scripts", () => {
+  test("find resolves JS-field labels, aria-labelledby, and content-editable textbox roles", () => {
+    const label = new FakeElement("span", { id: "occupation-label" })
+    label.textContent = "Occupation"
+    const editor = new FakeElement("div", { contenteditable: "plaintext-only", "aria-labelledby": "occupation-label" })
+    const field = new FakeTextInput("input")
+    const birthdate = new FakeElement("span")
+    birthdate.textContent = "Birth date"
+    const group = new FakeElement("div")
+    group.children = [birthdate, field]
+    field.parentElement = group
+    const window: FakeWindow = {}
+    const elements = [label, editor, birthdate, field]
+    expect(findResult(buildFindExpression("occupation", "textbox", 8), elements, window).candidates[0]).toMatchObject({ role: "textbox", name: "Occupation" })
+    const found = findResult(buildFindExpression("birthdate", "textbox", 8), elements, window)
+    expect(found.candidates[0]).toMatchObject({ name: "Birth date", tag: "input" })
+    expect(findResult(buildFindExpression("*", "textbox", 50), elements, window).candidates).toHaveLength(2)
+  })
+
+  test("type resolves a custom wrapper's editor and refuses disabled, readonly, or non-editable targets", () => {
+    const wrapper = new FakeElement("div", { role: "textbox", "aria-label": "Occupation" })
+    const input = new FakeTextInput("input")
+    wrapper.children = [input]
+    const window: FakeWindow = {}
+    const elements = [wrapper, input]
+    const ref = findResult(buildFindExpression("occupation", "textbox", 8), elements, window).candidates[0].id
+    expect(parse(run(buildTypeExpression(ref, "Coordinator"), elements, window))).toMatchObject({ ok: true, value: "Coordinator" })
+    expect(input.value).toBe("Coordinator")
+    input.readOnly = true
+    expect(parse(run(buildTypeFocusExpression(ref), elements, window))).toMatchObject({ ok: false, reason: "element_readonly" })
+    input.readOnly = false
+    input.disabled = true
+    expect(parse(run(buildTypeExpression(ref, "wrong"), elements, window))).toMatchObject({ ok: false, reason: "element_disabled" })
+    expect(input.value).toBe("Coordinator")
+    const label = new FakeElement("label")
+    label.innerText = "Address"
+    const labelRef = findResult(buildFindExpression("address", undefined, 8), [label], window).candidates[0].id
+    expect(parse(run(buildTypeExpression(labelRef, "wrong"), [label], window))).toMatchObject({ ok: false, reason: "element_not_editable" })
+  })
   test("find lists named interactive elements and skips secret values", () => {
     const save = new FakeElement("button")
     save.innerText = "Save changes"

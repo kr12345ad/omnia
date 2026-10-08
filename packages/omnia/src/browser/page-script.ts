@@ -153,10 +153,57 @@ const ELEMENT_HELPERS = `
     return tracked && tracked.isConnected ? tracked : undefined;
   };
   const omniaIsSecret = (el) => {
-    if (!(el instanceof HTMLInputElement)) return false;
     const type = String(el.type || el.getAttribute("type") || "").toLowerCase();
     const autocomplete = String(el.autocomplete || el.getAttribute("autocomplete") || "").toLowerCase();
     return type === "password" || autocomplete === "current-password" || autocomplete === "new-password";
+  };
+  const omniaEditable = (el) => {
+    const tag = String(el.tagName || "").toLowerCase();
+    if (tag === "textarea") return true;
+    if (tag === "input") {
+      const type = String(el.type || el.getAttribute("type") || "text").toLowerCase();
+      return !["hidden", "checkbox", "radio", "file", "button", "submit", "reset", "range", "color", "image"].includes(type);
+    }
+    const editable = el.getAttribute("contenteditable");
+    return el.isContentEditable === true || editable === "" || editable === "true" || editable === "plaintext-only";
+  };
+  const omniaEditableTarget = (el) => {
+    if (omniaEditable(el)) return el;
+    if (typeof el.querySelectorAll !== "function") return el;
+    const fields = Array.from(el.querySelectorAll('input,textarea,[contenteditable]')).filter(omniaEditable);
+    return fields.length === 1 ? fields[0] : el;
+  };
+  const omniaFieldName = (el) => {
+    const text = (node) => String(node && (node.innerText || node.textContent) || "").trim().replace(/\\s+/g, " ");
+    const explicit = el.getAttribute("aria-label");
+    if (explicit && explicit.trim()) return explicit;
+    const root = typeof el.getRootNode === "function" ? el.getRootNode() : null;
+    const doc = el.ownerDocument || document;
+    const lookup = (id) => (root && typeof root.getElementById === "function" ? root.getElementById(id) : null) ||
+      (typeof doc.getElementById === "function" ? doc.getElementById(id) : null);
+    const labelled = String(el.getAttribute("aria-labelledby") || "").split(/\\s+/).filter(Boolean).map((id) => text(lookup(id))).filter(Boolean).join(" ");
+    if (labelled) return labelled;
+    const labels = Array.from(el.labels || []).map(text).filter(Boolean).join(" ");
+    if (labels) return labels;
+    const hint = el.getAttribute("placeholder") || el.getAttribute("data-placeholder") || el.getAttribute("data-label") || el.getAttribute("title");
+    if (hint) return hint;
+    if (omniaEditable(el)) {
+      // A short field group with one editor is a common JS-form pattern:
+      // <div><span>Birthdate</span><input></div>, with no label association.
+      let parent = el.parentElement;
+      for (let depth = 0; parent && depth < 2; depth++, parent = parent.parentElement) {
+        if (typeof parent.querySelectorAll !== "function") continue;
+        const fields = Array.from(parent.querySelectorAll('input,textarea,select,[contenteditable]')).filter((node) => omniaEditable(node) || String(node.tagName).toLowerCase() === "select");
+        if (fields.length !== 1 || fields[0] !== el) break;
+        const nearby = Array.from(parent.children || []).filter((node) => node !== el && !(typeof node.contains === "function" && node.contains(el)))
+          .map(text).filter((value) => value.length > 0 && value.length <= 80);
+        if (nearby.length === 1) return nearby[0];
+      }
+      return el.getAttribute("name") || el.getAttribute("autocomplete") || el.getAttribute("id") || "textbox";
+    }
+    if (String(el.tagName || "").toLowerCase() === "input" && String(el.type || el.getAttribute("type")) === "file") return "file input";
+    return el.getAttribute("alt") || (omniaIsSecret(el) ? "" : el.getAttribute("value")) || (omniaIsSecret(el) ? "" : el.value) ||
+      (typeof el.id === "string" && el.id.length > 0 ? "#" + el.id : "") || text(el);
   };
 `
 
@@ -299,8 +346,8 @@ export function buildFindExpression(query: string, role: string | undefined, lim
     const documentId = omniaDocumentId();
     const roleMap = { a: "link", button: "button", textarea: "textbox", select: "combobox", summary: "button", label: "label" };
     const inputRole = (el) => el.type === "checkbox" ? "checkbox" : el.type === "radio" ? "radio" : (el.type === "submit" || el.type === "button" || el.type === "reset") ? "button" : "textbox";
-    const roleOf = (el) => { try { return el.getAttribute("role") || (String(el.tagName || "").toLowerCase() === "input" ? inputRole(el) : roleMap[String(el.tagName || "").toLowerCase()] || String(el.tagName || "element").toLowerCase()); } catch (e) { return "element"; } };
-    const nameOf = (el) => { try { return (el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("placeholder") || el.getAttribute("alt") || el.getAttribute("value") || (el.labels && el.labels[0] ? el.labels[0].innerText : "") || (omniaIsSecret(el) ? "" : el.value) || (String(el.tagName || "").toLowerCase() === "input" && el.type === "file" ? "file input" : "") || (typeof el.id === "string" && el.id.length > 0 ? "#" + el.id : "") || el.innerText || el.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 120); } catch (e) { return ""; } };
+    const roleOf = (el) => { try { return el.getAttribute("role") || (String(el.tagName || "").toLowerCase() === "input" ? inputRole(el) : omniaEditable(el) ? "textbox" : roleMap[String(el.tagName || "").toLowerCase()] || String(el.tagName || "element").toLowerCase()); } catch (e) { return "element"; } };
+    const nameOf = (el) => { try { return String(omniaFieldName(el)).trim().replace(/\\s+/g, " ").slice(0, 120); } catch (e) { return ""; } };
     const visible = (el) => {
       try {
         const rect = el.getBoundingClientRect();
@@ -312,8 +359,8 @@ export function buildFindExpression(query: string, role: string | undefined, lim
         return true;
       } catch (e) { return false; }
     };
-    const score = (name) => { const value = name.toLowerCase(); if (value === query) return 1; if (value.startsWith(query)) return 0.9; if (value.includes(query)) return 0.75; const words = query.split(/\\s+/).filter(Boolean); const hits = words.filter((word) => value.includes(word)).length; return hits > 0 ? (0.5 * hits) / words.length : 0; };
-    const selector = 'a,button,input,textarea,select,option,summary,details,label,[role],div[id],span[id],[contenteditable],[contenteditable="true"],[onclick],[tabindex],[aria-label],[aria-labelledby],img[alt],audio,video,[data-action]';
+    const score = (name) => { const value = name.toLowerCase(); if (query === "*") return 1; if (value === query) return 1; if (value.startsWith(query)) return 0.9; if (value.includes(query)) return 0.75; const compact = (text) => text.replace(/[^a-z0-9]/g, ""); if (compact(value) && compact(value) === compact(query)) return 0.85; const words = query.split(/\\s+/).filter(Boolean); const hits = words.filter((word) => value.includes(word)).length; return hits > 0 ? (0.5 * hits) / words.length : 0; };
+    const selector = 'a,button,input,textarea,select,option,summary,details,label,[role],div[id],span[id],[contenteditable],[onclick],[tabindex],[aria-label],[aria-labelledby],img[alt],audio,video,canvas,[data-action]';
     const collected = omniaCollectScopes();
     const candidates = [];
     let scanned = 0;
@@ -379,39 +426,46 @@ export function buildTypeExpression(id: string, text: string): string {
     ${ELEMENT_HELPERS}
     const ref = ${JSON.stringify(id)};
     if (omniaIsStaleRef(ref)) return JSON.stringify({ ok: false, reason: "stale_element_reference" });
-    const el = omniaElementById(ref);
-    if (!el) return JSON.stringify({ ok: false, reason: "element_not_found" });
+    const tracked = omniaElementById(ref);
+    if (!tracked) return JSON.stringify({ ok: false, reason: "element_not_found" });
+    const el = omniaEditableTarget(tracked);
+    if (!omniaEditable(el)) return JSON.stringify({ ok: false, reason: "element_not_editable" });
+    if (el.disabled || el.getAttribute("aria-disabled") === "true") return JSON.stringify({ ok: false, reason: "element_disabled" });
+    if (el.readOnly || el.getAttribute("aria-readonly") === "true") return JSON.stringify({ ok: false, reason: "element_readonly" });
     el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
     el.focus();
+    const owner = el.ownerDocument || document;
+    const realm = owner.defaultView || window;
     const value = ${JSON.stringify(text)};
     const emit = (event) => { try { el.dispatchEvent(event); } catch (e) {} };
-    const key = (type) => { try { emit(new KeyboardEvent(type, { bubbles: true, cancelable: true, key: "Unidentified" })); } catch (e) {} };
-    const beforeInput = () => { try { emit(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertText", data: value })); } catch (e) {} };
-    if (el.isContentEditable) {
+    const eventClass = (name, fallback) => realm[name] || fallback;
+    const key = (type) => { try { emit(new (eventClass("KeyboardEvent", KeyboardEvent))(type, { bubbles: true, composed: true, cancelable: true, key: "Unidentified" })); } catch (e) {} };
+    const beforeInput = () => { try { emit(new (eventClass("InputEvent", InputEvent))("beforeinput", { bubbles: true, composed: true, cancelable: true, inputType: "insertText", data: value })); } catch (e) {} };
+    if (String(el.tagName).toLowerCase() !== "input" && String(el.tagName).toLowerCase() !== "textarea") {
       try {
-        const range = document.createRange();
+        const range = owner.createRange();
         range.selectNodeContents(el);
-        const selection = window.getSelection();
+        const selection = realm.getSelection();
         selection.removeAllRanges();
         selection.addRange(range);
       } catch (e) {}
       key("keydown");
       beforeInput();
       el.textContent = value;
-      emit(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+      emit(new (eventClass("InputEvent", InputEvent))("input", { bubbles: true, composed: true, inputType: "insertText", data: value }));
       key("keyup");
-      emit(new Event("change", { bubbles: true }));
+      emit(new (eventClass("Event", Event))("change", { bubbles: true, composed: true }));
     } else {
       try { if (typeof el.setSelectionRange === "function") el.setSelectionRange(0, String(el.value === undefined ? "" : el.value).length); } catch (e) {}
       key("keydown");
       beforeInput();
-      const prototype = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const prototype = String(el.tagName).toLowerCase() === "textarea" ? (realm.HTMLTextAreaElement || HTMLTextAreaElement).prototype : (realm.HTMLInputElement || HTMLInputElement).prototype;
       const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
       if (descriptor && descriptor.set) descriptor.set.call(el, value);
       else el.value = value;
-      emit(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+      emit(new (eventClass("InputEvent", InputEvent))("input", { bubbles: true, composed: true, inputType: "insertText", data: value }));
       key("keyup");
-      emit(new Event("change", { bubbles: true }));
+      emit(new (eventClass("Event", Event))("change", { bubbles: true, composed: true }));
     }
     if (omniaIsSecret(el)) return JSON.stringify({ ok: true, sensitive: true });
     return JSON.stringify({ ok: true, value: (el.value !== undefined ? el.value : el.textContent || "").slice(0, 200) });
@@ -425,17 +479,23 @@ export function buildTypeFocusExpression(id: string): string {
     ${ELEMENT_HELPERS}
     const ref = ${JSON.stringify(id)};
     if (omniaIsStaleRef(ref)) return JSON.stringify({ ok: false, reason: "stale_element_reference" });
-    const el = omniaElementById(ref);
-    if (!el) return JSON.stringify({ ok: false, reason: "element_not_found" });
+    const tracked = omniaElementById(ref);
+    if (!tracked) return JSON.stringify({ ok: false, reason: "element_not_found" });
+    const el = omniaEditableTarget(tracked);
+    if (!omniaEditable(el)) return JSON.stringify({ ok: false, reason: "element_not_editable" });
+    if (el.disabled || el.getAttribute("aria-disabled") === "true") return JSON.stringify({ ok: false, reason: "element_disabled" });
+    if (el.readOnly || el.getAttribute("aria-readonly") === "true") return JSON.stringify({ ok: false, reason: "element_readonly" });
     el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
     el.focus();
+    const owner = el.ownerDocument || document;
+    const realm = owner.defaultView || window;
     const tag = String(el.tagName || "").toLowerCase();
-    const editable = el.isContentEditable === true || tag === "input" || tag === "textarea";
-    if (el.isContentEditable) {
+    const editable = omniaEditable(el);
+    if (tag !== "input" && tag !== "textarea") {
       try {
-        const range = document.createRange();
+        const range = owner.createRange();
         range.selectNodeContents(el);
-        const selection = window.getSelection();
+        const selection = realm.getSelection();
         selection.removeAllRanges();
         selection.addRange(range);
       } catch (e) {}
@@ -446,13 +506,31 @@ export function buildTypeFocusExpression(id: string): string {
   })()`
 }
 
+export function buildActiveFieldExpression(): string {
+  return `(() => {
+    ${ELEMENT_HELPERS}
+    let el = document.activeElement;
+    for (let depth = 0; el && depth < 16; depth++) {
+      const inner = (el.shadowRoot && el.shadowRoot.activeElement) ||
+        (el.contentDocument && el.contentDocument.activeElement);
+      if (!inner || inner === el) break;
+      el = inner;
+    }
+    if (!el) return JSON.stringify({ ok: false });
+    const field = omniaEditableTarget(el);
+    if (!omniaEditable(field)) return JSON.stringify({ ok: false });
+    return JSON.stringify({ ok: true, id: omniaRef(omniaElementId(field)) });
+  })()`
+}
+
 export function buildValueExpression(id: string): string {
   return `(() => {
     ${ELEMENT_HELPERS}
     const ref = ${JSON.stringify(id)};
     if (omniaIsStaleRef(ref)) return JSON.stringify({ ok: false, reason: "stale_element_reference" });
-    const el = omniaElementById(ref);
-    if (!el) return JSON.stringify({ ok: false, reason: "element_not_found" });
+    const tracked = omniaElementById(ref);
+    if (!tracked) return JSON.stringify({ ok: false, reason: "element_not_found" });
+    const el = omniaEditableTarget(tracked);
     if (omniaIsSecret(el)) return JSON.stringify({ ok: true, sensitive: true });
     return JSON.stringify({ ok: true, value: (el.value !== undefined ? String(el.value) : (el.textContent || "")).slice(0, 200) });
   })()`

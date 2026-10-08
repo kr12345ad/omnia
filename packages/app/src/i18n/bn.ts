@@ -1212,5 +1212,46 @@ export const dict: Record<string, string> = {
   "settings.mcpMarketplace.truncated": "Showing {{shown}} of {{total}} matches. Refine your search to see the rest.", // TODO(i18n): needs a native review
   "settings.mcpMarketplace.setup.title": "{{server}} setup", // TODO(i18n): needs a native review
   "settings.mcpMarketplace.setup.description": "These values are written to your MCP configuration. Leave a field empty to omit it.", // TODO(i18n): needs a native review
-  "settings.mcpMarketplace.setup.secret": "Secret", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.setup.secret": "Secret", // TODO(i18n): needs a native review,
+  "settings.mcpMarketplace.pages": "Marketplace pages", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.browse": "Browse", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.details": "Details", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.detailsFor": "View {{server}} details", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.back": "Back to results", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.documentation": "Documentation", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.installCommand": "Install command", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.configuration": "Configuration", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.setup.required": "Enter a value for {{field}} before installing.", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.installedEmpty": "No installed servers match your search.", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.pagination": "Catalog pagination", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.first": "First", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.previous": "Previous", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.next": "Next", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.last": "Last", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.page": "Page {{page}} of {{pages}} · {{total}} results", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.retry": "Try again", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.runtime": "Runtime", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.runtime.all": "All runtimes", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.runtime.node": "Node.js", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.runtime.python": "Python", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.runtime.docker": "Docker", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.runtime.other": "Other", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.requirements.node": "Requires Node.js and npx on the connected agent server.", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.requirements.python": "Requires uv and uvx on the connected agent server.", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.requirements.docker": "Requires Docker and a running container engine on the connected agent server.", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.requirements.other": "Requires the configured executable on the connected agent server.", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.sort": "Sort by", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.sort.popular": "Popularity", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.sort.name": "Name A–Z", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.devtools": "Developer tools", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.productivity": "Productivity", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.ai": "AI & memory", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.search": "Search & research", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.other": "Other", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.media": "Design & media", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.browser": "Browser & automation", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.database": "Databases", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.communication": "Communication", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.finance": "Finance", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.data": "Data & analytics", // TODO(i18n): needs a native review
 }

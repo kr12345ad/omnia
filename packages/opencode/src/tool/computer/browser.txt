@@ -29,6 +29,9 @@ Actions:
 - copy_image: copy one page image to the system clipboard so it can be pasted
   into a document or chat. Address it the same way as save_image; the staged
   image bytes are read back from disk before the clipboard write is reported.
+- screenshot: capture the browser viewport as an image through Chromium. This
+  works independently of desktop Screen Recording or Accessibility permissions.
+  Use it for canvas-rendered simulators and custom widgets invisible to find.
 - click: click a found element with a real pointer action, or click x/y
   viewport pixels. Coordinates from browser_find are viewport pixels, not
   screen pixels.
@@ -54,6 +57,10 @@ Actions:
   explicitly; field selects "username" or "secret" (default). The stored
   value is never shown to the model. Prefer stored credentials for logins
   and never ask the user to paste a password into the chat.
+  For unlabeled/custom JS fields, find with query="*" and role="textbox" to
+  enumerate editors. If there is no DOM editor, take a browser screenshot and
+  type text at x/y CSS viewport coordinates; this stays unverified until you
+  inspect the actual value. Stored credentials always require a named target.
 - login: sign in to a form with a stored credential in one call. It finds
   the username and password fields, types the stored username and secret,
   submits, and then verifies with an independent page read: verified only

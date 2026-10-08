@@ -163,6 +163,7 @@ export interface BrowserAuthAnswer {
 }
 
 export interface BrowserController {
+  screenshot?(tabId?: string, sessionId?: string): Promise<{ mimeType: string; data: string; viewport?: { width: number; height: number } }>
   status(): Promise<BrowserStatusSummary>
   open(url?: string): Promise<BrowserTabSummary>
   tabs(): Promise<BrowserTabSummary[]>
@@ -241,7 +242,7 @@ export interface BrowserController {
   // and after so verification is an independent measurement, not trust in the
   // dispatched input.
   scrollPosition?(input: { tabId?: string; sessionId?: string }): Promise<{ x: number; y: number }>
-  type(target: { tabId?: string; sessionId?: string; id: string; text: string }): Promise<{ typed: boolean; value?: string }>
+  type(target: { tabId?: string; sessionId?: string; id?: string; x?: number; y?: number; text: string }): Promise<{ typed: boolean; value?: string }>
   // Optional independent value read-back. Sensitive fields answer
   // `sensitive: true` without a value so verification can never echo a secret.
   readValue?(target: { tabId?: string; sessionId?: string; id: string }): Promise<{ value?: string; sensitive?: boolean }>
@@ -4921,9 +4922,25 @@ export class ComputerManager {
             verification,
           )
         }
+        case "browser_screenshot": {
+          const denied = requireOwnedTab(tab)
+          if (denied !== undefined) return denied
+          if (browser.screenshot === undefined) return fail("operation_unavailable", "This browser runtime cannot capture its page.", false)
+          const image = await browser.screenshot(tab, sessionId)
+          if (image.mimeType !== "image/png" || typeof image.data !== "string" || !image.data || image.data.length > 14 * 1024 * 1024) {
+            return fail("invalid_action", "The browser screenshot was missing or too large to return.")
+          }
+          return ok("Captured the browser viewport. Use its CSS pixel coordinates for browser click and type.", {
+            screenshot: image,
+            ...(tab === undefined ? {} : { tab }),
+          }, unverified("The viewport was captured through Chromium; no desktop Screen Recording permission is required.", "browser-screenshot"))
+        }
         case "browser_type": {
           const id = request.target?.elementId
-          if (id === undefined) return fail("invalid_action", "Typing on a page needs an element id from browser_find.")
+          if (id === undefined && (!Number.isFinite(request.x) || !Number.isFinite(request.y) || request.x! < 0 || request.y! < 0)) {
+            return fail("invalid_action", "Typing on a page needs an element id from browser_find or viewport x/y coordinates.")
+          }
+          if (id === undefined && typedCredential !== undefined) return fail("invalid_action", "Stored credentials require a named page field; they cannot be typed by coordinates.")
           const denied = requireOwnedTab(tab)
           if (denied !== undefined) return denied
           const stale = browserStale(id)
@@ -4931,13 +4948,15 @@ export class ComputerManager {
           const text = typedCredential?.value ?? request.text ?? ""
           const typed = await browser.type({
             ...(tab === undefined ? {} : { tabId: tab }),
-            id,
+            ...(id === undefined ? { x: request.x, y: request.y } : { id }),
             text,
             ...readOptions,
           })
           const current = activeTab(tab)
           recordTab(current)
-          const verification = await this.verifyBrowserTypedValue(browser, id, text, tab, sessionId)
+          const verification = id === undefined
+            ? unverified("Text input was sent at browser viewport coordinates. Re-read the field or take a browser screenshot to confirm its value.", "browser-type-coordinate")
+            : await this.verifyBrowserTypedValue(browser, id, text, tab, sessionId)
           if (typedCredential?.credential !== undefined) {
             this.events.emit("credential.used", {
               computerId,

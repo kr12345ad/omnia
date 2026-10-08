@@ -351,8 +351,8 @@ export function validateAction(fields: ActionFields): void {
   ) {
     throw new Error("The browser_click action requires target, query, or x/y coordinates.")
   }
-  if (action === "browser_type" && (!fields.target || fields.text === undefined))
-    throw new Error("The browser_type action requires target and text.")
+  if (action === "browser_type" && ((!fields.target && (fields.x === undefined || fields.y === undefined)) || fields.text === undefined))
+    throw new Error("The browser_type action requires a target or viewport x/y coordinates and text.")
   if (action === "browser_key" && !fields.key) throw new Error("The browser_key action requires key.")
   if ((action === "browser_activate_tab" || action === "browser_close_tab") && !fields.tab)
     throw new Error(`The ${action} action requires tab.`)

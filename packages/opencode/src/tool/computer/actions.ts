@@ -59,6 +59,7 @@ export const BROWSER_ACTIONS = [
   "browser_open",
   "browser_navigate",
   "browser_read",
+  "browser_screenshot",
   "browser_find",
   "browser_images",
   "browser_save_image",

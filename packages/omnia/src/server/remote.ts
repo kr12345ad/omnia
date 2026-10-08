@@ -114,6 +114,7 @@ export class RemoteComputerDriver implements ServerComputerDriver {
     closeTab: (tabId) => this.browserCall<void>("closeTab", { tabId }),
     navigate: (url, tabId, sessionId) => this.browserCall<BrowserTabSummary>("navigate", { url, tabId, sessionId }),
     read: (tabId, options) => this.browserCall<BrowserPageSummary>("read", { tabId, options }),
+    screenshot: (tabId, sessionId) => this.browserCall<Awaited<ReturnType<NonNullable<BrowserController["screenshot"]>>>>("screenshot", { tabId, sessionId }),
     find: (query, options) => this.browserCall<BrowserElementSummary[]>("find", { query, options }),
     images: (tabId, options) => this.browserCall<BrowserImageSummary[]>("images", { tabId, options }),
     saveImage: (target) => this.browserCall<BrowserImageSave>("saveImage", { target }),

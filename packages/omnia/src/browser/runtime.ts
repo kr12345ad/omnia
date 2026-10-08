@@ -231,7 +231,9 @@ export class BrowserRuntime {
   async type(target: {
     tabId?: string
     sessionId?: string
-    id: string
+    id?: string
+    x?: number
+    y?: number
     text: string
   }): Promise<{ typed: boolean; value?: string }> {
     return this.embeddedRuntime().type(target)
@@ -261,7 +263,7 @@ export class BrowserRuntime {
     return this.embeddedRuntime().scrollPosition(options)
   }
 
-  async screenshot(tabId?: string, sessionId?: string): Promise<{ mimeType: string; data: string }> {
+  async screenshot(tabId?: string, sessionId?: string): Promise<{ mimeType: string; data: string; viewport?: { width: number; height: number } }> {
     return this.embeddedRuntime().screenshot(tabId, sessionId)
   }
 

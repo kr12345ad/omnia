@@ -457,6 +457,8 @@ export function createRemoteBrowserHandler(runtime: Browser.BrowserRuntime): Rem
         )
       case "read":
         return runtime.read(stringOrUndefined(params.tabId), params.options)
+      case "screenshot":
+        return runtime.screenshot(stringOrUndefined(params.tabId), stringOrUndefined(params.sessionId))
       case "find":
         return runtime.find(requireString(params.query, "query"), params.options)
       case "images":
@@ -518,7 +520,7 @@ export function createRemoteBrowserHandler(runtime: Browser.BrowserRuntime): Rem
         const target = browserTarget(params.target)
         return runtime.type({
           ...target,
-          id: requireString(target.id, "element id"),
+          ...(target.id === undefined ? {} : { id: target.id }),
           text: stringOrUndefined(target.text) ?? "",
         })
       }

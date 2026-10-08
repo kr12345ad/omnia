@@ -52,6 +52,7 @@ function browserHarness(): { browser: BrowserController; typed: Array<{ id: stri
     find: async () => [],
     click: async () => ({ clicked: true }),
     type: async (target) => {
+      if (target.id === undefined) throw new Error("Expected a named credential field")
       typed.push({ id: target.id, text: target.text })
       return { typed: true }
     },
@@ -312,6 +313,7 @@ describe("browser_login with a stored credential", () => {
         documentId: submitted ? "doc-2" : "doc-1",
       }),
       type: async (target) => {
+        if (target.id === undefined) throw new Error("Expected a named credential field")
         typed.push({ id: target.id, text: target.text })
         return { typed: true }
       },
@@ -445,6 +447,7 @@ describe("browser_login with a stored credential", () => {
         documentId: `doc-${step}`,
       }),
       type: async (target) => {
+        if (target.id === undefined) throw new Error("Expected a named credential field")
         typed.push({ id: target.id, text: target.text })
         return { typed: true }
       },

@@ -24,6 +24,7 @@ import {
   BROWSER_TEXT_LIMIT,
   MAX_FETCHED_IMAGE_BYTES,
   buildDocumentIdExpression,
+  buildActiveFieldExpression,
   buildFindExpression,
   buildImageFetchExpression,
   buildImageResolveExpression,
@@ -1672,13 +1673,31 @@ export class CdpRuntime {
   async type(target: {
     tabId?: string
     sessionId?: string
-    id: string
+    id?: string
+    x?: number
+    y?: number
     text: string
   }): Promise<{ typed: boolean; value?: string }> {
     await this.authorizeBrowserOperation()
     const context = await this.resolveTab(target.tabId, target.sessionId)
     await this.ensureReadyOn(context)
-    const focus = (await this.evaluateJsonOn(context, buildTypeFocusExpression(requireElementRef(target.id)), false)) as {
+    if (target.id === undefined) {
+      if (!Number.isFinite(target.x) || !Number.isFinite(target.y) || target.x! < 0 || target.y! < 0) {
+        throw new CdpError("invalid_target", "Typing needs an element reference or viewport x/y coordinates.")
+      }
+      await this.pointerClick(target.x!, target.y!, context)
+    }
+    const active = target.id === undefined
+      ? (await this.evaluateJsonOn(context, buildActiveFieldExpression()).catch(() => undefined)) as { id?: string } | undefined
+      : undefined
+    const ref = target.id ?? active?.id
+    if (ref === undefined) {
+      // A canvas editor can receive trusted text through its focus handler but
+      // has no DOM value we can inspect. Delivery alone is never verification.
+      await this.send("Input.insertText", { text: target.text }, context)
+      return { typed: true }
+    }
+    const focus = (await this.evaluateJsonOn(context, buildTypeFocusExpression(requireElementRef(ref)), false)) as {
       ok?: boolean
       reason?: string
       editable?: boolean
@@ -1690,6 +1709,9 @@ export class CdpRuntime {
         "The element reference is from a previous document. Find it again.",
       )
     }
+    if (focus.reason === "element_not_editable" || focus.reason === "element_disabled" || focus.reason === "element_readonly") {
+      throw new CdpError("invalid_target", "The target is not an enabled, writable text field. Find the editor inside the control.")
+    }
     if (focus.ok !== true) throw new CdpError("element_not_found", "The field is no longer on the page. Find it again.")
     // Trusted text insertion drives the same input pipeline as a user paste,
     // which framework value trackers and IME composition handlers observe. The
@@ -1697,7 +1719,7 @@ export class CdpRuntime {
     // confirmed (non-editable nodes or a field that rejected the insertion).
     if (focus.editable === true) {
       await this.send("Input.insertText", { text: target.text }, context)
-      const read = (await this.evaluateJsonOn(context, buildValueExpression(requireElementRef(target.id)))) as {
+      const read = (await this.evaluateJsonOn(context, buildValueExpression(requireElementRef(ref)))) as {
         ok?: boolean
         value?: string
         sensitive?: boolean
@@ -1707,7 +1729,7 @@ export class CdpRuntime {
         return { typed: true, value: escapeUntrustedText(target.text) }
       }
     }
-    const result = (await this.evaluateJsonOn(context, buildTypeExpression(requireElementRef(target.id), target.text), false)) as {
+    const result = (await this.evaluateJsonOn(context, buildTypeExpression(requireElementRef(ref), target.text), false)) as {
       ok?: boolean
       reason?: string
       value?: string
@@ -1876,17 +1898,42 @@ export class CdpRuntime {
     return { x: position.x, y: position.y }
   }
 
-  async screenshot(tabId?: string, sessionId?: string): Promise<{ mimeType: string; data: string }> {
+  async screenshot(tabId?: string, sessionId?: string): Promise<{ mimeType: string; data: string; viewport?: { width: number; height: number } }> {
     await this.authorizeBrowserOperation()
     const context = await this.resolveTab(tabId, sessionId)
-    const result = await this.send<{ data?: string }>("Page.captureScreenshot", { format: "png" }, context)
+    const geometry = await this.evaluateJsonOn(context, "JSON.stringify({ width: window.innerWidth, height: window.innerHeight, scale: window.devicePixelRatio })")
+      .catch(() => undefined) as { width?: number; height?: number; scale?: number } | undefined
+    const viewport = geometry && typeof geometry.width === "number" && typeof geometry.height === "number" &&
+      Number.isFinite(geometry.width) && Number.isFinite(geometry.height) && geometry.width > 0 && geometry.height > 0
+      ? { width: geometry.width, height: geometry.height }
+      : undefined
+    const initial = await this.send<{ data?: string }>("Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: false,
+      ...(viewport === undefined ? {} : { clip: { x: 0, y: 0, ...viewport, scale: 1 } }),
+    }, context)
+    if (typeof initial.data !== "string" || initial.data.length > MAX_SCREENSHOT_CHARACTERS) {
+      throw new CdpError("screenshot_failed", "The embedded browser returned a missing or oversized screenshot.")
+    }
+    // CDP and platform builds differ in whether the screenshot is already CSS
+    // sized. Measure the PNG instead of blindly dividing by devicePixelRatio.
+    const header = Buffer.from(initial.data.slice(0, 64), "base64")
+    const width = header.length >= 24 && header.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+      ? header.readUInt32BE(16)
+      : undefined
+    const result = viewport && width && width !== Math.round(viewport.width)
+      ? await this.send<{ data?: string }>("Page.captureScreenshot", {
+          format: "png", captureBeyondViewport: false,
+          clip: { x: 0, y: 0, ...viewport, scale: viewport.width / width },
+        }, context)
+      : initial
     if (typeof result.data !== "string") {
       throw new CdpError("screenshot_failed", "The embedded browser did not return a screenshot.")
     }
     if (result.data.length > MAX_SCREENSHOT_CHARACTERS) {
       throw new CdpError("screenshot_failed", "The screenshot was too large to return.")
     }
-    return { mimeType: "image/png", data: result.data }
+    return { mimeType: "image/png", data: result.data, ...(viewport === undefined ? {} : { viewport }) }
   }
 
   async images(tabId?: string, options: { limit?: number; sessionId?: string } = {}): Promise<BrowserImage[]> {

@@ -317,6 +317,45 @@ describe("cdp client", () => {
 })
 
 describe("cdp runtime", () => {
+  test("browser screenshot uses measured PNG size rather than assuming Retina scaling", async () => {
+    const transport = tabbedTransport(new FakeTransport(), [{ id: "tab-1", url: "https://example.test" }])
+    const image = (width: number) => {
+      const png = Buffer.alloc(32)
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(png)
+      png.writeUInt32BE(width, 16)
+      png.writeUInt32BE(width / 2, 20)
+      return png.toString("base64")
+    }
+    transport.handle("Runtime.evaluate", () => jsonValue({ width: 1000, height: 500, scale: 2 }))
+    let captures = 0
+    transport.handle("Page.captureScreenshot", () => ({ data: image(++captures === 1 ? 2000 : 1000) }))
+    const runtime = new CdpRuntime({ endpoint: "ws://127.0.0.1:9", token: "bridge-token", transport })
+    const result = await runtime.screenshot()
+    expect(Buffer.from(result.data, "base64").readUInt32BE(16)).toBe(1000)
+    expect(result.viewport).toEqual({ width: 1000, height: 500 })
+    expect(transport.callsOf("Page.captureScreenshot").map((call) => call.params.clip)).toEqual([
+      { x: 0, y: 0, width: 1000, height: 500, scale: 1 },
+      { x: 0, y: 0, width: 1000, height: 500, scale: 0.5 },
+    ])
+  })
+
+  test("coordinate typing focuses the browser and sends trusted text without inventing a value", async () => {
+    const transport = tabbedTransport(new FakeTransport(), [{ id: "tab-1", url: "https://example.test" }])
+    transport.handle("Runtime.evaluate", (params) => isReadyState(params.expression) ? readyState() : jsonValue({ ok: false }))
+    const runtime = new CdpRuntime({ endpoint: "ws://127.0.0.1:9", token: "bridge-token", transport })
+    expect(await runtime.type({ x: 100, y: 200, text: "Example text" })).toEqual({ typed: true })
+    expect(transport.callsOf("Input.dispatchMouseEvent").map((call) => call.params.type)).toEqual(["mouseMoved", "mousePressed", "mouseReleased"])
+    expect(transport.callsOf("Input.insertText").map((call) => call.params)).toEqual([{ text: "Example text" }])
+    await expect(runtime.type({ text: "wrong" })).rejects.toMatchObject({ code: "invalid_target" })
+  })
+
+  test("typing a non-editable target never calls the browser input pipeline", async () => {
+    const transport = tabbedTransport(new FakeTransport(), [{ id: "tab-1", url: "https://example.test" }])
+    transport.handle("Runtime.evaluate", (params) => isReadyState(params.expression) ? readyState() : jsonValue({ ok: false, reason: "element_not_editable" }))
+    const runtime = new CdpRuntime({ endpoint: "ws://127.0.0.1:9", token: "bridge-token", transport })
+    await expect(runtime.type({ id: "omnia-1@d1", text: "wrong" })).rejects.toMatchObject({ code: "invalid_target" })
+    expect(transport.callsOf("Input.insertText")).toHaveLength(0)
+  })
   test("reads paginated DOM text through an untrusted envelope", async () => {
     const text = "alpha beta\n\ngamma delta"
     const transport = tabbedTransport(new FakeTransport(), [
@@ -1414,7 +1453,7 @@ describe("cdp runtime churn recovery", () => {
     transport.handle("Runtime.evaluate", (params) => {
       const expression = String(params.expression)
       if (isReadyState(params.expression)) return readyState()
-      if (expression.includes("editable")) return jsonValue({ ok: true, editable: true, sensitive: false })
+      if (expression.includes("return JSON.stringify({ ok: true, editable, sensitive:")) return jsonValue({ ok: true, editable: true, sensitive: false })
       if (expression.includes("beforeinput")) return jsonValue({ ok: false, reason: "element_not_found" })
       return jsonValue({ ok: true, value: "hello" })
     })
@@ -1434,7 +1473,7 @@ describe("cdp runtime churn recovery", () => {
     transport.handle("Runtime.evaluate", (params) => {
       const expression = String(params.expression)
       if (isReadyState(params.expression)) return readyState()
-      if (expression.includes("editable")) return jsonValue({ ok: true, editable: true, sensitive: false })
+      if (expression.includes("return JSON.stringify({ ok: true, editable, sensitive:")) return jsonValue({ ok: true, editable: true, sensitive: false })
       if (expression.includes("beforeinput")) return jsonValue({ ok: true, value: "hello" })
       return jsonValue({ ok: true, value: "stale" })
     })

@@ -512,6 +512,24 @@ describe("browser verification uses per-action readback", () => {
 })
 
 describe("browser_type independent readback", () => {
+  test("coordinate typing is delivered through the browser but stays unverified", async () => {
+    const typed: unknown[] = []
+    const { browser } = browserHarness({ type: async (target) => { typed.push(target); return { typed: true } } })
+    const { manager } = createManager(baseDriver(), { browser, permissions: { SCREEN_READ: "denied", POINTER: "denied", BROWSER: "granted" } })
+    const outcome = await manager.execute("local", { action: "browser_type", x: 80, y: 90, text: "Example", sessionId: "s" })
+    expect(outcome.result.success).toBe(true)
+    expect(typed[0]).toMatchObject({ x: 80, y: 90, text: "Example" })
+    expect(outcome.result.verification?.status).toBe("unverified")
+    expect(outcome.result.verification?.method).toBe("browser-type-coordinate")
+  })
+
+  test("browser screenshots do not require physical screen or pointer permission", async () => {
+    const { browser } = browserHarness({ screenshot: async () => ({ mimeType: "image/png", data: "iVBORw0KGgo=", viewport: { width: 800, height: 600 } }) })
+    const { manager } = createManager(baseDriver(), { browser, permissions: { SCREEN_READ: "denied", POINTER: "denied", BROWSER: "granted" } })
+    const outcome = await manager.execute("local", { action: "browser_screenshot", sessionId: "s" })
+    expect(outcome.result.success).toBe(true)
+    expect(outcome.result.metadata).toMatchObject({ screenshot: { mimeType: "image/png", viewport: { width: 800, height: 600 } } })
+  })
   test("a controller-echoed value is not trusted; the field is re-read", async () => {
     const { browser } = browserHarness({
       type: async (target) => ({ typed: true, value: `echo:${target.text}` }),
