@@ -7,6 +7,11 @@ import { EventBus } from "./events"
 import { SuperskillRegistry, summarizeSuperskill } from "../superskills/registry"
 import { MemoryStore } from "../memory/store"
 import { SpecialistStore } from "../specialists/store"
+import { ScheduledRunStore } from "../agent-run/store"
+import { RunScheduler } from "../agent-run/scheduler"
+import { openCodeRunnerFromEnv } from "../agent-run/client"
+import { check as billingCheck, readBillingState, billingStateReadable, writeBillingState } from "../billing/store"
+import { failsClosed } from "../billing/plans"
 import { CredentialStore } from "../credentials"
 import { PairingManager, startPairingDiscovery } from "../pairing"
 import { CalibrationManager } from "../computer-use/calibration"
@@ -55,6 +60,7 @@ export interface OmniaServerOptions {
   readonly superskillFile?: string
   readonly memoryFile?: string
   readonly specialistsFile?: string
+  readonly runsFile?: string
   readonly credentialsFile?: string
   readonly computerUseFile?: string
   readonly pairingsFile?: string
@@ -119,6 +125,48 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     now,
   })
   const specialists = new SpecialistStore(options.specialistsFile === undefined ? {} : { file: options.specialistsFile })
+  const runs = new ScheduledRunStore(options.runsFile === undefined ? {} : { file: options.runsFile })
+  let scheduler: RunScheduler | undefined
+  try {
+    const runnerConfig = openCodeRunnerFromEnv()
+    if (runnerConfig !== undefined) {
+      scheduler = new RunScheduler({
+        config: runnerConfig,
+        store: runs,
+        gate: async () => {
+          // Every execution is billed on its own, against the CURRENT store:
+          // a lapsed plan stops firing even when the entry predates the lapse,
+          // and a hard allowance cannot be honored while the counter is unknown.
+          const file = process.env.OMNIA_BILLING_FILE
+          if (file === undefined || !billingStateReadable(file)) {
+            return failsClosed("scheduled_runs", "free")
+              ? { allowed: false, reason: "Billing is not configured, so scheduled runs are refused." }
+              : { allowed: true }
+          }
+          const state = readBillingState(file)
+          // A server fires unattended, so the profile is whoever holds the
+          // subscription on this store; when nobody pays, the anonymous-free
+          // rules decide (scheduled_runs is NEVER on free).
+          const profile = state.subscriptions.find((entry) => entry.profileId)?.profileId
+          const result = billingCheck(state, profile, "scheduled_runs")
+          if (!result.decision.allowed) {
+            return { allowed: false, reason: result.decision.reason ?? "Scheduled runs are not included in this plan." }
+          }
+          if (result.consumed) {
+            try {
+              writeBillingState(file, result.state)
+            } catch {
+              return { allowed: false, reason: "Scheduled run usage could not be stored, so the run was not started." }
+            }
+          }
+          return { allowed: true }
+        },
+      })
+      scheduler.start()
+    }
+  } catch {
+    // A malformed runner config must never stop the control plane itself.
+  }
   const credentials = new CredentialStore(
     options.credentialsFile === undefined ? {} : { file: options.credentialsFile },
   )
@@ -394,6 +442,10 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       if (removed > 0) events.emit("memory.forgotten", { data: { removed, ...query } })
       return removed
     },
+    runs: () => runs.list(),
+    saveRun: (input) => runs.save(input),
+    updateRun: (id, patch) => runs.update(id, patch),
+    removeRun: (id) => runs.remove(id),
     specialists: () => specialists.load(),
     saveSpecialists: (input) => specialists.save(input),
     resetSpecialists: () => specialists.reset(),
@@ -608,6 +660,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     stop: async () => {
       state = "stopping"
       await localModels.unload()
+      scheduler?.stop()
       superskillBridges.close()
       remote.close()
       pairingDiscovery?.close()

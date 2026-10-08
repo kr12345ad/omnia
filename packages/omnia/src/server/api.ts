@@ -11,6 +11,9 @@ import type { Superskill, SuperskillSummary } from "../superskills/types"
 import type { MemoryQuery, MemoryRecord, MemoryStats, MemoryWriteInput } from "../memory/types"
 import { isMemoryScope } from "../memory/store"
 import { DEFAULT_SPECIALISTS, SPECIALIST_LIMITS, type Specialist, type SpecialistRoster } from "../specialists/types"
+import type { ScheduledRun } from "../agent-run/store"
+import { runHeadless } from "../agent-run/runner"
+import { openCodeRunnerFromEnv } from "../agent-run/client"
 import { cuaDriverFor, type ComputerUseService } from "../computer-use/service"
 import type { CalibrationManager, CalibrationMeasurement, CalibrationProfile } from "../computer-use/calibration"
 import type { CuaAction, CuaFindQuery, CuaWaitCondition } from "../cua/types"
@@ -135,6 +138,20 @@ export interface ApiContext {
     input: unknown,
   ) => { readonly ok: true; readonly specialists: readonly Specialist[] } | { readonly ok: false; readonly error: string }
   readonly resetSpecialists: () => void
+  readonly runs: () => readonly ScheduledRun[]
+  readonly saveRun: (input: {
+    name: string
+    prompt: string
+    intervalMinutes: number
+    enabled?: boolean
+  }) => { readonly ok: true; readonly run: ScheduledRun } | { readonly ok: false; readonly error: string }
+  readonly updateRun: (
+    id: string,
+    patch: Partial<
+      Pick<ScheduledRun, "name" | "prompt" | "intervalMinutes" | "enabled" | "lastFiredAt" | "lastResult">
+    >,
+  ) => { readonly ok: true; readonly run: ScheduledRun } | { readonly ok: false; readonly error: string }
+  readonly removeRun: (id: string) => boolean
   readonly sessions: () => readonly ServerSession[]
   readonly computerUse: ComputerUseService
   readonly calibration: CalibrationManager
@@ -643,6 +660,7 @@ function billingControlPlane(): { readonly base: string; readonly token: string 
 async function capabilityDenied(
   context: Pick<ApiContext, "auth">,
   capability: Capability,
+  options: { consume?: boolean } = {},
 ): Promise<{ status: number; payload: Record<string, unknown> } | undefined> {
   const controlPlane = billingControlPlane()
   if (controlPlane === undefined) return undefined
@@ -1664,6 +1682,134 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       return true
     }
     json(response, 200, { ok: true, computer: summary })
+    return true
+  }
+
+  if (segments.length >= 2 && segments[1] === "runs") {
+    // The AI-employee surface: one-off headless runs and scheduled ones. Both
+    // are paid capabilities, so every path asks the gate before any session is
+    // created — and the scheduler asks again per execution.
+    if (parsed.method === "GET" && segments.length === 2) {
+      const denied = gateAgentAction(context, request, {}, "runs_read", "runs", ["FILES_READ"])
+      if (denied !== undefined) {
+        json(response, denied.status, { ok: false, result: denied.result })
+        return true
+      }
+      json(response, 200, { ok: true, runs: context.runs() })
+      return true
+    }
+    if (parsed.method === "POST" && segments.length === 3 && segments[2] === "once") {
+      const body = (await readBoundBody(context, request)) as Record<string, unknown> | undefined
+      if (!isRecord(body) || typeof body.prompt !== "string") {
+        json(response, 400, { ok: false, error: "A prompt string is required." })
+        return true
+      }
+      if (!isTrustedDesktopRequest(context, request, body)) {
+        json(response, 403, { ok: false, error: "Only the signed-in desktop can start a headless run." })
+        return true
+      }
+      const unbilled = await capabilityDenied(context, "api_access")
+      if (unbilled !== undefined) {
+        json(response, unbilled.status, unbilled.payload)
+        return true
+      }
+      const config = openCodeRunnerFromEnv()
+      if (config === undefined) {
+        json(response, 503, {
+          ok: false,
+          error: "Headless execution is not configured on this control plane (OMNIA_OPENCODE_URL/OMNIA_OPENCODE_PASSWORD).",
+        })
+        return true
+      }
+      try {
+        const result = await runHeadless(config, {
+          prompt: body.prompt,
+          ...(typeof body.title === "string" ? { title: body.title } : {}),
+          ...(typeof body.timeoutMs === "number" && Number.isFinite(body.timeoutMs)
+            ? { timeoutMs: body.timeoutMs }
+            : {}),
+        })
+        json(response, 200, { ok: result.ok, ...(result.ok ? { sessionId: result.sessionId, text: result.text } : { error: result.error, timedOut: result.timedOut }) })
+      } catch (error) {
+        json(response, 502, { ok: false, error: error instanceof Error ? error.message : "The headless run failed." })
+      }
+      return true
+    }
+    if (parsed.method === "POST" && segments.length === 2) {
+      const body = (await readBoundBody(context, request)) as Record<string, unknown> | undefined
+      if (!isRecord(body)) {
+        json(response, 400, { ok: false, error: "A JSON body is required." })
+        return true
+      }
+      if (!isTrustedDesktopRequest(context, request, body)) {
+        json(response, 403, { ok: false, error: "Only the signed-in desktop can schedule runs." })
+        return true
+      }
+      const unbilled = await capabilityDenied(context, "scheduled_runs", { consume: false })
+      if (unbilled !== undefined) {
+        json(response, unbilled.status, unbilled.payload)
+        return true
+      }
+      const saved = context.saveRun({
+        name: typeof body.name === "string" ? body.name : "",
+        prompt: typeof body.prompt === "string" ? body.prompt : "",
+        intervalMinutes: typeof body.intervalMinutes === "number" ? body.intervalMinutes : 0,
+        ...(typeof body.enabled === "boolean" ? { enabled: body.enabled } : {}),
+      })
+      if (!saved.ok) {
+        json(response, 400, { ok: false, error: saved.error })
+        return true
+      }
+      json(response, 200, { ok: true, run: saved.run })
+      return true
+    }
+    if ((parsed.method === "PATCH" || parsed.method === "DELETE") && segments.length === 3) {
+      const id = segments[2]!
+      const body = (await readBoundBody(context, request)) as Record<string, unknown> | undefined
+      if (!isTrustedDesktopRequest(context, request, isRecord(body) ? body : {})) {
+        json(response, 403, { ok: false, error: "Only the signed-in desktop can edit scheduled runs." })
+        return true
+      }
+      if (parsed.method === "DELETE") {
+        if (!context.removeRun(id)) {
+          json(response, 404, { ok: false, error: `Unknown scheduled run ${id}.` })
+          return true
+        }
+        json(response, 200, { ok: true, removed: id })
+        return true
+      }
+      const unbilled = await capabilityDenied(context, "scheduled_runs", { consume: false })
+      if (unbilled !== undefined) {
+        json(response, unbilled.status, unbilled.payload)
+        return true
+      }
+      if (!isRecord(body)) {
+        json(response, 400, { ok: false, error: "A JSON body is required." })
+        return true
+      }
+      const patch: {
+        name?: string
+        prompt?: string
+        intervalMinutes?: number
+        enabled?: boolean
+      } = {}
+      if (typeof body.name === "string") patch.name = body.name
+      if (typeof body.prompt === "string") patch.prompt = body.prompt
+      if (typeof body.intervalMinutes === "number") patch.intervalMinutes = body.intervalMinutes
+      if (typeof body.enabled === "boolean") patch.enabled = body.enabled
+      if (Object.keys(patch).length === 0) {
+        json(response, 400, { ok: false, error: "Nothing to update." })
+        return true
+      }
+      const updated = context.updateRun(id, patch)
+      if (!updated.ok) {
+        json(response, updated.error.startsWith("Unknown") ? 404 : 400, { ok: false, error: updated.error })
+        return true
+      }
+      json(response, 200, { ok: true, run: updated.run })
+      return true
+    }
+    json(response, 405, { ok: false, error: "Use GET, POST, PATCH, or DELETE." })
     return true
   }
 
