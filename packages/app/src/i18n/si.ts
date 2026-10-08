@@ -1169,5 +1169,23 @@ export const dict: Record<string, string> = {
   "settings.usage.usedPerMonth": "{{used}} of {{limit}} used this month", // TODO(i18n): needs a native review
   "settings.usage.sessionLength": "{{minutes}} minutes per remote session", // TODO(i18n): needs a native review
   "settings.usage.computersUsed": "{{used}} of {{limit}} computers", // TODO(i18n): needs a native review
-  "settings.usage.resetsOn": "Resets {{date}}", // TODO(i18n): needs a native review
+  "settings.usage.resetsOn": "Resets {{date}}", // TODO(i18n): needs a native review,
+  "settings.runs.title": "Scheduled runs", // TODO(i18n): needs a native review
+  "settings.runs.description": "Let your AI employee run recurring work even when the app is closed.", // TODO(i18n): needs a native review
+  "settings.runs.loading": "Loading scheduled runs...", // TODO(i18n): needs a native review
+  "settings.runs.empty": "No scheduled runs yet.", // TODO(i18n): needs a native review
+  "settings.runs.name": "Run name", // TODO(i18n): needs a native review
+  "settings.runs.namePlaceholder": "For example: Morning email summary", // TODO(i18n): needs a native review
+  "settings.runs.prompt": "Prompt", // TODO(i18n): needs a native review
+  "settings.runs.promptPlaceholder": "What should your AI employee do?", // TODO(i18n): needs a native review
+  "settings.runs.interval": "Repeat every (minutes)", // TODO(i18n): needs a native review
+  "settings.runs.create": "Schedule run", // TODO(i18n): needs a native review
+  "settings.runs.enable": "Enable", // TODO(i18n): needs a native review
+  "settings.runs.disable": "Pause", // TODO(i18n): needs a native review
+  "settings.runs.delete": "Delete", // TODO(i18n): needs a native review
+  "settings.runs.everyMinutes": "Every {{count}} minutes", // TODO(i18n): needs a native review
+  "settings.runs.everyHours": "Every {{count}} hours", // TODO(i18n): needs a native review
+  "settings.runs.everyDays": "Every {{count}} days", // TODO(i18n): needs a native review
+  "settings.runs.lastSuccess": "Last run completed.", // TODO(i18n): needs a native review
+  "settings.runs.lastFailed": "Last run failed", // TODO(i18n): needs a native review
 }

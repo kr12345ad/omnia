@@ -50,6 +50,13 @@ const api: ElectronAPI = {
     save: (specialists) => invokeWithServerMessage("specialists-save", specialists),
     reset: () => invokeWithServerMessage("specialists-reset"),
   },
+  runs: {
+    list: () => invokeWithServerMessage("runs-list"),
+    create: (input) => invokeWithServerMessage("runs-create", input),
+    update: (id, patch) => invokeWithServerMessage("runs-update", id, patch),
+    remove: (id) => invokeWithServerMessage("runs-remove", id),
+    once: (input) => invokeWithServerMessage("runs-once", input),
+  },
   auth: {
     status: () => ipcRenderer.invoke("omnia-auth-status"),
     signIn: () => ipcRenderer.invoke("omnia-auth-sign-in"),

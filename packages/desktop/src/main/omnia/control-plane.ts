@@ -58,7 +58,7 @@ export class ControlPlaneRequestError extends Error {
 
 export async function controlPlaneRequest(
   path: string,
-  method: "GET" | "POST" | "PUT" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   init: ControlPlaneRequestInit = {},
 ): Promise<{ readonly status: number; readonly json: Record<string, unknown> }> {
   const response = await fetchControlPlane(path, {
@@ -87,7 +87,7 @@ export async function controlPlaneRequest(
 
 export async function controlPlaneCall(
   path: string,
-  method: "GET" | "POST" | "PUT" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   body?: unknown,
 ): Promise<Record<string, unknown>> {
   return (await controlPlaneRequest(path, method, { body })).json

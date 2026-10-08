@@ -1,5 +1,5 @@
 import type { DesktopMenuAction } from "@opencode-ai/app/desktop-menu"
-import type { BrowserPanelPlatform, GitHubAuthPlatform, SpecialistsPlatform } from "@opencode-ai/app/context/platform"
+import type { BrowserPanelPlatform, GitHubAuthPlatform, SpecialistsPlatform, RunsPlatform } from "@opencode-ai/app/context/platform"
 import type { ComputerPlatform } from "@opencode-ai/app/computers"
 import type { ComputerUsePlatform } from "@opencode-ai/app/computer-use"
 import type { WslServersPlatform } from "@opencode-ai/app/wsl/types"
@@ -142,6 +142,7 @@ export type ElectronAPI = {
   superskills: SuperskillPlatform
   memory: MemoryPlatform
   specialists: SpecialistsPlatform
+  runs: RunsPlatform
   auth: GitHubAuthPlatform
   computers: ComputerPlatform
   computerUse: ComputerUsePlatform

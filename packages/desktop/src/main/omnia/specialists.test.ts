@@ -74,6 +74,7 @@ beforeEach(() => {
 
 afterAll(() => {
   globalThis.fetch = originalFetch
+  mock.restore()
 })
 
 describe("specialists IPC handlers", () => {

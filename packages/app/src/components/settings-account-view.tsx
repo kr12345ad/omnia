@@ -5,6 +5,7 @@ import { useLanguage } from "@/context/language"
 import { usePlatform } from "@/context/platform"
 import { checkoutPlan, openBillingPortal, useEntitlement } from "@/context/entitlement"
 import { COMPUTERS, usageLimits, type UsageLimit } from "./usage-limits"
+import { SettingsRuns } from "./settings-runs"
 
 // The Account tab: plan, purchase actions, and every finite allowance as a bar.
 //
@@ -164,6 +165,7 @@ export const SettingsAccount = () => {
               <p class="text-[13px] font-[440] text-v2-text-text-muted">{t("desktop.billing.notConfigured")}</p>
             </Show>
           </div>
+          <SettingsRuns />
           <div class="settings-v2-section">
             <h3 class="settings-v2-section-title">{t("settings.usage.title")}</h3>
             <dl class="flex flex-col gap-2" data-component="account-limits">

@@ -311,6 +311,7 @@ const createPlatform = (windowState: DesktopWindowState): Platform => {
 
     memory: window.api.memory,
     specialists: window.api.specialists,
+    runs: window.api.runs,
     auth: window.api.auth,
 
     computers: window.api.computers,

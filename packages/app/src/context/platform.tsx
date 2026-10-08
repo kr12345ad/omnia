@@ -94,6 +94,32 @@ export type SpecialistsPlatform = {
   reset(): Promise<SpecialistRoster>
 }
 
+/** Headless AI-employee runs and recurring schedules (desktop only). */
+export type ScheduledRun = {
+  readonly id: string
+  readonly name: string
+  readonly prompt: string
+  readonly intervalMinutes: number
+  readonly enabled: boolean
+  readonly createdAt: number
+  readonly updatedAt: number
+  readonly lastFiredAt?: number
+  readonly lastResult?: {
+    readonly ok: boolean
+    readonly sessionId?: string
+    readonly error?: string
+    readonly at: number
+  }
+}
+
+export type RunsPlatform = {
+  list(): Promise<readonly ScheduledRun[]>
+  create(input: { name: string; prompt: string; intervalMinutes: number }): Promise<ScheduledRun>
+  update(id: string, patch: Partial<Pick<ScheduledRun, "name" | "prompt" | "intervalMinutes" | "enabled">>): Promise<ScheduledRun>
+  remove(id: string): Promise<boolean>
+  once(input: { prompt: string; title?: string; timeoutMs?: number }): Promise<{ ok: boolean; sessionId?: string; text?: string; error?: string; timedOut?: boolean }>
+}
+
 type PickerPaths = string | string[] | null
 type OpenDirectoryPickerOptions = { title?: string; multiple?: boolean }
 type OpenAttachmentPickerOptions = {
@@ -145,6 +171,9 @@ type PlatformBase = {
 
   /** Discussion-room specialists: custom rosters on Pro and above (desktop only) */
   specialists?: SpecialistsPlatform
+
+  /** Headless AI-employee runs and recurring schedules (desktop only) */
+  runs?: RunsPlatform
 
   /** GitHub sign-in through the hosted control plane (desktop only) */
   auth?: GitHubAuthPlatform

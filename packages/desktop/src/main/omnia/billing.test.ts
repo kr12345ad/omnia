@@ -67,6 +67,7 @@ beforeEach(() => {
 
 afterAll(() => {
   globalThis.fetch = originalFetch
+  mock.restore()
 })
 
 describe("billing routes", () => {
