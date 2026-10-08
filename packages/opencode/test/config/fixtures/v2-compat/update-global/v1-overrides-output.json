@@ -7,13 +7,6 @@
     }
   },
   "mcp": {
-    "servers": {
-      "modern": {
-        "type": "local",
-        "command": ["modern-mcp"],
-        "disabled": false
-      }
-    },
     "modern": {
       "enabled": false
     }

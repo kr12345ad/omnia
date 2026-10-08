@@ -29,6 +29,7 @@ export function useSettingsCommand() {
   const language = useLanguage()
   const show = useSettingsDialog()
   const showAccount = useSettingsDialog("account")
+  const showMarketplace = useSettingsDialog("marketplace")
 
   command.register("settings", () => [
     {
@@ -43,6 +44,12 @@ export function useSettingsCommand() {
       title: language.t("desktop.menu.account"),
       category: language.t("command.category.settings"),
       onSelect: showAccount,
+    },
+    {
+      id: "settings.mcp-marketplace",
+      title: language.t("settings.mcpMarketplace.title"),
+      category: language.t("command.category.settings"),
+      onSelect: showMarketplace,
     },
   ])
 

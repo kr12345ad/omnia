@@ -72,6 +72,7 @@ for (const [path, name] of [
   ["settings-models", "SettingsModels"],
   ["settings-servers", "SettingsServers"],
   ["settings-superskills", "SettingsSuperskills"],
+  ["settings-mcp-marketplace", "SettingsMcpMarketplace"],
   ["settings-memory", "SettingsMemory"],
   ["settings-computers", "SettingsComputers"],
   ["settings-computer-use", "SettingsComputerUse"],
@@ -151,6 +152,12 @@ describe.skipIf(isServer)("Settings Account navigation", () => {
     ["legacy", legacy],
     ["v2", v2],
   ] as const) {
+    test(`${name} opens MCP Marketplace from its Settings tab`, async () => {
+      const container = await mount(() => createComponent(module!.DialogSettings, { defaultValue: "marketplace" }))
+      expect(tab(container, "marketplace").textContent).toBe("MCP Marketplace")
+      expect(tab(container, "marketplace").getAttribute("aria-selected")).toBe("true")
+      expect(container.querySelector('[data-test-panel="settings-mcp-marketplace"]')).not.toBeNull()
+    })
     test(`${name} opens directly to the shared Account page`, async () => {
       const container = await mount(() => createComponent(module!.DialogSettings, { defaultValue: "account" }))
       expectAccount(container)
@@ -201,5 +208,19 @@ describe.skipIf(isServer)("Settings Account navigation", () => {
     expect(shown).toHaveLength(1)
     const container = await mount(shown[0])
     expect(tab(container, "general").getAttribute("aria-selected")).toBe("true")
+  })
+
+  test("the MCP Marketplace command opens its page directly", async () => {
+    createRoot((dispose) => {
+      cleanups.push(dispose)
+      settings!.useSettingsCommand()
+    })
+    const command = options.find((option) => option.id === "settings.mcp-marketplace")
+    expect(command?.title).toBe("MCP Marketplace")
+    command?.onSelect?.()
+    await settle()
+    expect(shown).toHaveLength(1)
+    const container = await mount(shown[0])
+    expect(tab(container, "marketplace").getAttribute("aria-selected")).toBe("true")
   })
 })

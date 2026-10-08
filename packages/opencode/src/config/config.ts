@@ -149,14 +149,16 @@ function globalConfigFile() {
   return candidates[0]
 }
 
+const FORMAT = {
+  formattingOptions: {
+    insertSpaces: true,
+    tabSize: 2,
+  },
+}
+
 function patchJsonc(input: string, patch: unknown, path: string[] = []): string {
   if (!isRecord(patch)) {
-    const edits = modify(input, path, patch, {
-      formattingOptions: {
-        insertSpaces: true,
-        tabSize: 2,
-      },
-    })
+    const edits = modify(input, path, patch, FORMAT)
     return applyEdits(input, edits)
   }
 
@@ -173,6 +175,32 @@ function writableGlobal(info: Info) {
   // When a user changes config from a value back to default in the Desktop app, we don't want to leave a blank `"shell": "",` key
   if ("shell" in next && next.shell === "") return { ...next, shell: undefined }
   return next
+}
+
+// mcp is edited as a whole map by the marketplace (install, disable, remove).
+// Deep merging can only add or update entries, which left an uninstalled server
+// in the file forever, so a patch that carries mcp replaces the map outright.
+// An empty map removes the key instead of leaving a blank `"mcp": {},` behind.
+function replaceMcp(target: Info, mcp: Info["mcp"]) {
+  if (mcp === undefined) return target
+  if (Object.keys(mcp).length === 0) {
+    delete target.mcp
+    return target
+  }
+  target.mcp = mcp
+  return target
+}
+
+function mergeGlobalPatch(existing: Record<string, unknown>, patch: Info) {
+  return replaceMcp(mergeDeep(existing, patch) as Info, patch.mcp)
+}
+
+function patchGlobalJsonc(input: string, patch: Info) {
+  const mcp = patch.mcp
+  if (mcp === undefined) return patchJsonc(input, patch)
+  const rest = Object.fromEntries(Object.entries(patch).filter(([key]) => key !== "mcp"))
+  const withRest = patchJsonc(input, rest)
+  return applyEdits(withRest, modify(withRest, ["mcp"], Object.keys(mcp).length === 0 ? undefined : mcp, FORMAT))
 }
 
 const layer = Layer.effect(
@@ -687,13 +715,13 @@ const layer = Layer.effect(
       if (!file.endsWith(".jsonc")) {
         const existing = ConfigParse.jsonc(before, file)
         ConfigParse.schema(ConfigV1.Info, ConfigV2Compat.lower(normalizeLoadedConfig(existing), file).value, file)
-        const merged = mergeDeep(isRecord(existing) ? existing : {}, patch)
+        const merged = mergeGlobalPatch(isRecord(existing) ? existing : {}, patch)
         const serialized = JSON.stringify(merged, null, 2)
         next = yield* decodeConfig(merged, file)
         changed = serialized !== before
         if (changed) yield* writeConfigFile(file, serialized).pipe(Effect.orDie)
       } else {
-        const updated = patchJsonc(before, patch)
+        const updated = patchGlobalJsonc(before, patch)
         next = yield* decodeConfig(ConfigParse.jsonc(updated, file), file)
         changed = updated !== before
         if (changed) yield* writeConfigFile(file, updated).pipe(Effect.orDie)

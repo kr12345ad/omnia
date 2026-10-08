@@ -4,6 +4,8 @@ type Keys = keyof typeof en
 
 export const dict = {
   // TODO(i18n): needs a native review
+  ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.mcpMarketplace."))),
+  // TODO(i18n): needs a native review
   ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.runs."))),
   // TODO(i18n): needs a native review
   ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.usage."))),

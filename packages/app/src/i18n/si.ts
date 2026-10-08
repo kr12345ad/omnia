@@ -1,4 +1,8 @@
+import { dict as en } from "./en"
+
 export const dict: Record<string, string> = {
+  // TODO(i18n): needs a native review
+  ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.mcpMarketplace."))),
   "desktop.menu.app": "Omnia",
   "desktop.menu.file": "ගොනුව",
   "desktop.menu.edit": "සංස්කරණය කරන්න",
@@ -1187,5 +1191,27 @@ export const dict: Record<string, string> = {
   "settings.runs.everyHours": "Every {{count}} hours", // TODO(i18n): needs a native review
   "settings.runs.everyDays": "Every {{count}} days", // TODO(i18n): needs a native review
   "settings.runs.lastSuccess": "Last run completed.", // TODO(i18n): needs a native review
-  "settings.runs.lastFailed": "Last run failed", // TODO(i18n): needs a native review
+  "settings.runs.lastFailed": "Last run failed", // TODO(i18n): needs a native review,
+  "settings.mcpMarketplace.title": "MCP Marketplace", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.description": "Install Model Context Protocol servers and choose which ones load when Omnia starts.", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.count": "{{count}} servers", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.search": "Search servers", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.category.all": "All", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.installed": "Installed", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.catalog": "Catalog", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.install": "Install", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.installedTag": "Installed", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.startup": "Load on startup", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.remove": "Remove", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.configure": "Settings", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.needsSettings": "Needs setup", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.custom": "Added by you", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.paused": "Not loaded", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.unnamed": "No target configured", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.loading": "Loading the server catalog…", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.empty": "No servers match your search.", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.truncated": "Showing {{shown}} of {{total}} matches. Refine your search to see the rest.", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.setup.title": "{{server}} setup", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.setup.description": "These values are written to your MCP configuration. Leave a field empty to omit it.", // TODO(i18n): needs a native review
+  "settings.mcpMarketplace.setup.secret": "Secret", // TODO(i18n): needs a native review
 }

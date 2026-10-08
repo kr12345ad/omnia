@@ -12,6 +12,7 @@ import { SettingsProviders } from "./settings-providers"
 import { SettingsModels } from "./settings-models"
 import { SettingsServers } from "./settings-servers"
 import { SettingsSuperskills } from "./settings-superskills"
+import { SettingsMcpMarketplace } from "./settings-mcp-marketplace"
 import { SettingsMemory } from "./settings-memory"
 import { SettingsComputers } from "./settings-computers"
 import { SettingsComputerUse } from "./settings-computer-use"
@@ -67,6 +68,10 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
                     <Tabs.Trigger value="superskills">
                       <Icon name="mcp" />
                       {language.t("settings.superskills.title")}
+                    </Tabs.Trigger>
+                    <Tabs.Trigger value="marketplace">
+                      <Icon name="dot-grid" />
+                      {language.t("settings.mcpMarketplace.title")}
                     </Tabs.Trigger>
                     <Tabs.Trigger value="memory">
                       <Icon name="brain" />
@@ -124,6 +129,9 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
         </Tabs.Content>
         <Tabs.Content value="superskills" class="no-scrollbar">
           <SettingsSuperskills />
+        </Tabs.Content>
+        <Tabs.Content value="marketplace" class="no-scrollbar">
+          <SettingsMcpMarketplace />
         </Tabs.Content>
         <Tabs.Content value="memory" class="no-scrollbar">
           <SettingsMemory />

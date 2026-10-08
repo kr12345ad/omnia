@@ -2232,3 +2232,93 @@ test("parseManagedPlist handles empty config", async () => {
   )
   expect(config.$schema).toBe("https://opencode.ai/config.json")
 })
+
+// The marketplace edits mcp as a whole map, so a patch must be able to drop an
+// entry. Deep merging alone can only add or update, which left uninstalled
+// servers in the file forever.
+describe("global config mcp map", () => {
+  it.effect("replaces the mcp map so a removed server does not survive the patch", () =>
+    withGlobalConfig(
+      {
+        config: {
+          mcp: {
+            alpha: { type: "local", command: ["npx", "-y", "alpha"] },
+            beta: { type: "remote", url: "https://beta.example" },
+          },
+        },
+      },
+      ({ dir }) =>
+        Effect.gen(function* () {
+          const result = yield* Config.use.updateGlobal({ mcp: { beta: { type: "remote", url: "https://beta.example" } } })
+
+          expect(Object.keys(result.info.mcp ?? {})).toEqual(["beta"])
+          expect(result.changed).toBe(true)
+          const written = ConfigParse.schema(
+            ConfigV1.Info,
+            ConfigParse.jsonc(yield* FSUtil.use.readFileString(path.join(dir, "opencode.json")), "opencode.json"),
+            "opencode.json",
+          )
+          expect(Object.keys(written.mcp ?? {})).toEqual(["beta"])
+        }),
+    ),
+  )
+
+  it.effect("drops the mcp key when the patch removes the last server", () =>
+    withGlobalConfig(
+      { config: { mcp: { alpha: { type: "local", command: ["npx", "-y", "alpha"] } } } },
+      ({ dir }) =>
+        Effect.gen(function* () {
+          const result = yield* Config.use.updateGlobal({ mcp: {} })
+
+          expect(result.info.mcp).toBeUndefined()
+          const written = ConfigParse.schema(
+            ConfigV1.Info,
+            ConfigParse.jsonc(yield* FSUtil.use.readFileString(path.join(dir, "opencode.json")), "opencode.json"),
+            "opencode.json",
+          )
+          expect(written).not.toHaveProperty("mcp")
+        }),
+    ),
+  )
+
+  it.effect("replaces the mcp map in a jsonc file", () =>
+    withGlobalConfig(
+      {
+        config: {
+          mcp: {
+            alpha: { type: "local", command: ["npx", "-y", "alpha"] },
+            beta: { type: "remote", url: "https://beta.example" },
+          },
+        },
+        name: "opencode.jsonc",
+      },
+      ({ dir }) =>
+        Effect.gen(function* () {
+          const file = path.join(dir, "opencode.jsonc")
+          yield* Config.use.updateGlobal({ mcp: { beta: { type: "remote", url: "https://beta.example" } } })
+
+          const written = yield* FSUtil.use.readFileString(file)
+          const parsed = ConfigParse.schema(ConfigV1.Info, ConfigParse.jsonc(written, file), file)
+          expect(Object.keys(parsed.mcp ?? {})).toEqual(["beta"])
+        }),
+    ),
+  )
+
+  it.effect("leaves the mcp map alone when the patch does not carry one", () =>
+    withGlobalConfig(
+      { config: { mcp: { alpha: { type: "local", command: ["npx", "-y", "alpha"] } } } },
+      ({ dir }) =>
+        Effect.gen(function* () {
+          const result = yield* Config.use.updateGlobal({ username: "patch-without-mcp" })
+
+          expect(Object.keys(result.info.mcp ?? {})).toEqual(["alpha"])
+          const written = ConfigParse.schema(
+            ConfigV1.Info,
+            ConfigParse.jsonc(yield* FSUtil.use.readFileString(path.join(dir, "opencode.json")), "opencode.json"),
+            "opencode.json",
+          )
+          expect(Object.keys(written.mcp ?? {})).toEqual(["alpha"])
+        }),
+    ),
+  )
+})
