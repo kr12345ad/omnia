@@ -35,6 +35,7 @@ class FakeElement {
   isContentEditable = false
   rect: FakeRect = { left: 10, top: 20, width: 100, height: 30, right: 110, bottom: 50 }
   parentElement: FakeElement | null = null
+  previousElementSibling: FakeElement | null = null
   children: FakeElement[] = []
   readOnly = false
   shadowRoot: FakeShadowRoot | null = null
@@ -224,6 +225,46 @@ describe("page scripts", () => {
     const found = findResult(buildFindExpression("birthdate", "textbox", 8), elements, window)
     expect(found.candidates[0]).toMatchObject({ name: "Birth date", tag: "input" })
     expect(findResult(buildFindExpression("*", "textbox", 50), elements, window).candidates).toHaveLength(2)
+  })
+
+  test("find names Bubble-style sibling-block labels for bare inputs", () => {
+    // Bubble layouts put the caption in the preceding sibling block, not the
+    // input's own wrapper: <div>Birth date</div><div><input></div>.
+    const caption = new FakeElement("div")
+    caption.textContent = "Birth date"
+    const wrapper = new FakeElement("div")
+    const field = new FakeTextInput("input")
+    field.parentElement = wrapper
+    wrapper.children = [field]
+    wrapper.previousElementSibling = caption
+    const window: FakeWindow = {}
+    const found = findResult(buildFindExpression("birthdate", "textbox", 8), [caption, wrapper, field], window)
+    expect(found.candidates.map((candidate) => candidate.name)).toContain("Birth date")
+    const ref = found.candidates.find((candidate) => candidate.name === "Birth date")!.id
+    expect(parse(run(buildTypeExpression(ref, "07.14.1991"), [caption, wrapper, field], window))).toMatchObject({
+      ok: true,
+      value: "07.14.1991",
+    })
+    expect(field.value).toBe("07.14.1991")
+  })
+
+  test("sibling-block labels stop at blocks holding their own editor", () => {
+    const firstCaption = new FakeElement("div")
+    firstCaption.textContent = "First"
+    const firstWrapper = new FakeElement("div")
+    const first = new FakeTextInput("input")
+    first.parentElement = firstWrapper
+    firstWrapper.previousElementSibling = firstCaption
+    const second = new FakeTextInput("input")
+    second.parentElement = firstWrapper
+    first.parentElement = firstWrapper
+    firstWrapper.children = [first, second]
+    second.previousElementSibling = first
+    const window: FakeWindow = {}
+    // The second input shares the first input's wrapper, so the caption block
+    // must not leak onto it: it falls back to the unnamed textbox name.
+    const found = findResult(buildFindExpression("*", "textbox", 8), [firstCaption, firstWrapper, first, second], window)
+    expect(found.candidates.map((candidate) => candidate.name).sort()).toEqual(["First", "textbox"])
   })
 
   test("type resolves a custom wrapper's editor and refuses disabled, readonly, or non-editable targets", () => {

@@ -199,6 +199,41 @@ const ELEMENT_HELPERS = `
           .map(text).filter((value) => value.length > 0 && value.length <= 80);
         if (nearby.length === 1) return nearby[0];
       }
+      // Bubble-style builders put the label in the preceding sibling block:
+      // <div>Birth date</div><div><input></div>. Climb at most two levels
+      // looking for that previous sibling. It must hold no editor of its own,
+      // the input must be the only editor in its own wrapper (otherwise the
+      // caption is ambiguous between siblings), and its whole text must be
+      // short - otherwise it is page copy, not a field name.
+      const firstEditor = (scope) => {
+        if (!scope || typeof scope.querySelectorAll !== "function") return true;
+        const fields = Array.from(scope.querySelectorAll('input,textarea,select,[contenteditable]')).filter(
+          (node) => node === el || omniaEditable(node) || String(node.tagName).toLowerCase() === "select",
+        );
+        // querySelectorAll returns document order: a caption above the group
+        // names its first editor, never a later sibling sharing the wrapper.
+        return fields.length === 0 || fields[0] === el;
+      };
+      let cursor = el;
+      for (let depth = 0; depth < 3 && cursor; depth++) {
+        const previous = cursor.previousElementSibling;
+        if (previous) {
+          if (omniaEditable(previous)) break;
+          if (typeof previous.querySelectorAll === "function") {
+            const nested = Array.from(previous.querySelectorAll('input,textarea,select,[contenteditable]')).filter((node) => omniaEditable(node) || String(node.tagName).toLowerCase() === "select");
+            if (nested.length > 0) break;
+          }
+          const caption = text(previous);
+          if (caption.length > 0 && caption.length <= 80) {
+            if (firstEditor(cursor)) return caption;
+            break;
+          }
+          if (caption.length > 80) break;
+          cursor = previous;
+          continue;
+        }
+        cursor = cursor.parentElement;
+      }
       return el.getAttribute("name") || el.getAttribute("autocomplete") || el.getAttribute("id") || "textbox";
     }
     if (String(el.tagName || "").toLowerCase() === "input" && String(el.type || el.getAttribute("type")) === "file") return "file input";
