@@ -19,6 +19,7 @@ import type {
   UIElement,
 } from "../protocol"
 import { retrieveElements } from "../retrieval"
+import { commandEnvError } from "./command-env"
 import type { HostDriver, HostRevalidation } from "./host-driver"
 import { allowCapability, type DriverAccess } from "./linux"
 import { executeShellCommand, runProcess, runProcessWithInput, type ProcessResult } from "./process"
@@ -1035,19 +1036,15 @@ JSON.stringify({ ok: true })
         }
       }
     }
-    // A command must not be able to replace the loader or the environment the
-    // runtime depends on (mirroring the Linux boundary; DYLD_* is the macOS
-    // equivalent of LD_*).
-    const forbidden = new Set(["PATH", "DISPLAY", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "NODE_OPTIONS"])
-    const unsafe = Object.keys(request.env ?? {}).find((key) => forbidden.has(key.toUpperCase()))
-    if (unsafe !== undefined) {
+    const envError = commandEnvError(request.env)
+    if (envError !== undefined) {
       return {
         success: false,
         status: "failed",
-        message: `The command environment cannot override ${unsafe}.`,
+        message: envError,
         error: {
           code: "invalid_env",
-          message: `The command environment cannot override ${unsafe}.`,
+          message: envError,
           retryable: false,
         },
       }

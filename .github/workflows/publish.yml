@@ -371,6 +371,7 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=4096
           OPENCODE_VERSION: ${{ needs.version.outputs.version }}
           OPENCODE_CHANNEL: ${{ needs.version.outputs.channel }}
+          OMNIA_DISABLE_UPDATES: ${{ (needs.version.outputs.channel == 'beta' && '0') || '1' }}
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ vars.SENTRY_ORG }}
           SENTRY_PROJECT: ${{ vars.WEB_SENTRY_PROJECT }}
@@ -386,6 +387,7 @@ jobs:
         timeout-minutes: 60
         env:
           OPENCODE_CHANNEL: ${{ needs.version.outputs.channel }}
+          OMNIA_UPDATE_URL: ${{ (needs.version.outputs.channel == 'beta' && 'https://omnia.openfoodpantry.org/updater/v1') || '' }}
           GH_TOKEN: ${{ steps.committer.outputs.token }}
           CSC_KEYCHAIN: build.keychain
           APPLE_API_KEY: ${{ runner.temp }}/apple-api-key.p8
@@ -401,6 +403,7 @@ jobs:
         timeout-minutes: 60
         env:
           OPENCODE_CHANNEL: ${{ needs.version.outputs.channel }}
+          OMNIA_UPDATE_URL: ${{ (needs.version.outputs.channel == 'beta' && 'https://omnia.openfoodpantry.org/updater/v1') || '' }}
           GH_TOKEN: ${{ steps.committer.outputs.token }}
           CSC_KEYCHAIN: build.keychain
           APPLE_API_KEY: ${{ runner.temp }}/apple-api-key.p8

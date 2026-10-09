@@ -357,6 +357,67 @@ describe("linux command boundary", () => {
     expect(result.command?.stdout).toBe("one\ntwo\n")
   })
 
+  test("rejects loader and startup env overrides before argv or shell execution", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "omnia-command-env-"))
+    const probe = join(directory, "spawned")
+    const host = new LinuxHostDriver()
+    try {
+      for (const key of [
+        "PATH", "DISPLAY", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "LD_FUTURE_OPTION",
+        "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DYLD_FUTURE_OPTION",
+        "BASH_ENV", "ENV", "SHELLOPTS", "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONHOME",
+        "RUBYOPT", "RUBYLIB", "PERL5OPT", "PERL5LIB", "BUN_OPTIONS", "BUN_FUTURE_OPTION",
+      ].flatMap((key) => [key, key.toLowerCase()])) {
+        for (const command of [`touch ${probe}`, `touch ${probe}; true`]) {
+          const result = await host.runCommand({ command, env: { [key]: "" } })
+          expect(result.success, key).toBe(false)
+          expect(result.error).toMatchObject({ code: "invalid_env", retryable: false })
+          expect(result.command).toBeUndefined()
+          expect(existsSync(probe)).toBe(false)
+        }
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects malformed env names and NUL values without exposing values", async () => {
+    const host = new LinuxHostDriver()
+    for (const env of [
+      ...["", "1KEY", "BAD=KEY", "BAD-KEY", "BAD KEY", "BAD\nKEY", "KEY\n", "BAD\0KEY", "éKEY"]
+        .map((key) => ({ [key]: "private-value" })),
+      { VALID_KEY: "\0private-value" },
+      { VALID_KEY: "private-value\0tail" },
+      { VALID_KEY: "private-value\0" },
+    ]) {
+      for (const command of ["true", "true; true"]) {
+        const result = await host.runCommand({ command, env })
+        expect(result.error).toMatchObject({ code: "invalid_env", retryable: false })
+        expect(result.command).toBeUndefined()
+        expect(JSON.stringify(result)).not.toContain("private-value")
+      }
+    }
+  })
+
+  test("passes ordinary settings and credentials unchanged to argv and shell commands", async () => {
+    const env = {
+      _omnia_setting: "spaces 'quotes' = unicode ✓\nsecond line",
+      OMNIA_EMPTY: "",
+      OMNIA_CREDENTIAL_USERNAME: "alice",
+      OMNIA_CREDENTIAL_PASSWORD: "password with spaces",
+      OMNIA_CREDENTIAL_TOKEN: "token=value",
+    }
+    const host = new LinuxHostDriver()
+    for (const command of [
+      `printenv ${Object.keys(env).join(" ")}`,
+      `printf '%s\\n' ${Object.keys(env).map((key) => `"$${key}"`).join(" ")}`,
+    ]) {
+      const result = await host.runCommand({ command, env })
+      expect(result.success).toBe(true)
+      expect(result.command?.stdout).toBe(Object.values(env).join("\n") + "\n")
+    }
+  })
+
   test("captures child stdin errors in CommandResult", async () => {
     const host = new LinuxHostDriver()
     const result = await host.runCommand({

@@ -6,9 +6,7 @@ import { CredentialStore, type CredentialRule } from "./store"
 
 function storeWith(rule: CredentialRule): CredentialStore {
   const store = new CredentialStore({ file: join(mkdtempSync(join(tmpdir(), "omnia-rule-match-")), "credentials.json") })
-  // A wildcard computer is the widest blast radius: every machine asks, so a
-  // loose url rule here types the secret anywhere.
-  store.save({ computerId: "*", name: "portal", secret: "hunter2", rules: [rule] })
+  store.save({ computerId: "local", name: "portal", secret: "hunter2", rules: [rule] })
   return store
 }
 
@@ -91,13 +89,13 @@ describe("credential rule ranking", () => {
       file: join(mkdtempSync(join(tmpdir(), "omnia-rule-match-")), "credentials.json"),
     })
     store.save({
-      computerId: "*",
+      computerId: "local",
       name: "url",
       secret: "u",
       rules: [{ kind: "url", match: "https://portal.example/admin/settings/profile/security" }],
     })
-    store.save({ computerId: "*", name: "app", secret: "a", rules: [{ kind: "application", match: "Portal" }] })
-    store.save({ computerId: "*", name: "cmd", secret: "c", rules: [{ kind: "command", match: "portalctl reload" }] })
+    store.save({ computerId: "local", name: "app", secret: "a", rules: [{ kind: "application", match: "Portal" }] })
+    store.save({ computerId: "local", name: "cmd", secret: "c", rules: [{ kind: "command", match: "portalctl reload" }] })
 
     const url = "https://portal.example/admin/settings/profile/security"
     // A 50 character url rule never outranks a 6 character application rule.
@@ -117,9 +115,9 @@ describe("credential rule ranking", () => {
     const store = new CredentialStore({
       file: join(mkdtempSync(join(tmpdir(), "omnia-rule-match-")), "credentials.json"),
     })
-    store.save({ computerId: "*", name: "portal", secret: "p", rules: [{ kind: "url", match: "https://portal.example" }] })
+    store.save({ computerId: "local", name: "portal", secret: "p", rules: [{ kind: "url", match: "https://portal.example" }] })
     store.save({
-      computerId: "*",
+      computerId: "local",
       name: "admin",
       secret: "a",
       rules: [{ kind: "url", match: "https://portal.example/admin" }],

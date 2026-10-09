@@ -8,6 +8,7 @@ import { startOmniaServer } from "./server"
 import type { ServerComputerDriver } from "./computers"
 import type { HostDriver } from "../daemon/host-driver"
 import type { CommandRequest } from "../protocol"
+import { chmodSync, closeSync, openSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 
 function toServerDriver(driver: HostDriver): ServerComputerDriver {
   return {
@@ -71,21 +72,55 @@ const handle = await startOmniaServer({
   ...(process.env.OMNIA_PUBLIC_URL === undefined ? {} : { publicUrl: process.env.OMNIA_PUBLIC_URL }),
   // Hosted control planes gate pairing centrally; LAN discovery is opt-in.
   discovery: process.env.OMNIA_DISCOVERY === "1",
+  ...(process.env.OMNIA_CORS_ORIGINS === undefined ? {} : {
+    corsOrigins: process.env.OMNIA_CORS_ORIGINS.split(",").map((origin) => origin.trim()).filter(Boolean),
+  }),
   ...(process.env.OMNIA_AUTH_FILE === undefined ? {} : { authFile: process.env.OMNIA_AUTH_FILE }),
   ...(process.env.OMNIA_PAIRINGS_FILE === undefined ? {} : { pairingsFile: process.env.OMNIA_PAIRINGS_FILE }),
   ...(process.env.OMNIA_MODELS_DIR === undefined ? {} : { modelsDir: process.env.OMNIA_MODELS_DIR }),
 })
 
-console.log(
-  JSON.stringify({
-    url: handle.url,
-    token: handle.token,
-    serverId: handle.serverId,
-    ...(localDriver === undefined ? {} : { computerId: localDriver.id }),
-    platform: process.platform,
-    pid: process.pid,
-  }),
-)
+// The bearer is never printed: stdout is captured by supervisors, journals and
+// log shippers, and any of them would then hold a root credential. When the
+// token came from the environment the operator already has it; when it was
+// auto-generated it is written once to a 0600 file the operator can read.
+if (process.env.OMNIA_SERVER_TOKEN === undefined) {
+  const infoFile = process.env.OMNIA_SERVER_INFO_FILE ?? "./omnia-server-info.json"
+  const temporary = `${infoFile}.${process.pid}.tmp`
+  const body = JSON.stringify(
+    {
+      url: handle.url,
+      token: handle.token,
+      serverId: handle.serverId,
+      ...(localDriver === undefined ? {} : { computerId: localDriver.id }),
+      platform: process.platform,
+      pid: process.pid,
+    },
+    null,
+    2,
+  )
+  try {
+    const fd = openSync(temporary, "wx", 0o600)
+    try {
+      writeFileSync(fd, body)
+    } finally {
+      closeSync(fd)
+    }
+    renameSync(temporary, infoFile)
+    chmodSync(infoFile, 0o600)
+  } catch (error) {
+    try {
+      unlinkSync(temporary)
+    } catch {
+      // Already gone.
+    }
+    console.error(`Could not write server credentials to ${infoFile}. Refusing to print the token instead.`)
+    process.exit(1)
+  }
+  console.log(`Omnia server listening on ${handle.url} (credentials written to ${infoFile})`)
+} else {
+  console.log(`Omnia server listening on ${handle.url}`)
+}
 
 const shutdown = async (signal: string) => {
   console.log(`Received ${signal}; stopping the Omnia server.`)

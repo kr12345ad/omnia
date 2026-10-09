@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { DarwinHostDriver } from "./darwin"
@@ -24,11 +24,41 @@ describe("macOS command boundary", () => {
     expect(typeof result.error === "object" ? result.error.code : undefined).toBe("invalid_cwd")
   })
 
-  test("rejects environment overrides", async () => {
-    for (const key of ["PATH", "DISPLAY", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "NODE_OPTIONS"]) {
-      const result = await testDriver().runCommand({ command: "true", env: { [key]: "evil" } })
-      expect(result.success).toBe(false)
-      expect(typeof result.error === "object" ? result.error.code : undefined).toBe("invalid_env")
+  test("rejects loader and startup env overrides before shell execution", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "omnia-darwin-env-"))
+    const probe = join(directory, "spawned")
+    const host = testDriver()
+    try {
+      for (const key of [
+        "PATH", "DISPLAY", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "LD_FUTURE_OPTION",
+        "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "DYLD_FRAMEWORK_PATH", "DYLD_FUTURE_OPTION",
+        "BASH_ENV", "ENV", "SHELLOPTS", "NODE_OPTIONS", "NODE_PATH", "PYTHONPATH", "PYTHONHOME",
+        "RUBYOPT", "RUBYLIB", "PERL5OPT", "PERL5LIB", "BUN_OPTIONS", "BUN_FUTURE_OPTION",
+      ].flatMap((key) => [key, key.toLowerCase()])) {
+        const result = await host.runCommand({ command: `touch ${probe}`, env: { [key]: "" } })
+        expect(result.success, key).toBe(false)
+        expect(result.error).toMatchObject({ code: "invalid_env", retryable: false })
+        expect(result.command).toBeUndefined()
+        expect(existsSync(probe)).toBe(false)
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("rejects malformed env names and NUL values without exposing values", async () => {
+    const host = testDriver()
+    for (const env of [
+      ...["", "1KEY", "BAD=KEY", "BAD-KEY", "BAD KEY", "BAD\nKEY", "KEY\n", "BAD\0KEY", "éKEY"]
+        .map((key) => ({ [key]: "private-value" })),
+      { VALID_KEY: "\0private-value" },
+      { VALID_KEY: "private-value\0tail" },
+      { VALID_KEY: "private-value\0" },
+    ]) {
+      const result = await host.runCommand({ command: "true", env })
+      expect(result.error).toMatchObject({ code: "invalid_env", retryable: false })
+      expect(result.command).toBeUndefined()
+      expect(JSON.stringify(result)).not.toContain("private-value")
     }
   })
 })
@@ -107,6 +137,22 @@ describeShell("macOS screen info", () => {
 })
 
 describeShell("macOS command execution", () => {
+  test("passes ordinary settings and credentials unchanged to shell commands", async () => {
+    const env = {
+      _omnia_setting: "spaces 'quotes' = unicode ✓\nsecond line",
+      OMNIA_EMPTY: "",
+      OMNIA_CREDENTIAL_USERNAME: "alice",
+      OMNIA_CREDENTIAL_PASSWORD: "password with spaces",
+      OMNIA_CREDENTIAL_TOKEN: "token=value",
+    }
+    const result = await testDriver().runCommand({
+      command: `printf '%s\\n' ${Object.keys(env).map((key) => `"$${key}"`).join(" ")}`,
+      env,
+    })
+    expect(result.success).toBe(true)
+    expect(result.command?.stdout).toBe(Object.values(env).join("\n") + "\n")
+  })
+
   test("captures output, exit codes, and stdin", async () => {
     const host = testDriver()
     const result = await host.runCommand({ command: "printf omnia-darwin" })

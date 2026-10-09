@@ -94,6 +94,20 @@ const subscriptionEvent = (plan: string, overrides: Record<string, unknown> = {}
 })
 
 describe("stripe webhook", () => {
+  test("anonymous status traffic does not starve a valid signed webhook", async () => {
+    await withServer(async (server) => {
+      for (let index = 0; index < 130; index++) {
+        expect((await fetch(`${server.url}/v1/auth/github/status`)).status).toBe(200)
+      }
+      const body = JSON.stringify(subscriptionEvent("pro"))
+      const response = await fetch(`${server.url}/v1/billing/stripe/webhook`, {
+        method: "POST", headers: { "stripe-signature": signed(body), "content-type": "application/json" }, body,
+      })
+      expect(response.status).toBe(200)
+      expect(readBillingState(process.env.OMNIA_BILLING_FILE).subscriptions[0]?.plan).toBe("pro")
+    })
+  })
+
   test("a correctly signed subscription upgrades the profile", async () => {
     await withServer(async (server) => {
       const body = JSON.stringify(subscriptionEvent("pro"))

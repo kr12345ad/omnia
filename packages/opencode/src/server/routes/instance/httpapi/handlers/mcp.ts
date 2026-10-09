@@ -20,6 +20,14 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
       ).pipe(Effect.mapError(() => new HttpApiError.BadRequest({})))
     })
 
+    const health = Effect.fn("McpHttpApi.health")(function* (ctx: { params: { name: string } }) {
+      return yield* mcp.health(ctx.params.name).pipe(
+        Effect.catchTag("MCP.NotFoundError", (error) =>
+          Effect.fail(new McpServerNotFoundError({ name: error.name, message: `MCP server not found: ${error.name}` })),
+        ),
+      )
+    })
+
     const authStart = Effect.fn("McpHttpApi.authStart")(function* (ctx: { params: { name: string } }) {
       return yield* Effect.gen(function* () {
         if (!(yield* mcp.supportsOAuth(ctx.params.name))) {
@@ -104,6 +112,7 @@ export const mcpHandlers = HttpApiBuilder.group(InstanceHttpApi, "mcp", (handler
     return handlers
       .handle("status", status)
       .handle("add", add)
+      .handle("health", health)
       .handle("authStart", authStart)
       .handle("authCallback", authCallback)
       .handle("authAuthenticate", authAuthenticate)

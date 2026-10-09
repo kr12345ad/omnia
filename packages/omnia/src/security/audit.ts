@@ -1,4 +1,5 @@
 import { redactSecrets, redactText, secretFindings } from "./redaction"
+import { createHash } from "node:crypto"
 import { makeProvenance } from "./provenance"
 import type {
   AuditEvent,
@@ -39,12 +40,7 @@ const nextId = () => `audit_${Date.now().toString(36)}_${(auditSequence += 1).to
 const safeText = (value: string) => redactText(value).slice(0, 512)
 
 const hashText = (value: string) => {
-  let hash = 2166136261
-  for (const character of value) {
-    hash ^= character.codePointAt(0) ?? 0
-    hash = Math.imul(hash, 16777619)
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0")
+  return createHash("sha256").update(value).digest("hex")
 }
 
 export function contentFingerprint(value: string): string {
@@ -242,9 +238,6 @@ export class AuditTrail {
     return Object.freeze([...this.#events])
   }
 
-  clear(): void {
-    this.#events = []
-  }
 }
 
 export const audit = createAuditEvent

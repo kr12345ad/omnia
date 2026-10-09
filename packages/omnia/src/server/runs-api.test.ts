@@ -18,10 +18,12 @@ const CONTROL_TOKEN = "control-plane-token"
 let dir = ""
 let saved: Record<string, string | undefined> = {}
 let checks: string[] = []
+let checkedProfiles: Array<string | null> = []
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "omnia-runs-api-"))
   checks = []
+  checkedProfiles = []
   saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]))
   for (const key of ENV_KEYS) delete process.env[key]
   writeFileSync(
@@ -55,6 +57,7 @@ function startControlPlane(plan: Plan) {
       }
       const body = (await request.json()) as { capability?: unknown }
       checks.push(String(body.capability))
+      checkedProfiles.push(request.headers.get("x-omnia-profile"))
       if (plan === "error") return Response.json({ ok: false, error: "boom" }, { status: 500 })
       const allowed = plan === "pro"
       return Response.json(
@@ -183,6 +186,32 @@ describe("POST /v1/runs", () => {
 })
 
 describe("PATCH/DELETE /v1/runs/:id", () => {
+  test("a different signed-in caller cannot inherit the operator's run ownership or bill its account", async () => {
+    await withServer("pro", async (server) => {
+      const created = await fetch(`${server.url}/v1/runs`, {
+        method: "POST", headers: headers(server),
+        body: JSON.stringify({ name: "operator run", prompt: "go", intervalMinutes: 15 }),
+      })
+      expect(created.status).toBe(200)
+      const ownerRun = (await created.json()).run as { id: string }
+      const desktop = server.auth.mintDesktopToken({ id: 99, login: "other-account" })!
+      const otherHeaders = { authorization: `Bearer ${desktop}`, "content-type": "application/json" }
+      const list = await fetch(`${server.url}/v1/runs`, { headers: otherHeaders })
+      expect((await list.json()).runs).toEqual([])
+      const removed = await fetch(`${server.url}/v1/runs/${ownerRun.id}`, { method: "DELETE", headers: otherHeaders })
+      expect(removed.status).toBe(404)
+      const otherRun = await fetch(`${server.url}/v1/runs`, {
+        method: "POST", headers: otherHeaders,
+        body: JSON.stringify({ name: "other run", prompt: "go", intervalMinutes: 15 }),
+      })
+      expect(otherRun.status).toBe(200)
+      expect((await otherRun.json()).run.profileId).toBe("99")
+      expect(checkedProfiles.at(-1)).toBe("99")
+      const operatorList = await fetch(`${server.url}/v1/runs`, { headers: headers(server) })
+      expect((await operatorList.json()).runs.map((run: { id: string }) => run.id)).toEqual([ownerRun.id])
+    })
+  })
+
   test("patch updates and delete removes", async () => {
     await withServer("pro", async (server) => {
       const created = await fetch(`${server.url}/v1/runs`, {

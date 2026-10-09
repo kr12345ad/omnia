@@ -4,7 +4,7 @@ import { sessionProof } from "./api"
 import { OMNIA_ACTION_CATALOG } from "./catalog"
 import { sliceTypeText } from "./computers"
 import { parseActionScript, renderToolSchemas } from "./text-protocol"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { BrowserController, ServerComputerDriver } from "./computers"
@@ -157,6 +157,14 @@ const headers = (server: { token: string }, sessionId?: string) => ({
   ...(sessionId === undefined ? {} : { "x-omnia-session-proof": sessionProof(server.token, sessionId) }),
 })
 
+async function openSessionBrowser(server: { token: string; url: string }, sessionId: string) {
+  const response = await fetch(`${server.url}/v1/computers/local/actions`, {
+    method: "POST", headers: headers(server, sessionId),
+    body: JSON.stringify({ action: "browser_open", url: "https://example.com", sessionId, approve: true, approvedScopes: ["BROWSER"] }),
+  })
+  expect(response.status).toBe(200)
+}
+
 describe("omnia server", () => {
   test("starts on loopback with health and capability reporting", async () => {
     await withServer(async (server) => {
@@ -182,13 +190,107 @@ describe("omnia server", () => {
     })
   })
 
-  test("answers CORS preflight before the bearer check", async () => {
+  test("only explicit desktop origins may preflight; actual requests still require auth", async () => {
     await withServer(async (server) => {
       const response = await fetch(`${server.url}/v1/computers/local/actions`, { method: "OPTIONS" })
-      expect(response.status).toBe(204)
-      expect(response.headers.get("access-control-allow-origin")).toBe("*")
-      expect(response.headers.get("access-control-allow-methods")).toContain("POST")
+      expect(response.status).toBe(401)
+      expect(response.headers.get("access-control-allow-origin")).toBeNull()
+      const allowed = await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "OPTIONS", headers: { origin: "oc://renderer", "access-control-request-method": "POST" },
+      })
+      expect(allowed.status).toBe(204)
+      expect(allowed.headers.get("access-control-allow-origin")).toBe("oc://renderer")
+      const unauthenticated = await fetch(`${server.url}/v1/health`, { headers: { origin: "oc://renderer" } })
+      expect(unauthenticated.status).toBe(401)
+      const hostile = await fetch(`${server.url}/v1/health`, {
+        headers: { ...headers(server), origin: "https://attacker.example" },
+      })
+      expect(hostile.status).toBe(403)
+      expect(hostile.headers.get("access-control-allow-origin")).toBeNull()
     })
+  })
+
+  test("failed bearer attempts are throttled without blocking valid clients and expire", async () => {
+    let clock = 0
+    const server = await startOmniaServer({ now: () => clock })
+    try {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const response = await fetch(`${server.url}/v1/health`, { headers: { authorization: "Bearer wrong" } })
+        expect(response.status).toBe(401)
+      }
+      const blocked = await fetch(`${server.url}/v1/health`, { headers: { authorization: "Bearer wrong" } })
+      expect(blocked.status).toBe(429)
+      expect(blocked.headers.get("retry-after")).toBe("300")
+      expect((await fetch(`${server.url}/v1/health`, { headers: headers(server) })).status).toBe(200)
+      clock += 300_001
+      expect((await fetch(`${server.url}/v1/health`, { headers: { authorization: "Bearer wrong" } })).status).toBe(401)
+    } finally {
+      await server.stop()
+    }
+  })
+
+  test("an explicitly empty bearer fails before startup", async () => {
+    await expect(startOmniaServer({ token: " " })).rejects.toThrow("non-empty bearer token")
+  })
+
+  test("plain HTTP never binds to a remotely reachable interface", async () => {
+    for (const host of ["0.0.0.0", "::", "192.168.1.10"]) {
+      await expect(startOmniaServer({ host })).rejects.toThrow("must bind to loopback")
+    }
+  })
+
+  test("failed authentication and privileged actions produce durable records without token or payload", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omnia-server-audit-"))
+    const file = join(dir, "security.jsonl")
+    const server = await startOmniaServer({ auditFile: file, drivers: [createFakeDriver()] })
+    try {
+      expect((await fetch(`${server.url}/v1/health?token=do-not-log-query`)).status).toBe(401)
+      expect((await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "POST", headers: headers(server),
+        body: JSON.stringify({ action: "click", target: { elementId: "el-1" }, approve: true, approvedScopes: ["UI_CONTROL"] }),
+      })).status).toBe(200)
+    } finally {
+      await server.stop()
+    }
+    const content = readFileSync(file, "utf8")
+    expect(content).not.toContain(server.token)
+    expect(content).not.toContain("do-not-log-query")
+    expect(content).not.toContain("el-1")
+    const rows = content.trim().split("\n").map((line) => JSON.parse(line))
+    expect(rows.some((row) => row.record.type === "request.rejected" && row.record.status === 401)).toBe(true)
+    expect(rows.some((row) => row.record.type === "action.started")).toBe(true)
+    expect(rows.at(-1).record.type).toBe("server.stopped")
+  })
+
+  test("rejected floods cannot produce unbounded durable writes or block valid credentials", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omnia-server-flood-"))
+    const file = join(dir, "security.jsonl")
+    const server = await startOmniaServer({ auditFile: file, now: () => 0 })
+    try {
+      for (let index = 0; index < 100; index++) {
+        const rejected = await fetch(`${server.url}/v1/${"x".repeat(4000)}`, { headers: { origin: "https://attacker.example" } })
+        expect(rejected.status).toBe(403)
+      }
+      const rows = readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line))
+      expect(rows.filter((row) => row.record.type === "request.rejected")).toHaveLength(40)
+      expect(readFileSync(file, "utf8")).not.toContain("x".repeat(4000))
+      expect((await fetch(`${server.url}/v1/health`, { headers: headers(server) })).status).toBe(200)
+    } finally {
+      await server.stop()
+    }
+  })
+
+  test("anonymous status traffic cannot exhaust admission for independent authentication", async () => {
+    const server = await startOmniaServer({ now: () => 0 })
+    try {
+      for (let index = 0; index < 120; index++) {
+        expect((await fetch(`${server.url}/v1/auth/github/status`)).status).toBe(200)
+      }
+      expect((await fetch(`${server.url}/v1/auth/github/status`)).status).toBe(200)
+      expect((await fetch(`${server.url}/v1/health`, { headers: headers(server) })).status).toBe(200)
+    } finally {
+      await server.stop()
+    }
   })
 
   test("maps invalid JSON and oversized bodies to typed errors", async () => {
@@ -785,6 +887,7 @@ describe("omnia server", () => {
 
   test("drives the browser as a structured surface", async () => {
     await withServer(async (server) => {
+      await openSessionBrowser(server, "session-browser")
       const status = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
         headers: headers(server, "session-browser"),
@@ -844,6 +947,7 @@ describe("omnia server", () => {
 
   test("verifies browser typing by value readback", async () => {
     await withServer(async (server) => {
+      await openSessionBrowser(server, "session-browser-type")
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
         headers: headers(server, "session-browser-type"),
@@ -881,6 +985,8 @@ describe("omnia server", () => {
     }
     const server = await startOmniaServer({ drivers: [createFakeDriver()], browser })
     try {
+      await openSessionBrowser(server, "session-page")
+      reads.length = 0
       const response = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
         headers: headers(server, "session-page"),
@@ -909,6 +1015,7 @@ describe("omnia server", () => {
 
   test("enforces the browser target observation binding over HTTP", async () => {
     await withServer(async (server) => {
+      await openSessionBrowser(server, "session-bind")
       const stale = await fetch(`${server.url}/v1/computers/local/actions`, {
         method: "POST",
         headers: headers(server, "session-bind"),

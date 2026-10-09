@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto"
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, join } from "node:path"
+import { redactText } from "../security/redaction"
 
 export const CREDENTIAL_KINDS = ["password", "username_password", "token"] as const
 
@@ -105,7 +106,7 @@ export function redactSecrets(text: string, secrets: readonly string[]): string 
     if (secret.length === 0) continue
     value = value.split(secret).join("[redacted]")
   }
-  return value
+  return redactText(value, { replacement: "[redacted]" })
 }
 
 // Matching is word-bounded so a short rule such as "rm" or "gh" cannot inject
@@ -295,8 +296,15 @@ export class CredentialStore {
   }
 
   list(computerId?: string): readonly ComputerCredential[] {
+    // A "*" credential silently matches every computer, so a credential saved
+    // for one machine can be spent by any other. Wildcards stay inert unless
+    // the operator explicitly opts in.
+    const wildcard = process.env.OMNIA_ALLOW_WILDCARD_CREDENTIALS === "1"
     return this.credentials.filter(
-      (credential) => computerId === undefined || credential.computerId === computerId || credential.computerId === "*",
+      (credential) =>
+        computerId === undefined ||
+        credential.computerId === computerId ||
+        (wildcard && credential.computerId === "*"),
     )
   }
 
@@ -344,7 +352,11 @@ export class CredentialStore {
   match(query: CredentialQuery): CredentialMatch | undefined {
     const candidates = this.credentials.flatMap((credential) => {
       if (!credential.enabled) return []
-      if (credential.computerId !== "*" && credential.computerId !== query.computerId) return []
+      if (credential.computerId === "*") {
+        if (process.env.OMNIA_ALLOW_WILDCARD_CREDENTIALS !== "1") return []
+      } else if (credential.computerId !== query.computerId) {
+        return []
+      }
       return credential.rules.flatMap((rule): CredentialMatch[] => {
         const score = ruleScore(rule, query)
         return score === undefined ? [] : [{ credential, rule, score }]

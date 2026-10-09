@@ -1,3 +1,12 @@
 # web + desktop packages
 packages/app/      @Hona @Brendonovich
 packages/desktop/  @Hona @Brendonovich
+
+# Security-sensitive runtime, authentication, and deployment changes
+packages/omnia/                 @Hona @Brendonovich
+packages/opencode/src/server/   @Hona @Brendonovich
+packages/opencode/src/auth/     @Hona @Brendonovich
+packages/opencode/src/cli/      @Hona @Brendonovich
+packages/core/src/              @Hona @Brendonovich
+infra/                         @Hona @Brendonovich
+.github/workflows/              @Hona @Brendonovich

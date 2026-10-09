@@ -101,6 +101,16 @@ const archKey = targetArch === "arm64" ? "arm64" : "x64"
 
 const channel = requireChannel()
 
+function testUpdateFeed() {
+  const value = process.env.OMNIA_UPDATE_URL?.trim()
+  if (!value) throw new Error("OMNIA_UPDATE_URL is required for beta update builds")
+  if (!URL.canParse(value)) throw new Error("OMNIA_UPDATE_URL must be an absolute HTTPS URL")
+  const url = new URL(value)
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash)
+    throw new Error("OMNIA_UPDATE_URL must be an absolute HTTPS URL without credentials, query, or fragment")
+  return { provider: "generic" as const, url: url.toString().replace(/\/$/, ""), channel: "latest" }
+}
+
 const APP_IDS = {
   dev: "io.omnia.desktop.dev",
   beta: "io.omnia.desktop.beta",
@@ -244,7 +254,7 @@ function getConfig() {
         protocols: { name: "Omnia Beta", schemes: ["omnia"] },
         ...(portable
           ? {}
-          : { publish: { provider: "github", owner: "anomalyco", repo: "opencode-beta", channel: "latest" } }),
+          : { publish: testUpdateFeed() }),
         deb: { fpm: [metainfoFpm(appId)] },
         rpm: { packageName: "omnia-beta", fpm: [metainfoFpm(appId)] },
       }

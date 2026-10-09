@@ -1,4 +1,4 @@
-import { Component, createSignal, startTransition } from "solid-js"
+import { Component, createMemo, createSignal, startTransition } from "solid-js"
 import { Dialog } from "@opencode-ai/ui/dialog"
 import { Tabs } from "@opencode-ai/ui/tabs"
 import { Icon } from "@opencode-ai/ui/icon"
@@ -16,12 +16,28 @@ import { SettingsMcpMarketplace } from "./settings-mcp-marketplace"
 import { SettingsMemory } from "./settings-memory"
 import { SettingsComputers } from "./settings-computers"
 import { SettingsComputerUse } from "./settings-computer-use"
+import { useLayout } from "@/context/layout"
+import { useTabs } from "@/context/tabs"
+import { useServerSync } from "@/context/server-sync"
 
 export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
   const language = useLanguage()
   const platform = usePlatform()
   const dialog = useDialog()
+  const layout = useLayout()
+  const tabs = useTabs()
+  const serverSync = useServerSync()
   const [tab, setTab] = createSignal(props.defaultValue ?? "general")
+  const directory = createMemo(() => {
+    const route = layout.route()
+    if (route.type === "dir-new-sesssion") return route.dir
+    if (route.type === "draft") {
+      const draft = tabs.store.find((item) => item.type === "draft" && item.draftID === route.draftID)
+      return draft?.type === "draft" ? draft.directory : undefined
+    }
+    if (route.type === "session") return serverSync().session.get(route.sessionId)?.directory
+    return undefined
+  })
 
   const showProviders = () => {
     void dialog.show(() => <DialogSettings defaultValue="providers" />)
@@ -70,7 +86,7 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
                       {language.t("settings.superskills.title")}
                     </Tabs.Trigger>
                     <Tabs.Trigger value="marketplace">
-                      <Icon name="dot-grid" />
+                      <Icon name="mcp" />
                       {language.t("settings.mcpMarketplace.title")}
                     </Tabs.Trigger>
                     <Tabs.Trigger value="memory">
@@ -131,7 +147,7 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
           <SettingsSuperskills />
         </Tabs.Content>
         <Tabs.Content value="marketplace" class="no-scrollbar">
-          <SettingsMcpMarketplace />
+          <SettingsMcpMarketplace directory={directory()} />
         </Tabs.Content>
         <Tabs.Content value="memory" class="no-scrollbar">
           <SettingsMemory />

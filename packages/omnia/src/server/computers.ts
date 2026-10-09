@@ -1163,7 +1163,7 @@ export class ComputerManager {
   private readonly computers = new Map<string, ManagedComputer>()
   private readonly identities = new Map<string, { role?: string; name?: string }>()
   private readonly executeLocks = new Map<string, Promise<void>>()
-  private readonly browserTabs = new Map<string, Set<string>>()
+  private readonly browserTabs = new WeakMap<ManagedComputer, WeakMap<BrowserController, Map<string, Set<string>>>>()
   private readonly events: EventBus
   private readonly permissions: PermissionManager
   private readonly now: () => number
@@ -3776,7 +3776,8 @@ export class ComputerManager {
   ): Promise<{ httpStatus: number; result: ActionResult }> {
     // A paired remote computer carries its own browser on the user's machine;
     // only fall back to the server-global controller when the computer has none.
-    const browser = this.computers.get(computerId)?.driver.browser ?? this.browser
+    const computer = this.computers.get(computerId)
+    const browser = computer?.driver.browser ?? this.browser
     if (browser === undefined) {
       return {
         httpStatus: 501,
@@ -3789,7 +3790,6 @@ export class ComputerManager {
       }
     }
     const action = request.action
-    const tab = request.tab
     const ok = (message: string, metadata: JsonObject, verification?: Verification): { httpStatus: number; result: ActionResult } => ({
       httpStatus: 200,
       result: {
@@ -3828,7 +3828,7 @@ export class ComputerManager {
     // requests and keep unrestricted tabs. Agent sessions get a per-session
     // tab allowlist so a guessed tab id cannot activate or close someone
     // else's page.
-    const browserSession = sessionId ?? (request.origin === "agent" ? "agent" : undefined)
+    const browserSession = sessionId === undefined ? (request.origin === "agent" ? "agent" : undefined) : `session:${sessionId}`
     // Browser read paging: offset/maxChars/limit are forwarded to the runtime
     // so the page answers real paging metadata instead of silently slicing.
     const readLimit = request.maxChars ?? request.limit
@@ -3842,39 +3842,58 @@ export class ComputerManager {
             ...(readLimit === undefined ? {} : { limit: readLimit }),
             ...(request.maxChars === undefined ? {} : { maxChars: request.maxChars }),
           }
-    if (browserSession !== undefined && !this.browserTabs.has(browserSession)) {
-      if (this.browserTabs.size >= MAX_BROWSER_TAB_SESSIONS) {
-        const oldest = this.browserTabs.keys().next().value
-        if (oldest !== undefined) this.browserTabs.delete(oldest)
+    // Tab ids are only meaningful within this computer registration and browser
+    // controller. A replacement driver/browser must start with no ownership.
+    const controllers = computer === undefined ? undefined : this.browserTabs.get(computer) ?? new WeakMap<BrowserController, Map<string, Set<string>>>()
+    if (computer !== undefined && controllers !== undefined) this.browserTabs.set(computer, controllers)
+    const sessions = controllers?.get(browser) ?? new Map<string, Set<string>>()
+    controllers?.set(browser, sessions)
+    if (browserSession !== undefined && !sessions.has(browserSession)) {
+      if (sessions.size >= MAX_BROWSER_TAB_SESSIONS) {
+        const oldest = sessions.keys().next().value
+        if (oldest !== undefined) sessions.delete(oldest)
       }
-      this.browserTabs.set(browserSession, new Set())
+      sessions.set(browserSession, new Set())
     }
+    const owned = browserSession === undefined ? undefined : sessions.get(browserSession)
     const recordTab = (tabId: string | undefined): void => {
       if (browserSession === undefined || tabId === undefined || tabId.length === 0) return
-      const owned = this.browserTabs.get(browserSession)
-      if (owned === undefined || owned.has(tabId)) return
+      if (owned === undefined) return
       // Evicting the oldest entry here would silently hand a still-open tab to
       // whoever crosses the cap, so the cap is an explicit failure instead.
-      if (owned.size >= MAX_SESSION_TABS) {
+      if (!owned.has(tabId) && owned.size >= MAX_SESSION_TABS) {
         throw new CdpError(
           "tab_limit",
           `This session already owns ${MAX_SESSION_TABS} browser tabs; close one before opening another.`,
         )
       }
+      // Keep the most recently opened/used owned tab as the remote fallback.
+      owned.delete(tabId)
       owned.add(tabId)
     }
     const forgetTab = (tabId: string): void => {
       if (browserSession === undefined) return
-      this.browserTabs.get(browserSession)?.delete(tabId)
+      owned?.delete(tabId)
     }
     const requireOwnedTab = (tabId: string | undefined): { httpStatus: number; result: ActionResult } | undefined => {
-      if (tabId === undefined || browserSession === undefined) return undefined
-      if (this.browserTabs.get(browserSession)?.has(tabId) === true) return undefined
+      if (browserSession === undefined) return undefined
+      if (tabId !== undefined && owned?.has(tabId) === true) return undefined
       return fail(
         "tab_not_owned",
-        `Tab ${tabId} has not been opened or read by this session; open a tab or read it before using its id.`,
+        tabId === undefined
+          ? "This session owns no browser tab; open a tab before using page actions."
+          : `Tab ${tabId} is not owned by this session; open a tab before using its id.`,
         false,
       )
+    }
+    const current = request.tab === undefined && owned !== undefined && owned.size > 0 ? browser.currentTab?.(sessionId) : undefined
+    const tab = request.tab ?? (owned === undefined ? undefined : current !== undefined && owned.has(current) ? current : [...owned].at(-1))
+    const pageAction = action !== "browser_open" && action !== "browser_tabs" && action !== "browser_status" && action !== "browser_downloads"
+    // Resolve and validate before even querying a dialog: remote controllers
+    // omit currentTab, and undefined would dispatch against the global page.
+    if (pageAction) {
+      const denied = requireOwnedTab(tab)
+      if (denied !== undefined) return denied
     }
     const activeTab = (explicit?: string): string | undefined => explicit ?? browser.currentTab?.(sessionId)
     type PageRead = { readonly page: BrowserPageSummary } | { readonly error: string }
@@ -3889,6 +3908,7 @@ export class ComputerManager {
     // would sit until the CDP timeout. Querying the dialog is bridge-only and
     // never stalls; a failure to query (older runtime) degrades to no dialog.
     const requeryDialog = async (): Promise<BrowserDialogSummary | null | undefined> => {
+      if (browserSession !== undefined && (tab === undefined || owned?.has(tab) !== true)) return undefined
       const query = browser.pendingDialog
       if (query === undefined) return undefined
       return query.call(browser, tab, sessionId).catch(() => undefined)
@@ -4019,7 +4039,7 @@ export class ComputerManager {
       // Fail fast while a dialog blocks the renderer. browser_dialog is the one
       // action allowed through (it is the answer), and browser_status/read are
       // pre-checked too so a blocked command never waits out the CDP timeout.
-      if (action !== "browser_dialog") {
+      if (action !== "browser_dialog" && (browserSession === undefined || pageAction || action === "browser_status")) {
         const dialog = await pendingDialog()
         if (dialog !== null) return dialogOpen(dialog)
       }
@@ -4145,7 +4165,6 @@ export class ComputerManager {
           const tabs = await browser.tabs()
           // Agent sessions only see tabs they own; the desktop UI keeps the
           // unrestricted list because it is the surface that manages them.
-          const owned = browserSession === undefined ? undefined : this.browserTabs.get(browserSession)
           const visible = owned === undefined ? tabs : tabs.filter((entry) => owned.has(entry.id))
           return ok(`${visible.length} tab(s) open.`, {
             tabs: visible.map((entry) => ({
@@ -4157,7 +4176,7 @@ export class ComputerManager {
           })
         }
         case "browser_activate_tab": {
-          if (tab === undefined) return fail("invalid_action", "Activating a tab needs a tab id.")
+          if (request.tab === undefined || tab === undefined) return fail("invalid_action", "Activating a tab needs a tab id.")
           const denied = requireOwnedTab(tab)
           if (denied !== undefined) return denied
           await browser.activate(tab)
@@ -4184,7 +4203,7 @@ export class ComputerManager {
           return ok(`Activated tab ${tab}.`, { tab }, verification)
         }
         case "browser_close_tab": {
-          if (tab === undefined) return fail("invalid_action", "Closing a tab needs a tab id.")
+          if (request.tab === undefined || tab === undefined) return fail("invalid_action", "Closing a tab needs a tab id.")
           const denied = requireOwnedTab(tab)
           if (denied !== undefined) return denied
           await browser.closeTab(tab)

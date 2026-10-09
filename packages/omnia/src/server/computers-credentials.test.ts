@@ -101,6 +101,19 @@ const approval = {
   approvedScopes: ["UI_CONTROL", "KEYBOARD", "SECRETS"] as const,
 }
 
+async function createBrowserManager(driver: ServerComputerDriver, options: Parameters<typeof createManager>[1] = {}) {
+  const fixture = createManager(driver, options)
+  const opened = await fixture.manager.execute(driver.id, {
+    action: "browser_open",
+    url: "https://example.com",
+    ...approval,
+    approvedScopes: ["BROWSER"],
+  })
+  expect(opened.httpStatus).toBe(200)
+  expect(opened.result.success).toBe(true)
+  return fixture
+}
+
 describe("stored credentials on the type action", () => {
   test("an explicit credential types the secret without echoing it", async () => {
     const { driver, actions } = baseDriver()
@@ -224,7 +237,7 @@ describe("stored credentials on browser_type", () => {
     const local = browserHarness()
     const global = browserHarness()
     const { driver } = baseDriver({ browser: local.browser })
-    const { manager, credentials } = createManager(driver, { browser: global.browser })
+    const { manager, credentials } = await createBrowserManager(driver, { browser: global.browser })
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET })
     const outcome = await manager.execute("local", {
       action: "browser_type",
@@ -244,7 +257,7 @@ describe("stored credentials on browser_type", () => {
   test("field username types the stored username on the page", async () => {
     const local = browserHarness()
     const { driver } = baseDriver({ browser: local.browser })
-    const { manager, credentials } = createManager(driver)
+    const { manager, credentials } = await createBrowserManager(driver)
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: USERNAME })
     const outcome = await manager.execute("local", {
       action: "browser_type",
@@ -263,7 +276,7 @@ describe("stored credentials on browser_type", () => {
   test("browser typing a credential without SECRETS approval is denied", async () => {
     const local = browserHarness()
     const { driver } = baseDriver({ browser: local.browser })
-    const { manager, credentials } = createManager(driver, { policy: "always_ask", secrets: "denied" })
+    const { manager, credentials } = await createBrowserManager(driver, { policy: "always_ask", secrets: "denied" })
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET })
     const outcome = await manager.execute("local", {
       action: "browser_type",
@@ -341,7 +354,7 @@ describe("browser_login with a stored credential", () => {
       "Sign in",
     )
     const { driver } = baseDriver({ browser: harness.browser })
-    const { manager, credentials, events } = createManager(driver)
+    const { manager, credentials, events } = await createBrowserManager(driver)
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: USERNAME })
     const outcome = await manager.execute("local", {
       action: "browser_login",
@@ -366,7 +379,7 @@ describe("browser_login with a stored credential", () => {
   test("fills without submitting when submit is false", async () => {
     const harness = loginHarness({ "field-user": "Email", "field-pass": "Password" }, "Sign in")
     const { driver } = baseDriver({ browser: harness.browser })
-    const { manager, credentials } = createManager(driver)
+    const { manager, credentials } = await createBrowserManager(driver)
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: USERNAME })
     const outcome = await manager.execute("local", {
       action: "browser_login",
@@ -389,7 +402,7 @@ describe("browser_login with a stored credential", () => {
     const inner = harness.browser.read
     harness.browser.read = async () => ({ ...(await inner()), url: "https://example.com/login" })
     const { driver } = baseDriver({ browser: harness.browser })
-    const { manager, credentials } = createManager(driver)
+    const { manager, credentials } = await createBrowserManager(driver)
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: USERNAME })
     const outcome = await manager.execute("local", { action: "browser_login", credential: credential.id, ...approval })
     expect(outcome.result.success).toBe(true)
@@ -403,7 +416,7 @@ describe("browser_login with a stored credential", () => {
     // nothing the caller declared proves the credential was accepted.
     const harness = loginHarness({ "field-user": "Email address", "field-pass": "Password" }, "Sign in")
     const { driver } = baseDriver({ browser: harness.browser })
-    const { manager, credentials } = createManager(driver)
+    const { manager, credentials } = await createBrowserManager(driver)
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: USERNAME })
     const outcome = await manager.execute("local", { action: "browser_login", credential: credential.id, ...approval })
     expect(outcome.result.success).toBe(true)
@@ -458,7 +471,7 @@ describe("browser_login with a stored credential", () => {
       },
     }
     const { driver } = baseDriver({ browser })
-    const { manager, credentials } = createManager(driver)
+    const { manager, credentials } = await createBrowserManager(driver)
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: USERNAME })
     const outcome = await manager.execute("local", {
       action: "browser_login",
@@ -484,7 +497,7 @@ describe("browser_login with a stored credential", () => {
     // so an ordinary form with an email box is never turned into a login.
     const harness = loginHarness({ "field-user": "Email address" }, "Subscribe")
     const { driver } = baseDriver({ browser: harness.browser })
-    const { manager, credentials } = createManager(driver)
+    const { manager, credentials } = await createBrowserManager(driver)
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: USERNAME })
     const outcome = await manager.execute("local", { action: "browser_login", credential: credential.id, ...approval })
     expect(outcome.result.success).toBe(false)
@@ -499,7 +512,7 @@ describe("browser_login with a stored credential", () => {
     const inner = harness.browser.read
     harness.browser.read = async () => ({ ...(await inner()), url: "https://example.com/login" })
     const { driver } = baseDriver({ browser: harness.browser })
-    const { manager, credentials } = createManager(driver)
+    const { manager, credentials } = await createBrowserManager(driver)
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: USERNAME })
     const outcome = await manager.execute("local", {
       action: "browser_login",
@@ -516,7 +529,7 @@ describe("browser_login with a stored credential", () => {
   test("fails closed without typing when the password field cannot be identified", async () => {
     const harness = loginHarness({ "field-user": "Email address", "field-submit": "Search" })
     const { driver } = baseDriver({ browser: harness.browser })
-    const { manager, credentials } = createManager(driver)
+    const { manager, credentials } = await createBrowserManager(driver)
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: USERNAME })
     const outcome = await manager.execute("local", { action: "browser_login", credential: credential.id, ...approval })
     expect(outcome.result.success).toBe(false)
@@ -527,7 +540,7 @@ describe("browser_login with a stored credential", () => {
   test("fails closed rather than putting the secret in an unidentified field", async () => {
     const harness = loginHarness({ "field-pass": "Password", "field-note": "Recovery code" }, "Sign in")
     const { driver } = baseDriver({ browser: harness.browser })
-    const { manager, credentials } = createManager(driver)
+    const { manager, credentials } = await createBrowserManager(driver)
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: USERNAME })
     const outcome = await manager.execute("local", { action: "browser_login", credential: credential.id, ...approval })
     expect(outcome.result.success).toBe(false)
@@ -538,7 +551,7 @@ describe("browser_login with a stored credential", () => {
   test("requires a stored credential and never accepts a secret in the request", async () => {
     const harness = loginHarness({ "field-user": "Email", "field-pass": "Password" }, "Sign in")
     const { driver } = baseDriver({ browser: harness.browser })
-    const { manager } = createManager(driver)
+    const { manager } = await createBrowserManager(driver)
     const missing = await manager.execute("local", { action: "browser_login", ...approval })
     expect(missing.result.success).toBe(false)
     expect(errorCode(missing.result.error)).toBe("invalid_action")
@@ -555,7 +568,7 @@ describe("browser_login with a stored credential", () => {
   test("explicit field ids drive a form with no usable field names", async () => {
     const harness = loginHarness({ "omnia-7": "field-a", "omnia-9": "field-b" })
     const { driver } = baseDriver({ browser: harness.browser })
-    const { manager, credentials } = createManager(driver)
+    const { manager, credentials } = await createBrowserManager(driver)
     const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: USERNAME })
     const outcome = await manager.execute("local", {
       action: "browser_login",

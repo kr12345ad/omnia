@@ -107,6 +107,8 @@ import type {
   McpConnectResponses,
   McpDisconnectErrors,
   McpDisconnectResponses,
+  McpHealthErrors,
+  McpHealthResponses,
   McpLocalConfig,
   McpRemoteConfig,
   McpStatusErrors,
@@ -2458,6 +2460,38 @@ export class Mcp extends HeyApiClient {
         ...options?.headers,
         ...params.headers,
       },
+    })
+  }
+
+  /**
+   * Check MCP health
+   *
+   * Verify MCP protocol negotiation and tool discovery without disturbing its live connection.
+   */
+  public health<ThrowOnError extends boolean = false>(
+    parameters: {
+      name: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "name" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<McpHealthResponses, McpHealthErrors, ThrowOnError>({
+      url: "/mcp/{name}/health",
+      ...options,
+      ...params,
     })
   }
 

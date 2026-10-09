@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http"
-import { createHmac, timingSafeEqual } from "node:crypto"
+import { createHash, createHmac, timingSafeEqual } from "node:crypto"
 import { handleBillingRoute } from "./billing-api"
 import { failsClosed, isPlanId, type Capability, type PlanId } from "../billing/plans"
 import type { EventBus, ServerEvent } from "./events"
@@ -114,6 +114,7 @@ export interface ApiContext {
   // The server bearer token. It keys the session proof that binds a caller
   // supplied session id to this server instance.
   readonly token: string
+  readonly auditPublicAuthentication?: (request: IncomingMessage) => boolean
   readonly events: EventBus
   readonly computers: ComputerManager
   readonly permissions: PermissionManager
@@ -347,13 +348,11 @@ export function json(response: ServerResponse, status: number, value: unknown): 
     return
   }
   const body = JSON.stringify(value)
+  // CORS belongs to the authenticated server boundary, which validates the
+  // request origin. This helper must never add a wildcard grant.
   response.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(body),
-    "access-control-allow-origin": "*",
-    "access-control-allow-headers":
-      "authorization, content-type, x-omnia-origin, x-omnia-session, x-omnia-session-proof, x-omnia-key-id, x-omnia-timestamp, x-omnia-signature",
-    "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
     "cache-control": "no-store",
   })
   response.end(body)
@@ -471,6 +470,14 @@ export function sessionProof(token: string, sessionId: string): string {
   return createHmac("sha256", token).update(sessionId, "utf8").digest("hex")
 }
 
+// HMAC proves possession of the presented credential, not ownership of an
+// arbitrary session id. Pin each accepted session to its first authenticated
+// credential for the lifetime of this server context. Never evict a binding:
+// that would make a still-live session claimable by another credential.
+const sessionOwners = new WeakMap<ApiContext, { owners: Map<string, string>; clients: Map<string, number>; nonOperator: number }>()
+const MAX_SESSION_BINDINGS = 10_000
+export const MAX_CLIENT_SESSION_BINDINGS = 512
+
 export function checkSessionBinding(
   context: ApiContext,
   request: IncomingMessage,
@@ -485,6 +492,9 @@ export function checkSessionBinding(
   }
   const sessionId = bodySession ?? headerSession
   if (sessionId === undefined) return
+  // Public OAuth routes are reachable without authenticating a bearer. A caller
+  // choosing its own token and HMAC must not allocate or reserve session ids.
+  if (!isAuthorized(request, context.token, timingSafeEqual, context.auth)) throw new SessionUnboundError(sessionId)
   // Reject rather than ignore: an over-long id used to skip the proof check and
   // make requestSessionId return undefined, which classified the caller as the
   // desktop operator no matter which token it presented.
@@ -495,6 +505,20 @@ export function checkSessionBinding(
   if (presented.length !== expected.length || !timingSafeEqual(Buffer.from(presented), Buffer.from(expected))) {
     throw new SessionUnboundError(sessionId)
   }
+  const principal = createHash("sha256").update(bearerToken(request) ?? context.token).digest("hex")
+  const bindings = sessionOwners.get(context) ?? { owners: new Map<string, string>(), clients: new Map<string, number>(), nonOperator: 0 }
+  const owner = bindings.owners.get(sessionId)
+  if (owner !== undefined && owner !== principal) throw new SessionUnboundError(sessionId)
+  if (owner === undefined) {
+    const operator = presentsServerToken(context, request)
+    if (bindings.owners.size >= MAX_SESSION_BINDINGS || (!operator && (
+      (bindings.clients.get(principal) ?? 0) >= MAX_CLIENT_SESSION_BINDINGS || bindings.nonOperator >= MAX_SESSION_BINDINGS - 1000
+    ))) throw new SessionMismatchError("The session binding capacity has been reached.")
+    bindings.owners.set(sessionId, principal)
+    bindings.clients.set(principal, (bindings.clients.get(principal) ?? 0) + 1)
+    if (!operator) bindings.nonOperator += 1
+  }
+  sessionOwners.set(context, bindings)
 }
 
 async function readBoundBody(context: ApiContext, request: IncomingMessage): Promise<unknown> {
@@ -645,6 +669,18 @@ function billingControlPlane(): { readonly base: string; readonly token: string 
   if (token.length === 0) return undefined
   const configured = process.env.OMNIA_SERVER_URL ?? process.env.OMNIA_PUBLIC_URL
   if (configured === undefined || configured.length === 0) return undefined
+  // This bearer is sent server-side. Refuse to ship it anywhere unexpected:
+  // plain HTTP only to loopback, anything else only over TLS.
+  let url: URL
+  try {
+    url = new URL(configured)
+  } catch {
+    return undefined
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return undefined
+  const host = url.hostname.toLowerCase()
+  const loopback = host === "127.0.0.1" || host === "::1" || host === "localhost"
+  if (url.protocol === "http:" && !loopback) return undefined
   return { base: configured.replace(/\/+$/, ""), token }
 }
 
@@ -659,18 +695,17 @@ function billingControlPlane(): { readonly base: string; readonly token: string 
  * reports a bogus success - both of which turn a paid capability into a free one.
  */
 async function capabilityDenied(
-  context: Pick<ApiContext, "auth">,
+  context: Pick<ApiContext, "auth" | "token">,
   capability: Capability,
-  options: { consume?: boolean } = {},
+  options: { consume?: boolean; request: IncomingMessage },
 ): Promise<{ status: number; payload: Record<string, unknown> } | undefined> {
   const controlPlane = billingControlPlane()
   if (controlPlane === undefined) return undefined
   // Entitlements are per profile, so a signed-in customer has to be checked
   // against THEIR plan rather than against the anonymous free one. Only the
-  // server's own signed-in profile is forwarded: a caller-supplied
-  // x-omnia-profile header is not an identity, and the control plane only
-  // honours that header from a caller that presented the server token anyway.
-  const profile = context.auth.status().profile
+  // Resolve the authenticated caller, not the server-wide sign-in state. A
+  // client-supplied profile header never chooses the account being billed.
+  const profileId = runOwner(context, options.request)
   let body: unknown
   // The plan the control plane last reported for this caller, so a failure later
   // in this function can be judged against the right one.
@@ -681,7 +716,7 @@ async function capabilityDenied(
       headers: {
         authorization: `Bearer ${controlPlane.token}`,
         "content-type": "application/json",
-        ...(profile === undefined ? {} : { "x-omnia-profile": String(profile.id) }),
+        ...(profileId === undefined ? {} : { "x-omnia-profile": profileId }),
       },
       // The body is the capability and nothing else: no computer id, no reason,
       // nothing that would have to be redacted before it is sent or logged.
@@ -764,9 +799,13 @@ function unconfirmed(
   }
 }
 
-function runOwner(context: Pick<ApiContext, "auth">): string | undefined {
-  const profile = context.auth.status().profile
-  return profile === undefined ? undefined : String(profile.id)
+function runOwner(context: Pick<ApiContext, "auth" | "token">, request: IncomingMessage): string | undefined {
+  const presented = bearerToken(request)
+  const profile = presented === undefined ? undefined : context.auth.clientTokenProfile(presented)
+  if (profile !== undefined) return String(profile.id)
+  if (!presentsServerToken(context, request)) return undefined
+  const operatorProfile = context.auth.status().profile
+  return operatorProfile === undefined ? undefined : String(operatorProfile.id)
 }
 
 /**
@@ -778,8 +817,8 @@ function runOwner(context: Pick<ApiContext, "auth">): string | undefined {
  * 503 for an unreachable control plane - reads as "not entitled" for this read:
  * the defaults are always safe to serve, a custom roster is not.
  */
-async function specialistRoster(context: Pick<ApiContext, "auth" | "specialists">): Promise<SpecialistRoster> {
-  const entitled = (await capabilityDenied(context, "custom_specialists")) === undefined
+async function specialistRoster(context: Pick<ApiContext, "auth" | "token" | "specialists">, request: IncomingMessage): Promise<SpecialistRoster> {
+  const entitled = (await capabilityDenied(context, "custom_specialists", { request })) === undefined
   const saved = entitled ? context.specialists() : undefined
   return {
     entitled,
@@ -1544,6 +1583,16 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 400, { ok: false, error: "A steps array is required." })
         return true
       }
+      // Validate every step before executing the first. executeBatch permits a
+      // step's sessionId to override the outer session, so only the proven outer
+      // session (or proven header session) can be used by a nested step.
+      for (const step of body.steps) {
+        if (!isRecord(step) || step.sessionId === undefined) continue
+        if (typeof step.sessionId !== "string" || step.sessionId !== requestSessionId(request, body)) {
+          throw new SessionMismatchError("Batch steps must use the authenticated outer session.")
+        }
+        checkSessionBinding(context, request, step)
+      }
       const mayApprove = mayApproveRequest(context, request, body)
       const operator = isOperatorRequest(context, request, body)
       const parsedSteps = body.steps.map((step): ServerBatchStep | undefined =>
@@ -1701,7 +1750,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, denied.status, { ok: false, result: denied.result })
         return true
       }
-      const owner = runOwner(context)
+      const owner = runOwner(context, request)
       if (owner === undefined) {
         json(response, 401, { ok: false, error: "Sign in to view scheduled runs." })
         return true
@@ -1719,7 +1768,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 403, { ok: false, error: "Only the signed-in desktop can start a headless run." })
         return true
       }
-      const unbilled = await capabilityDenied(context, "api_access")
+      const unbilled = await capabilityDenied(context, "api_access", { request })
       if (unbilled !== undefined) {
         json(response, unbilled.status, unbilled.payload)
         return true
@@ -1756,12 +1805,12 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 403, { ok: false, error: "Only the signed-in desktop can schedule runs." })
         return true
       }
-      const owner = runOwner(context)
+      const owner = runOwner(context, request)
       if (owner === undefined) {
         json(response, 401, { ok: false, error: "Sign in to schedule runs." })
         return true
       }
-      const unbilled = await capabilityDenied(context, "scheduled_runs", { consume: false })
+      const unbilled = await capabilityDenied(context, "scheduled_runs", { consume: false, request })
       if (unbilled !== undefined) {
         json(response, unbilled.status, unbilled.payload)
         return true
@@ -1787,7 +1836,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 403, { ok: false, error: "Only the signed-in desktop can edit scheduled runs." })
         return true
       }
-      const owner = runOwner(context)
+      const owner = runOwner(context, request)
       const current = owner === undefined ? undefined : context.runs().find((run) => run.id === id && run.profileId === owner)
       if (current === undefined) {
         json(response, 404, { ok: false, error: `Unknown scheduled run ${id}.` })
@@ -1801,7 +1850,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 200, { ok: true, removed: id })
         return true
       }
-      const unbilled = await capabilityDenied(context, "scheduled_runs", { consume: false })
+      const unbilled = await capabilityDenied(context, "scheduled_runs", { consume: false, request })
       if (unbilled !== undefined) {
         json(response, unbilled.status, unbilled.payload)
         return true
@@ -1843,7 +1892,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, denied.status, { ok: false, result: denied.result })
         return true
       }
-      json(response, 200, { ok: true, ...(await specialistRoster(context)) })
+      json(response, 200, { ok: true, ...(await specialistRoster(context, request)) })
       return true
     }
     if (parsed.method === "PUT") {
@@ -1856,7 +1905,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 403, { ok: false, error: "Only the signed-in desktop can edit the discussion specialists." })
         return true
       }
-      const unbilled = await capabilityDenied(context, "custom_specialists")
+      const unbilled = await capabilityDenied(context, "custom_specialists", { request })
       if (unbilled !== undefined) {
         json(response, unbilled.status, unbilled.payload)
         return true
@@ -1870,7 +1919,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
           return true
         }
       }
-      json(response, 200, { ok: true, ...(await specialistRoster(context)) })
+      json(response, 200, { ok: true, ...(await specialistRoster(context, request)) })
       return true
     }
     json(response, 405, { ok: false, error: "Use GET or PUT." })
@@ -2209,7 +2258,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       // leave a customer's input disabled until somebody upgraded - refusing the
       // way out is strictly worse than never allowing the way in.
       if (segments[2] === "freeze") {
-        const unbilled = await capabilityDenied(context, "input_freeze")
+        const unbilled = await capabilityDenied(context, "input_freeze", { request })
         if (unbilled !== undefined) {
           json(response, unbilled.status, unbilled.payload)
           return true

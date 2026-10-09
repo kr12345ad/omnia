@@ -86,7 +86,7 @@ export const DialogSettings: Component<{
                       {language.t("settings.superskills.title")}
                     </TabsV2.Trigger>
                     <TabsV2.Trigger value="marketplace">
-                      <Icon name="dot-grid" />
+                      <Icon name="mcp" />
                       {language.t("settings.mcpMarketplace.title")}
                     </TabsV2.Trigger>
                     <TabsV2.Trigger value="memory">
@@ -151,7 +151,7 @@ export const DialogSettings: Component<{
           <SettingsSuperskills />
         </TabsV2.Content>
         <TabsV2.Content value="marketplace" class="settings-v2-panel">
-          <SettingsMcpMarketplace />
+          <SettingsMcpMarketplace directory={directory()} />
         </TabsV2.Content>
         <TabsV2.Content value="memory" class="settings-v2-panel">
           <SettingsMemory />

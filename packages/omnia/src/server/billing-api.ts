@@ -358,6 +358,10 @@ export async function handleBillingRoute(
       json(response, 400, { ok: false, error: message })
       return true
     }
+    if (context.auditPublicAuthentication?.(request) === false) {
+      json(response, 503, { ok: false, error: "Security audit storage is unavailable; no billing state was changed." })
+      return true
+    }
     let event: StripeEvent
     try {
       event = parseStripeEvent(raw)

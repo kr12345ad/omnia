@@ -2414,14 +2414,19 @@ export type McpStatus =
   | McpStatusNeedsAuth
   | McpStatusNeedsClientRegistration
 
-export type McpUnsupportedOAuthError = {
-  error: string
+export type McpHealth = {
+  status: McpStatus
+  tools?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
 }
 
 export type McpServerNotFoundError = {
   _tag: "McpServerNotFoundError"
   name: string
   message: string
+}
+
+export type McpUnsupportedOAuthError = {
+  error: string
 }
 
 export type Project = {
@@ -8493,6 +8498,40 @@ export type McpAddResponses = {
 }
 
 export type McpAddResponse = McpAddResponses[keyof McpAddResponses]
+
+export type McpHealthData = {
+  body?: never
+  path: {
+    name: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/mcp/{name}/health"
+}
+
+export type McpHealthErrors = {
+  /**
+   * Bad request
+   */
+  400: BadRequestError
+  /**
+   * McpServerNotFoundError
+   */
+  404: McpServerNotFoundError
+}
+
+export type McpHealthError = McpHealthErrors[keyof McpHealthErrors]
+
+export type McpHealthResponses = {
+  /**
+   * MCP server health
+   */
+  200: McpHealth
+}
+
+export type McpHealthResponse = McpHealthResponses[keyof McpHealthResponses]
 
 export type McpAuthRemoveData = {
   body?: never

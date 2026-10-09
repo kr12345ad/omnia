@@ -15,6 +15,18 @@ The desktop app starts the local Omnia server and writes connection details to
 
 Use it for the API smoke commands below:
 
+For standalone deployments, credentials supplied in `OMNIA_SERVER_TOKEN` stay
+in the operator's secret configuration. An automatically generated token is
+written to `OMNIA_SERVER_INFO_FILE` (default `./omnia-server-info.json`) with
+private permissions; it is no longer printed to stdout. Protect these files and
+exclude them from diagnostic exports. Omnia's HTTP listener binds to loopback;
+remote access must use an HTTPS proxy/tunnel. Discovery is opt-in.
+
+CORS defaults to `oc://renderer` and the configured public URL's origin.
+Standalone deployments may supply exact origins in `OMNIA_CORS_ORIGINS`.
+Do not use `*` or `null`. Preflight from an allowed origin does not authorize
+the actual request; it still requires a bearer credential.
+
 ```sh
 BASE=$(jq -r .url "$USERDATA/server.json")
 TOKEN=$(jq -r .token "$USERDATA/server.json")
@@ -31,6 +43,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H "content-type: application/json" \
 | Desktop logs | `userData/logs/<timestamp>/`, one `.log` per scope (main, renderer, omnia) |
 | Full debug bundle | In-app "Export debug logs", or `exportDebugLogs()`; writes `~/Downloads/opencode-debug-<stamp>.zip` |
 | Server logs | `$XDG_DATA_HOME/opencode/log` (Linux) or `userData/opencode/log` |
+| Security journal | `OMNIA_AUDIT_FILE`, or `audit/<server-id>.jsonl` alongside the Omnia auth file; private JSONL/HMAC-chain records |
 | macOS AX helper | `ls -l ~/.omnia/bin/ax-helper`; bypass with `OMNIA_AX_HELPER=/path/to/ax-helper` |
 | Linux AT-SPI helper | Warnings arrive inside the observation; run `python3 -c "import pyatspi; print('ok')"` to reproduce |
 | Windows UIA probe | `powershell.exe -NoProfile -Command "Add-Type -AssemblyName UIAutomationClient; 'ok'"` |
@@ -139,10 +152,11 @@ Expected: an interactive desktop session (not a service session), PowerShell on
 | `error.code: "invalid_cwd"` / `"invalid_env"` | `run_command` boundary refused the request | Fix the request; do not bypass |
 | `metadata.error: "snapshot_failed"` | Empty tree is engine failure | Never read as a blank desktop |
 
-The Linux and macOS `run_command` shells reject environment overrides of
-`PATH`, `DISPLAY`, `NODE_OPTIONS`, and the platform loader variables
-(`LD_PRELOAD`/`LD_LIBRARY_PATH` on Linux, `DYLD_INSERT_LIBRARIES`/
-`DYLD_LIBRARY_PATH` on macOS); the refusal echoes the offending key. Command output is capped
+The Linux and macOS `run_command` shells reject malformed environment entries
+and overrides of `PATH`, `DISPLAY`, `LD_*`, `DYLD_*`, `BUN_*`, shell startup
+variables (`BASH_ENV`, `ENV`, `SHELLOPTS`), and Node/Python/Ruby/Perl startup
+variables. This is environment validation, not an OS sandbox: approved commands
+still execute as the runtime's OS user. Command output is capped
 (`maxOutputBytes`, default 256 KiB, hard cap 1 MiB), timeouts run
 `SIGTERM` → `SIGKILL`, and stdin write failures surface as
 `command.stdinError`.

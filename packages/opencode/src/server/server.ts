@@ -71,6 +71,9 @@ export async function openapi() {
 export let url: URL | undefined
 
 export async function listen(opts: ListenOptions): Promise<Listener> {
+  if (!["127.0.0.1", "localhost", "::1"].includes(opts.hostname) && !process.env.OPENCODE_SERVER_PASSWORD?.trim()) {
+    throw new Error("OPENCODE_SERVER_PASSWORD is required for a non-loopback listener.")
+  }
   const listener = await Effect.runPromise(listenEffect(opts))
   return {
     hostname: listener.hostname,

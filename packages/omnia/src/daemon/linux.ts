@@ -20,6 +20,7 @@ import { PLANS, planFor, type Capability, type PlanId } from "../billing/plans"
 import { retrieveElements } from "../retrieval"
 import { ATSPI_SCRIPT } from "./atspi-script"
 import { CLIPBOARD_SCRIPT } from "./clipboard-script"
+import { commandEnvError } from "./command-env"
 import { INPUT_GRAB_SCRIPT, parseInputGrabLine, type InputGrabReleasedBy } from "./input-grab-script"
 import { createJsonLineHelper, type PersistentHelper } from "./persistent-helper"
 import { XTEST_SCRIPT } from "./xtest-script"
@@ -2266,18 +2267,15 @@ export class LinuxHostDriver {
         }
       }
     }
-    // A command must not be able to replace the display or the loader
-    // environment the runtime depends on; DISPLAY always comes from the driver.
-    const forbidden = new Set(["PATH", "DISPLAY", "LD_PRELOAD", "LD_LIBRARY_PATH", "NODE_OPTIONS"])
-    const unsafe = Object.keys(request.env ?? {}).find((key) => forbidden.has(key.toUpperCase()))
-    if (unsafe !== undefined) {
+    const envError = commandEnvError(request.env)
+    if (envError !== undefined) {
       return {
         success: false,
         status: "failed",
-        message: `The command environment cannot override ${unsafe}.`,
+        message: envError,
         error: {
           code: "invalid_env",
-          message: `The command environment cannot override ${unsafe}.`,
+          message: envError,
           retryable: false,
         },
       }

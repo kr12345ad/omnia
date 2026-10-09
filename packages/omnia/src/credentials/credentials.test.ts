@@ -81,19 +81,35 @@ describe("credential store", () => {
     expect(store.match({ computerId: "local", command: "gh auth login" })?.credential.name).toBe("gh")
   })
 
-  test("skips disabled credentials and honors wildcard computers and url rules", () => {
+  test("skips disabled credentials and honors computer-bound url rules", () => {
     const store = new CredentialStore({ file: tempFile() })
-    store.save({ computerId: "*", name: "portal", secret: "p", rules: [{ kind: "url", match: "https://portal.example" }] })
-    const disabled = store.save({ computerId: "*", name: "off", secret: "o", rules: [{ kind: "url", match: "https://portal.example/admin" }], enabled: false })
+    store.save({ computerId: "local", name: "portal", secret: "p", rules: [{ kind: "url", match: "https://portal.example" }] })
+    const disabled = store.save({ computerId: "local", name: "off", secret: "o", rules: [{ kind: "url", match: "https://portal.example/admin" }], enabled: false })
     const match = store.match({ computerId: "local", url: "https://portal.example/admin" })
     expect(match?.credential.name).toBe("portal")
     expect(disabled.enabled).toBe(false)
   })
 
+  test("legacy wildcard credentials are inert unless an operator opts in", () => {
+    const previous = process.env.OMNIA_ALLOW_WILDCARD_CREDENTIALS
+    delete process.env.OMNIA_ALLOW_WILDCARD_CREDENTIALS
+    try {
+      const store = new CredentialStore({ file: tempFile() })
+      store.save({ computerId: "*", name: "legacy", secret: "secret", rules: [{ kind: "command", match: "sudo" }] })
+      expect(store.match({ computerId: "other-computer", command: "sudo ls" })).toBeUndefined()
+      expect(store.summaries("other-computer")).toEqual([])
+      process.env.OMNIA_ALLOW_WILDCARD_CREDENTIALS = "1"
+      expect(store.match({ computerId: "other-computer", command: "sudo ls" })?.credential.name).toBe("legacy")
+    } finally {
+      if (previous === undefined) delete process.env.OMNIA_ALLOW_WILDCARD_CREDENTIALS
+      else process.env.OMNIA_ALLOW_WILDCARD_CREDENTIALS = previous
+    }
+  })
+
   test("url rules match parsed identity, never a string prefix", () => {
     const store = new CredentialStore({ file: tempFile() })
-    store.save({ computerId: "*", name: "portal", secret: "p", rules: [{ kind: "url", match: "https://portal.example" }] })
-    store.save({ computerId: "*", name: "admin", secret: "a", rules: [{ kind: "url", match: "https://portal.example/admin" }] })
+    store.save({ computerId: "local", name: "portal", secret: "p", rules: [{ kind: "url", match: "https://portal.example" }] })
+    store.save({ computerId: "local", name: "admin", secret: "a", rules: [{ kind: "url", match: "https://portal.example/admin" }] })
     // The attacker page an old prefix match authorized.
     for (const url of [
       "https://portal.example.evil.tld/login",
@@ -116,12 +132,12 @@ describe("credential store", () => {
   test("ranks rule kind before match length", () => {
     const store = new CredentialStore({ file: tempFile() })
     store.save({
-      computerId: "*",
+      computerId: "local",
       name: "url",
       secret: "u",
       rules: [{ kind: "url", match: "https://portal.example/admin/settings/profile" }],
     })
-    store.save({ computerId: "*", name: "app", secret: "a", rules: [{ kind: "application", match: "Portal" }] })
+    store.save({ computerId: "local", name: "app", secret: "a", rules: [{ kind: "application", match: "Portal" }] })
     const match = store.match({ computerId: "local", application: "Portal", url: "https://portal.example/admin/settings/profile" })
     expect(match?.credential.name).toBe("app")
   })
@@ -152,6 +168,31 @@ describe("credential store", () => {
     expect(redactSecrets("nothing", ["s3cr3t"])).toBe("nothing")
     expect(redactSecrets("code is ab here", ["ab"])).toBe("code is [redacted] here")
     expect(redactSecrets("nothing", [""])).toBe("nothing")
+  })
+
+  test("redacts unknown credential patterns even without stored secrets", () => {
+    for (const [text, expected] of [
+      ["Authorization: Bearer unknown-access-token", "Authorization: [redacted]"],
+      ["Basic dXNlcjpwYXNzd29yZA==", "[redacted]"],
+      ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature", "[redacted]"],
+      ["ghp_123456789012345678901234567890", "[redacted]"],
+      ["sk-proj-123456789012345678901234", "[redacted]"],
+      ["password=unknown-password", "password=[redacted]"],
+      ['api_key="unknown key with spaces"', 'api_key="[redacted]"'],
+      ["export OMNIA_CREDENTIAL_TOKEN=unknown-token", "export OMNIA_CREDENTIAL_TOKEN=[redacted]"],
+      ["https://alice:unknown-password@example.com/?token=unknown-token", "https://[redacted]:[redacted]@example.com/?token=[redacted]"],
+      ["-----BEGIN PRIVATE KEY-----\nunknown-key\n-----END PRIVATE KEY-----", "[redacted]"],
+    ]) {
+      expect(redactSecrets(text, [])).toBe(expected)
+    }
+  })
+
+  test("replaces exact known secrets before detecting unknown patterns", () => {
+    expect(redactSecrets("Bearer exact-token exact-token; password=unknown-password", ["exact-token"]))
+      .toBe("Bearer [redacted] [redacted]; password=[redacted]")
+    expect(redactSecrets("literal a+b.[x] twice a+b.[x]", ["a+b.[x]"]))
+      .toBe("literal [redacted] twice [redacted]")
+    expect(redactSecrets("ordinary output\ncount=42", [])).toBe("ordinary output\ncount=42")
   })
 
   test("tolerates a missing or malformed file", () => {

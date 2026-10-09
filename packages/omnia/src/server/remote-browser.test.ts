@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import type { BrowserController, BrowserImageSave } from "./computers"
+import { ComputerManager, type BrowserController, type BrowserImageSave, type ServerActionRequest } from "./computers"
 import { RemoteComputerDriver } from "./remote"
 import { browserFailureCode } from "../browser/errors"
+import { EventBus } from "./events"
+import { PermissionManager } from "./permissions"
 
 function remoteDriver(): RemoteComputerDriver {
   return new RemoteComputerDriver({ id: "remote-1", name: "Remote", platform: "linux" })
@@ -24,6 +26,122 @@ async function expectForwarded<T>(
 }
 
 describe("remote browser controller", () => {
+  test("manager pins omitted page operations to owned tabs before dispatch to a remote without currentTab", async () => {
+    const instance = remoteDriver()
+    const manager = new ComputerManager({
+      events: new EventBus({ serverId: "test" }),
+      permissions: new PermissionManager({}, "fully_autonomous"),
+    })
+    manager.register(instance)
+    expect(instance.browser.currentTab).toBeUndefined()
+    const tabs = new Map<string, string>()
+    const dialogs = new Set<string>()
+    const choosers = new Set<string>()
+    let active = ""
+    const execute = async (request: ServerActionRequest) => {
+      const calls: Array<{ operation: string; params: { tabId?: string; options?: { tabId?: string } } }> = []
+      let settled = false
+      const pending = manager.execute(instance.id, request).finally(() => { settled = true })
+      for (let index = 0; !settled && index < 20; index += 1) {
+        const command = await instance.nextCommand(10)
+        if (command === undefined) continue
+        expect(command.method).toBe("browser")
+        const input = command.params as {
+          operation: string
+          params: { tabId?: string; url?: string; files?: string[]; options?: { tabId?: string }; query?: string }
+        }
+        calls.push(input)
+        const tab = input.params.tabId ?? input.params.options?.tabId ?? active
+        const respond = () => {
+          switch (input.operation) {
+            case "open": {
+              active = `tab-${tabs.size + 1}`
+              tabs.set(active, input.params.url ?? "about:blank")
+              return { id: active, url: tabs.get(active) }
+            }
+            case "read":
+              return { url: tabs.get(tab), title: tab, text: `PRIVATE-${tab}`, length: 13, hash: tab }
+            case "pendingDialog":
+              return dialogs.has(tab) ? { type: "confirm", message: `PRIVATE-DIALOG-${tab}` } : null
+            case "screenshot":
+              return { mimeType: "image/png", data: `PRIVATE-IMAGE-${tab}` }
+            case "navigate":
+              tabs.set(tab, input.params.url!)
+              return { id: tab, url: input.params.url }
+            case "upload":
+              expect(choosers.has(tab)).toBe(true)
+              choosers.delete(tab)
+              return { files: input.params.files }
+            case "find":
+              return [{ id: "file-input", role: "textbox", name: input.params.query }]
+            case "handleDialog":
+              dialogs.delete(tab)
+              return { handled: true }
+            case "activate":
+              active = tab
+              return undefined
+            case "tabs":
+              return [...tabs].map(([id, url]) => ({ id, url, active: id === active }))
+            case "status":
+              return { running: true, tabs: tabs.size }
+            default:
+              throw new Error(`Unexpected remote browser operation ${input.operation}`)
+          }
+        }
+        instance.complete({ id: command.id, ok: true, result: respond() })
+      }
+      expect(settled).toBe(true)
+      return { outcome: await pending, calls }
+    }
+
+    await execute({ action: "browser_open", sessionId: "A", url: "https://a.example" })
+    dialogs.add("tab-1")
+    choosers.add("tab-1")
+    for (const request of [
+      { action: "browser_read" },
+      { action: "browser_screenshot" },
+      { action: "browser_navigate", url: "https://attacker.example" },
+      { action: "browser_upload", files: ["/tmp/file.txt"] },
+      { action: "browser_dialog", dialog: "accept" },
+    ]) {
+      const { outcome, calls } = await execute({ ...request, sessionId: "B" })
+      expect(outcome.httpStatus).toBe(403)
+      expect(outcome.result.error).toMatchObject({ code: "tab_not_owned" })
+      expect(JSON.stringify(outcome.result)).not.toContain("PRIVATE")
+      expect(calls).toEqual([])
+    }
+    const emptyTabs = await execute({ action: "browser_tabs", sessionId: "B" })
+    expect(emptyTabs.outcome.result.metadata).toEqual({ tabs: [] })
+    expect(emptyTabs.calls.map((call) => call.operation)).toEqual(["tabs"])
+    const status = await execute({ action: "browser_status", sessionId: "B" })
+    expect(status.outcome.httpStatus).toBe(200)
+    expect(status.calls.map((call) => call.operation)).toEqual(["status"])
+    const opened = await execute({ action: "browser_open", sessionId: "B", url: "https://b.example" })
+    expect(opened.calls.map((call) => call.operation)).toEqual(["open", "read"])
+    // Change the runtime's global selection back to A without changing B's ownership.
+    active = "tab-1"
+    for (const request of [
+      { action: "browser_read" },
+      { action: "browser_screenshot" },
+      { action: "browser_navigate", url: "https://b-next.example" },
+      { action: "browser_upload", files: ["/tmp/file.txt"] },
+      { action: "browser_dialog", dialog: "dismiss" },
+    ]) {
+      if (request.action === "browser_upload") choosers.add("tab-2")
+      if (request.action === "browser_dialog") dialogs.add("tab-2")
+      const { outcome, calls } = await execute({ ...request, sessionId: "B" })
+      expect(outcome.httpStatus).toBe(200)
+      expect(JSON.stringify(outcome.result)).not.toContain("PRIVATE-tab-1")
+      expect(calls.length).toBeGreaterThan(0)
+      expect(calls.every((call) => (call.params.tabId ?? call.params.options?.tabId) === "tab-2")).toBe(true)
+    }
+    expect(tabs.get("tab-1")).toBe("https://a.example")
+    expect(dialogs.has("tab-1")).toBe(true)
+    expect(choosers.has("tab-1")).toBe(true)
+    const visible = await execute({ action: "browser_tabs", sessionId: "B" })
+    expect(visible.outcome.result.metadata).toEqual({ tabs: [{ id: "tab-2", url: "https://b-next.example", active: false }] })
+  })
+
   test("forwards every browser operation as one browser command", async () => {
     const instance = remoteDriver()
     await expectForwarded(

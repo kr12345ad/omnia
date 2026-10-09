@@ -700,6 +700,12 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
     session,
     homeSessions,
     mcp: {
+      health: async (directory: string, name: string) => {
+        const key = directoryKey(directory)
+        const result = await sdkFor(key).mcp.health({ name })
+        await queryClient.refetchQueries(queryOptionsApi.mcp(key))
+        return result.data ?? { status: { status: "failed" as const, error: "" } }
+      },
       toggle: async (directory: string, name: string) => {
         const key = directoryKey(directory)
         const sdk = sdkFor(key)

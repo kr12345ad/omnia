@@ -44,6 +44,7 @@ import { createServer } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { startOmniaServer } from "./server"
+import { sessionProof } from "./api"
 import { EventBus } from "./events"
 import { PermissionManager, type ApprovalPolicy, type OmniaScope, type PermissionState } from "./permissions"
 import { ComputerManager, type BrowserController, type ServerComputerDriver } from "./computers"
@@ -595,17 +596,17 @@ function createBrowser(): BrowserController {
   }
 }
 
-function createDriverHarness(
+async function createDriverHarness(
   options: {
     readonly permissions?: Partial<Record<OmniaScope, PermissionState>>
     readonly approvalPolicy?: ApprovalPolicy
   } = {},
-): {
+): Promise<{
   manager: ComputerManager
   credentials: CountingCredentials
   credentialId: string
   navigations: () => number
-} {
+}> {
   let navigations = 0
   const driver: ServerComputerDriver = {
     id: "local",
@@ -638,6 +639,17 @@ function createDriverHarness(
   })
   manager.register(driver)
   const credential = credentials.save({ computerId: "local", name: "login", secret: SECRET, username: "krishna" })
+  const opened = await manager.execute("local", {
+    action: "browser_open",
+    url: "https://example.com",
+    ...APPROVAL,
+    approvedScopes: ["BROWSER"],
+  })
+  expect(opened.httpStatus).toBe(200)
+  expect(opened.result.success).toBe(true)
+  // Setup is outside the operation under test; denial counters start at zero.
+  credentials.reads = 0
+  navigations = 0
   return { manager, credentials, credentialId: credential.id, navigations: () => navigations }
 }
 
@@ -649,8 +661,8 @@ const APPROVAL = {
 } as const
 
 /** A browser_login the way an agent asks for one: nothing pre-approved. */
-function agentLogin(harness: ReturnType<typeof createDriverHarness>): Parameters<ComputerManager["execute"]>[1] {
-  return { action: "browser_login", credential: harness.credentialId, origin: "agent" }
+function agentLogin(harness: Awaited<ReturnType<typeof createDriverHarness>>): Parameters<ComputerManager["execute"]>[1] {
+  return { action: "browser_login", credential: harness.credentialId, sessionId: APPROVAL.sessionId, origin: "agent" }
 }
 
 /** Spends the free vault_login allowance the way a real caller would. */
@@ -671,7 +683,7 @@ describe("the driver gate refuses a stored-credential login before the vault is 
       process.env.OMNIA_SERVER_URL = controlPlane.url
       process.env.OMNIA_SERVER_TOKEN = controlPlane.token
       await spendVaultLogin(controlPlane, 3)
-      const harness = createDriverHarness()
+      const harness = await createDriverHarness()
       harness.credentials.reads = 0
       const outcome = await harness.manager.execute("local", {
         action: "browser_login",
@@ -712,7 +724,7 @@ describe("the driver gate refuses a stored-credential login before the vault is 
       process.env.OMNIA_SERVER_URL = controlPlane.url
       process.env.OMNIA_SERVER_TOKEN = controlPlane.token
       await spendVaultLogin(controlPlane, 3)
-      const harness = createDriverHarness({
+      const harness = await createDriverHarness({
         permissions: { BROWSER: "prompt", SECRETS: "prompt" },
         approvalPolicy: "ask_destructive",
       })
@@ -741,7 +753,7 @@ describe("the driver gate refuses a stored-credential login before the vault is 
   test("an unreachable control plane is a retryable 503, and still reads nothing", async () => {
     process.env.OMNIA_SERVER_URL = "http://127.0.0.1:1"
     process.env.OMNIA_SERVER_TOKEN = "token"
-    const harness = createDriverHarness()
+    const harness = await createDriverHarness()
     harness.credentials.reads = 0
     const outcome = await harness.manager.execute("local", {
       action: "browser_login",
@@ -766,7 +778,7 @@ describe("the driver gate refuses a stored-credential login before the vault is 
     try {
       process.env.OMNIA_SERVER_URL = broken.url
       process.env.OMNIA_SERVER_TOKEN = "token"
-      const harness = createDriverHarness()
+      const harness = await createDriverHarness()
       harness.credentials.reads = 0
       const outcome = await harness.manager.execute("local", {
         action: "browser_login",
@@ -793,7 +805,7 @@ describe("the driver gate refuses a stored-credential login before the vault is 
     try {
       process.env.OMNIA_SERVER_URL = silent.url
       process.env.OMNIA_SERVER_TOKEN = "token"
-      const harness = createDriverHarness()
+      const harness = await createDriverHarness()
       harness.credentials.reads = 0
       const asked = Date.now()
       const outcome = await harness.manager.execute("local", {
@@ -842,7 +854,7 @@ describe("the driver gate refuses a stored-credential login before the vault is 
       })
       process.env.OMNIA_SERVER_URL = "http://127.0.0.1:1"
       process.env.OMNIA_SERVER_TOKEN = controlPlane.token
-      const harness = createDriverHarness()
+      const harness = await createDriverHarness()
       harness.credentials.reads = 0
       const outcome = await harness.manager.execute("local", {
         action: "browser_login",
@@ -864,7 +876,7 @@ describe("the driver gate refuses a stored-credential login before the vault is 
     // here would break every self-hosted and desktop install in the product.
     delete process.env.OMNIA_SERVER_URL
     delete process.env.OMNIA_SERVER_TOKEN
-    const harness = createDriverHarness()
+    const harness = await createDriverHarness()
     harness.credentials.reads = 0
     const outcome = await harness.manager.execute("local", {
       action: "browser_login",
@@ -882,7 +894,7 @@ describe("the driver gate refuses a stored-credential login before the vault is 
     try {
       process.env.OMNIA_SERVER_URL = controlPlane.url
       process.env.OMNIA_SERVER_TOKEN = controlPlane.token
-      const harness = createDriverHarness()
+      const harness = await createDriverHarness()
       harness.credentials.reads = 0
       const outcome = await harness.manager.execute("local", {
         action: "browser_login",
@@ -915,7 +927,7 @@ describe("what the driver gate does not cover", () => {
       process.env.OMNIA_SERVER_URL = spent.url
       process.env.OMNIA_SERVER_TOKEN = spent.token
       await spendVaultLogin(spent, 3)
-      const harness = createDriverHarness()
+      const harness = await createDriverHarness()
       harness.credentials.reads = 0
       const refused = await harness.manager.execute("local", {
         action: "browser_login",
@@ -932,7 +944,7 @@ describe("what the driver gate does not cover", () => {
     try {
       process.env.OMNIA_SERVER_URL = anonymous.url
       process.env.OMNIA_SERVER_TOKEN = anonymous.token
-      const harness = createDriverHarness()
+      const harness = await createDriverHarness()
       harness.credentials.reads = 0
       const granted = await harness.manager.execute("local", {
         action: "browser_login",
@@ -1014,12 +1026,24 @@ describe("what the driver gate does not cover", () => {
         permissions: { BROWSER: "granted" },
       })
       try {
+        const opened = await server.computers.execute("local", {
+          action: "browser_open",
+          url: "https://example.com",
+          ...APPROVAL,
+          approvedScopes: ["BROWSER"],
+        })
+        expect(opened.httpStatus).toBe(200)
+        expect(opened.result.success).toBe(true)
+        navigations = 0
+        asked.length = 0
         const response = await fetch(`${server.url}/v1/computers/local/actions`, {
           method: "POST",
           headers: {
             authorization: `Bearer ${server.token}`,
             "content-type": "application/json",
             "x-omnia-origin": "agent",
+            "x-omnia-session": APPROVAL.sessionId,
+            "x-omnia-session-proof": sessionProof(server.token, APPROVAL.sessionId),
           },
           body: JSON.stringify({
             action: "browser_navigate",

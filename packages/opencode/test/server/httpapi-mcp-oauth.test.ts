@@ -20,6 +20,7 @@ const testMcpHandlers = HttpApiBuilder.group(TestHttpApi, "mcp", (handlers) =>
     handlers
       .handle("status", () => Effect.die("unexpected MCP status"))
       .handle("add", () => Effect.die("unexpected MCP add"))
+      .handle("health", () => Effect.succeed({ status: { status: "connected" as const }, tools: 2 }))
       .handle("authStart", () =>
         Effect.succeed({ authorizationUrl: "https://auth.example/start", oauthState: "state-123" }),
       )
@@ -68,6 +69,15 @@ describe("mcp HttpApi OAuth", () => {
         authorizationUrl: "https://auth.example/start",
         oauthState: "state-123",
       })
+    }),
+  )
+
+  it.live("returns an MCP health result", () =>
+    Effect.gen(function* () {
+      const response = yield* HttpClientRequest.post(McpPaths.health.replace(":name", "demo")).pipe(HttpClient.execute)
+
+      expect(response.status).toBe(200)
+      expect(yield* response.json).toEqual({ status: { status: "connected" }, tools: 2 })
     }),
   )
 })

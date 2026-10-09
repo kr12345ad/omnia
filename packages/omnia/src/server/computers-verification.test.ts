@@ -144,7 +144,7 @@ describe("truncated observations verify from action-local evidence", () => {
     })
     const { manager } = createManager(driver)
     await manager.observe("local")
-    const outcome = await manager.execute("local", { action: "open_file", path: "/tmp/Vendor_Master.ods" })
+    const outcome = await manager.execute("local", { action: "open_file", path: "/tmp/Vendor_Master.ods", approve: true, approvedScopes: ["PROCESS_EXECUTE"] })
     expect(outcome.result.success).toBe(true)
     expect(outcome.result.verification?.status).toBe("verified")
   })
@@ -730,7 +730,7 @@ describe("run_command failures", () => {
 
   test("a non-zero exit answers 409 with an error object", async () => {
     const { manager } = createManager(command(2))
-    const outcome = await manager.execute("local", { action: "run_command", command: "false", sessionId: "s" })
+    const outcome = await manager.execute("local", { action: "run_command", command: "false", sessionId: "s", approve: true, approvedScopes: ["PROCESS_EXECUTE"] })
     expect(outcome.httpStatus).toBe(409)
     expect(outcome.result.success).toBe(false)
     expect(errorCode(outcome.result.error)).toBe("command_failed")
@@ -740,7 +740,7 @@ describe("run_command failures", () => {
 
   test("a timed-out command answers 504 with a timeout code", async () => {
     const { manager } = createManager(command(undefined as unknown as number, true))
-    const outcome = await manager.execute("local", { action: "run_command", command: "sleep 100", sessionId: "s" })
+    const outcome = await manager.execute("local", { action: "run_command", command: "sleep 100", sessionId: "s", approve: true, approvedScopes: ["PROCESS_EXECUTE"] })
     expect(outcome.httpStatus).toBe(504)
     expect(errorCode(outcome.result.error)).toBe("command_timeout")
   })
@@ -1102,7 +1102,7 @@ describe("actions the real drivers accept", () => {
       },
     })
     const { manager } = createManager(driver)
-    const outcome = await manager.execute("local", { action: "activate_app", app: "dolphin" })
+    const outcome = await manager.execute("local", { action: "activate_app", app: "dolphin", approve: true, approvedScopes: ["PROCESS_EXECUTE"] })
     expect(outcome.httpStatus).toBe(200)
     expect(isComputerAction(actions[0])).toBe(true)
   })

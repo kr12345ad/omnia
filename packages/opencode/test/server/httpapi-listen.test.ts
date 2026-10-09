@@ -18,6 +18,11 @@ const original = {
 const auth = { username: "opencode", password: "listen-secret" }
 const testPty = process.platform === "win32" ? test.skip : test
 
+test("a non-loopback listener cannot start with no password", async () => {
+  delete process.env.OPENCODE_SERVER_PASSWORD
+  await expect(Server.listen({ hostname: "0.0.0.0", port: 0 })).rejects.toThrow("required for a non-loopback")
+})
+
 afterEach(async () => {
   Flag.OPENCODE_SERVER_PASSWORD = original.OPENCODE_SERVER_PASSWORD
   Flag.OPENCODE_SERVER_USERNAME = original.OPENCODE_SERVER_USERNAME

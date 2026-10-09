@@ -389,16 +389,64 @@ it.instance("does not fall back for protocol tool discovery errors", () =>
   }),
 )
 
-it.instance("disabled server is marked disabled without opening a protocol session", () =>
-  Effect.gen(function* () {
-    const server = yield* lifecycleServer()
-    const mcp = yield* MCP.Service
-    yield* mcp.add("disabled-server", { ...remote(server.url), enabled: false })
+  it.instance("disabled server is marked disabled without opening a protocol session", () =>
+    Effect.gen(function* () {
+      const server = yield* lifecycleServer()
+      const mcp = yield* MCP.Service
+      yield* mcp.add("disabled-server", { ...remote(server.url), enabled: false })
 
     expect((yield* mcp.status())["disabled-server"]?.status).toBe("disabled")
-    expect(server.state.requests).toEqual([])
-  }),
-)
+      expect(server.state.requests).toEqual([])
+    }),
+  )
+
+  it.instance("health probes protocol negotiation without replacing a live client", () =>
+    Effect.gen(function* () {
+      const server = yield* lifecycleServer()
+      server.state.tools = [{ name: "healthy_tool", inputSchema: { type: "object" } }]
+      const mcp = yield* MCP.Service
+      yield* mcp.add("healthy-server", remote(server.url))
+
+      expect(yield* mcp.health("healthy-server")).toEqual({ status: { status: "connected" }, tools: 1 })
+      expect((yield* mcp.status())["healthy-server"]?.status).toBe("connected")
+      expect(Object.keys(yield* mcp.tools())).toEqual(["healthy-server_healthy_tool"])
+    }),
+  )
+
+  it.instance("health opens and closes an isolated client when the server is not live", () =>
+    Effect.gen(function* () {
+      const server = yield* lifecycleServer()
+      server.state.tools = [{ name: "probe_tool", inputSchema: { type: "object" } }]
+      const mcp = yield* MCP.Service
+      yield* mcp.add("offline-server", remote(server.url))
+      yield* mcp.disconnect("offline-server")
+      yield* pollWithTimeout(
+        Effect.sync(() => (server.state.aborted > 0 ? true : undefined)),
+        "disconnected health fixture was not closed",
+      )
+      yield* Effect.promise(server.restart)
+
+      expect(yield* mcp.health("offline-server")).toEqual({ status: { status: "connected" }, tools: 1 })
+      expect((yield* mcp.status())["offline-server"]?.status).toBe("disabled")
+      expect(yield* mcp.tools()).toEqual({})
+    }),
+  )
+
+  it.instance("a failed health probe leaves an existing MCP client usable", () =>
+    Effect.gen(function* () {
+      const server = yield* lifecycleServer()
+      server.state.tools = [{ name: "live_tool", inputSchema: { type: "object" } }]
+      const mcp = yield* MCP.Service
+      yield* mcp.add("live-server", remote(server.url))
+      server.state.listToolsError = "health probe listTools failed"
+
+      expect(yield* mcp.health("live-server")).toEqual({
+        status: { status: "failed", error: "Failed to get tools" },
+      })
+      expect((yield* mcp.status())["live-server"]?.status).toBe("connected")
+      expect(Object.keys(yield* mcp.tools())).toEqual(["live-server_live_tool"])
+    }),
+  )
 
 it.instance("returns prompts and URI-keyed resources from connected servers", () =>
   Effect.gen(function* () {

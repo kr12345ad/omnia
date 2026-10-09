@@ -2,6 +2,7 @@ import { createServer } from "node:http"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import type { AddressInfo } from "node:net"
 import { networkInterfaces } from "node:os"
+import { dirname, join } from "node:path"
 import { randomBytes, timingSafeEqual } from "node:crypto"
 import { EventBus } from "./events"
 import { SuperskillRegistry, summarizeSuperskill } from "../superskills/registry"
@@ -30,6 +31,8 @@ import { GitHubAuth, defaultGitHubAuthFile } from "../auth/github"
 import { ComputerManager, type BrowserController, type ServerComputerDriver } from "./computers"
 import { PermissionManager, type ApprovalPolicy, type OmniaScope, type PermissionState } from "./permissions"
 import { ApprovalRegistry } from "../security/approval"
+import { SecurityJournal } from "../security/journal"
+import { redactError } from "../security/redaction"
 import { pairingCodeHash } from "../pairing/discovery"
 import {
   eventFrame,
@@ -65,6 +68,7 @@ export interface OmniaServerOptions {
   readonly computerUseFile?: string
   readonly pairingsFile?: string
   readonly authFile?: string
+  readonly auditFile?: string
   readonly githubClientId?: string
   readonly githubClientSecret?: string
   readonly githubRedirectUri?: string
@@ -79,6 +83,7 @@ export interface OmniaServerOptions {
   readonly port?: number
   readonly publicUrl?: string
   readonly discovery?: boolean
+  readonly corsOrigins?: readonly string[]
   readonly now?: () => number
   readonly platform?: string
   readonly version?: string
@@ -111,11 +116,34 @@ function createServerId(): string {
 }
 
 export async function startOmniaServer(options: OmniaServerOptions = {}): Promise<OmniaServerHandle> {
+  if (!["127.0.0.1", "localhost", "::1"].includes(options.host ?? "127.0.0.1")) {
+    throw new Error("Omnia Server must bind to loopback. Use an authenticated HTTPS proxy or tunnel for remote access.")
+  }
   const now = options.now ?? Date.now
   const serverId = createServerId()
   const startedAt = now()
   const token = options.token ?? randomBytes(32).toString("hex")
+  if (token.trim().length === 0) throw new Error("Omnia Server requires a non-empty bearer token.")
+  const publicOrigin = options.publicUrl === undefined ? undefined : new URL(options.publicUrl).origin
+  const corsOrigins = new Set(options.corsOrigins ?? ["oc://renderer", ...(publicOrigin === undefined ? [] : [publicOrigin])])
+  if (corsOrigins.has("*") || corsOrigins.has("null")) throw new Error("CORS origins must be explicit origins.")
   const events = new EventBus({ serverId, now })
+  const audit = new SecurityJournal(options.auditFile ?? process.env.OMNIA_AUDIT_FILE ??
+    join(dirname(options.authFile ?? defaultGitHubAuthFile()), "audit", `${serverId}.jsonl`))
+  let auditFailed = false
+  const unsubscribeAudit = events.subscribe((event) => {
+    if (!/^(server\.|action\.|permission\.|credential\.|auth\.|computer\.pair|browser\.action)/.test(event.type)) return
+    try {
+      // Event payloads may include observations, commands or page contents.
+      // Persist only security metadata, never the payload itself.
+      audit.append({ type: event.type, at: event.at, serverId,
+        ...(event.computerId === undefined ? {} : { computerId: event.computerId }),
+        ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
+      })
+    } catch {
+      auditFailed = true
+    }
+  })
   const superskills = new SuperskillRegistry(
     options.superskillFile === undefined ? {} : { file: options.superskillFile },
   )
@@ -334,7 +362,6 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       "content-type": "text/event-stream",
       "cache-control": "no-cache, no-transform",
       connection: "keep-alive",
-      "access-control-allow-origin": "*",
     })
     let unsubscribe: () => void = () => {}
     let heartbeat: ReturnType<typeof setInterval> | undefined
@@ -416,6 +443,19 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       platform: options.platform ?? process.platform,
     },
     token,
+    auditPublicAuthentication: (request) => {
+      if (auditFailed) return false
+      try {
+        audit.append({ type: "public.authentication_verified", at: now(), serverId, method: request.method,
+          route: new URL(request.url ?? "/", "http://127.0.0.1").pathname.slice(0, 256),
+          address: request.socket.remoteAddress,
+        })
+        return true
+      } catch {
+        auditFailed = true
+        return false
+      }
+    },
     events,
     computers,
     permissions,
@@ -476,9 +516,38 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
 
   // Pairing codes are 40 bits; an unauthenticated claim endpoint needs a
   // per-address attempt limit so the code space cannot be brute-forced.
+  // Bound failed online authentication attempts. Valid credentials are checked
+  // first so shared proxies/loopback cannot be locked out by another caller.
+  const authFailures = new Map<string, { count: number; windowResetAt: number; lockedUntil: number }>()
+  const AUTH_FAILURE_LIMIT = 10
+  const AUTH_FAILURE_WINDOW_MS = 60_000
+  const AUTH_LOCKOUT_MS = 300_000
+  const authLockedOut = (address: string): boolean => {
+    const entry = authFailures.get(address)
+    return entry !== undefined && entry.lockedUntil > now()
+  }
+  const recordAuthFailure = (address: string): void => {
+    const at = now()
+    let entry = authFailures.get(address)
+    if (entry === undefined || entry.windowResetAt <= at) {
+      if (authFailures.size >= 1000) {
+        const oldest = authFailures.keys().next().value
+        if (oldest !== undefined) authFailures.delete(oldest)
+      }
+      entry = { count: 0, windowResetAt: at + AUTH_FAILURE_WINDOW_MS, lockedUntil: 0 }
+      authFailures.set(address, entry)
+    }
+    entry.count += 1
+    if (entry.count >= AUTH_FAILURE_LIMIT) entry.lockedUntil = at + AUTH_LOCKOUT_MS
+  }
   const claimAttempts = new Map<string, { count: number; resetAt: number }>()
   const CLAIM_ATTEMPT_LIMIT = 10
   const CLAIM_ATTEMPT_WINDOW_MS = 60_000
+  // Per-IP limits alone fall to rotation; a global ceiling keeps a distributed
+  // pairing-code grind from getting unlimited aggregate guesses.
+  let claimGlobalCount = 0
+  let claimGlobalResetAt = 0
+  const CLAIM_GLOBAL_LIMIT = 50
   const claimRateLimited = (address: string): boolean => {
     const at = now()
     const entry = claimAttempts.get(address)
@@ -494,20 +563,68 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     return entry.count > CLAIM_ATTEMPT_LIMIT
   }
 
+  // Pre-auth traffic has a bounded durable-write budget. Rejected floods must
+  // not turn the journal into an unauthenticated disk/event-loop exhaustion
+  // primitive. Authorized operations still require durable admission records.
+  let rejectionWrites = 0
+  let rejectionResetAt = 0
+  const logRejected = (request: IncomingMessage, status: number, type = "request.rejected"): void => {
+    const at = now()
+    if (rejectionResetAt <= at) {
+      rejectionWrites = 0
+      rejectionResetAt = at + 60_000
+    }
+    if (rejectionWrites >= 40 || auditFailed) return
+    rejectionWrites += 1
+    try {
+      audit.append({ type, at, serverId, method: request.method,
+        status, address: request.socket.remoteAddress,
+      })
+    } catch {
+      auditFailed = true
+    }
+  }
+
   const server = createServer((request: IncomingMessage, response: ServerResponse) => {
     void (async () => {
-      // CORS preflight must succeed before any bearer check or browsers can
-      // never reach the authenticated handlers.
-      if (request.method === "OPTIONS") {
-        json(response, 204, {})
+      const route = new URL(request.url ?? "/", "http://127.0.0.1").pathname
+      if (auditFailed) {
+        json(response, 503, { ok: false, error: "Security audit storage is unavailable." })
         return
       }
+      // Browsers preflight without credentials. Only explicit origins may
+      // preflight; the subsequent real request still takes the bearer path.
+      const origin = request.headers.origin
+      response.setHeader("vary", "Origin")
+      if (origin !== undefined) {
+        if (!corsOrigins.has(origin)) {
+          logRejected(request, 403)
+          json(response, 403, { ok: false, error: "Origin is not allowed." })
+          return
+        }
+        response.setHeader("access-control-allow-origin", origin)
+        if (request.method === "OPTIONS") {
+          response.setHeader("access-control-allow-headers", "authorization, content-type, x-omnia-origin, x-omnia-session, x-omnia-session-proof, x-omnia-key-id, x-omnia-timestamp, x-omnia-signature")
+          response.setHeader("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS")
+          response.writeHead(204)
+          response.end()
+          return
+        }
+      }
+      const address = request.socket.remoteAddress ?? "unknown"
+      let authenticated = isAuthorized(request, token, (a, b) => timingSafeEqual(a, b), auth)
       const authorization = ((): "ok" | "unauthorized" | "bad_request" => {
-        if (isAuthorized(request, token, (a, b) => timingSafeEqual(a, b), auth)) return "ok"
+        if (authenticated) return "ok"
         const url = new URL(request.url ?? "/", "http://127.0.0.1")
         if (isPublicApiRoute(request.method ?? "", url.pathname)) return "ok"
         if (request.method === "POST" && url.pathname === `${OMNIA_API_PREFIX}/computers/pair/claim`) {
-          const address = request.socket.remoteAddress ?? "unknown"
+          const at = now()
+          if (claimGlobalResetAt <= at) {
+            claimGlobalCount = 0
+            claimGlobalResetAt = at + CLAIM_ATTEMPT_WINDOW_MS
+          }
+          claimGlobalCount += 1
+          if (claimGlobalCount > CLAIM_GLOBAL_LIMIT) return "unauthorized"
           return claimRateLimited(address) ? "unauthorized" : "ok"
         }
         const match = url.pathname.match(/^\/v1\/computers\/([^/]+)\/remote\//)
@@ -519,23 +636,59 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
             return "bad_request"
           }
           const bearer = request.headers.authorization?.replace(/^Bearer\s+/i, "")
-          return remote.authorize(computerId, bearer) ? "ok" : "unauthorized"
+          authenticated = remote.authorize(computerId, bearer)
+          return authenticated ? "ok" : "unauthorized"
         }
         return "unauthorized"
       })()
       if (authorization === "bad_request") {
+        logRejected(request, 400)
         json(response, 400, { ok: false, error: "The computer id in the request path is not valid percent-encoding." })
         return
       }
       if (authorization !== "ok") {
+        if (authLockedOut(address)) {
+          logRejected(request, 429)
+          response.setHeader("retry-after", String(Math.ceil((authFailures.get(address)!.lockedUntil - now()) / 1000)))
+          json(response, 429, { ok: false, error: "Too many failed attempts; try again shortly." })
+          return
+        }
         const url = new URL(request.url ?? "/", "http://127.0.0.1")
         const rateLimited =
           request.method === "POST" && url.pathname === `${OMNIA_API_PREFIX}/computers/pair/claim`
+        if (!rateLimited) recordAuthFailure(address)
+        logRejected(request, rateLimited ? 429 : 401)
         json(response, rateLimited ? 429 : 401, {
           ok: false,
           error: rateLimited ? "Too many pairing attempts; try again shortly." : "Unauthorized.",
         })
         return
+      }
+      if (!authenticated) {
+        // Anonymous status requests must not consume an admission quota shared
+        // with independently authenticated callbacks/webhooks. Budget only the
+        // generic pre-auth log writes; verified mutations log after validation.
+        response.once("finish", () => logRejected(request, response.statusCode, "request.public.completed"))
+      } else {
+        // Limit caller-controlled pathname size; query strings never enter logs.
+        const bearer = request.headers.authorization?.replace(/^Bearer /, "")
+        const profile = bearer === undefined ? undefined : auth.clientTokenProfile(bearer)
+        const actor = profile !== undefined ? `github:${profile.id}` : bearer === token ? "deployment-operator" : "remote-runtime"
+        const admission = { at: now(), serverId, method: request.method, route: route.slice(0, 256), address, actor }
+        try {
+          audit.append({ ...admission, type: "request.received" })
+        } catch {
+          auditFailed = true
+          json(response, 503, { ok: false, error: "Security audit storage is unavailable." })
+          return
+        }
+        response.once("finish", () => {
+          try {
+            audit.append({ ...admission, at: now(), type: "request.completed", status: response.statusCode })
+          } catch {
+            auditFailed = true
+          }
+        })
       }
       const handled = await handleRequest(context, request, response).catch((error: unknown) => {
         if (error instanceof RequestBodyTooLargeError) {
@@ -560,20 +713,28 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
           return true
         }
         // Never leak internal error messages to clients.
-        console.error("omnia server request failed", error)
+        console.error("omnia server request failed", redactError(error instanceof Error ? error : new Error(String(error))))
         json(response, 500, { ok: false, error: "Omnia Server request failed." })
         return true
       })
       if (!handled && !response.headersSent) {
         json(response, 404, { ok: false, error: "Unknown route." })
       }
-    })()
+    })().catch((error: unknown) => {
+      console.error("omnia server request failed", redactError(error instanceof Error ? error : new Error(String(error))))
+      json(response, 500, { ok: false, error: "Omnia Server request failed." })
+    })
   })
 
   await new Promise<void>((resolve, reject) => {
-    server.once("error", reject)
+    const failed = (error: Error) => {
+      unsubscribeAudit()
+      audit.close()
+      reject(error)
+    }
+    server.once("error", failed)
     server.listen(options.port ?? 0, options.host ?? "127.0.0.1", () => {
-      server.off("error", reject)
+      server.off("error", failed)
       resolve()
     })
   })
@@ -582,7 +743,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
   // Hosted deployments gate pairing centrally and never advertise on the LAN;
   // loopback-only embedded servers must not broadcast either.
   const pairingDiscovery =
-    options.discovery === false
+    options.discovery !== true
       ? undefined
       : startPairingDiscovery({
           lookup: (codeHash) => {
@@ -673,6 +834,8 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       await new Promise<void>((resolve) => server.close(() => resolve()))
       state = "stopped"
       events.emit("server.stopped", {})
+      unsubscribeAudit()
+      audit.close()
     },
   }
 }

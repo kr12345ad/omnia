@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { IncomingMessage } from "node:http"
-import { SessionUnboundError, checkSessionBinding, sessionProof, type ApiContext } from "./api"
+import { MAX_CLIENT_SESSION_BINDINGS, SessionUnboundError, checkSessionBinding, sessionProof, type ApiContext } from "./api"
 import { startOmniaServer } from "./server"
 import type { ServerComputerDriver } from "./computers"
 import type { ActionResult, ComputerAction, FindRequest, Observation } from "../protocol"
@@ -121,7 +121,7 @@ describe("session binding", () => {
   })
 
   test("accepts a proof signed with the presented client token", () => {
-    const context = { token: "operator-token" } as ApiContext
+    const context = { token: "operator-token", auth: { isClientToken: (token: string) => token === "client-token" } } as unknown as ApiContext
     const bound = {
       headers: {
         authorization: "Bearer client-token",
@@ -136,6 +136,64 @@ describe("session binding", () => {
       },
     } as unknown as IncomingMessage
     expect(() => checkSessionBinding(context, wrongKey, { sessionId: "session-1" })).toThrow(SessionUnboundError)
+  })
+
+  test("a second credential cannot claim an already bound session with its own valid HMAC", () => {
+    const context = { token: "operator-token", auth: { isClientToken: (token: string) => ["client-a", "client-b"].includes(token) } } as unknown as ApiContext
+    const request = (token: string) => ({ headers: {
+      authorization: `Bearer ${token}`,
+      "x-omnia-session-proof": sessionProof(token, "victim-session"),
+    } }) as unknown as IncomingMessage
+    checkSessionBinding(context, request("client-a"), { sessionId: "victim-session" })
+    expect(() => checkSessionBinding(context, request("client-b"), { sessionId: "victim-session" })).toThrow(SessionUnboundError)
+    expect(() => checkSessionBinding(context, request("client-a"), { sessionId: "victim-session" })).not.toThrow()
+  })
+
+  test("public OAuth requests with chosen invalid token/proof cannot reserve a session", async () => {
+    await withServer(async (server) => {
+      const response = await fetch(`${server.url}/v1/auth/github/status`, { headers: {
+        authorization: "Bearer attacker-chosen",
+        "x-omnia-session": "public-claimed-session",
+        "x-omnia-session-proof": sessionProof("attacker-chosen", "public-claimed-session"),
+      } })
+      expect(response.status).toBe(401)
+      const legitimate = await fetch(`${server.url}/v1/computers/local/actions`, {
+        method: "POST", headers: headers(server, sessionProof(server.token, "public-claimed-session")),
+        body: JSON.stringify({ action: "observe", sessionId: "public-claimed-session" }),
+      })
+      expect(legitimate.status).toBe(200)
+    })
+  })
+
+  test("one authenticated client cannot consume the entire shared binding capacity", () => {
+    const context = { token: "operator-token", auth: { isClientToken: (token: string) => ["client-a", "client-b"].includes(token) } } as unknown as ApiContext
+    const bind = (token: string, sessionId: string) => checkSessionBinding(context, { headers: {
+      authorization: `Bearer ${token}`, "x-omnia-session-proof": sessionProof(token, sessionId),
+    } } as unknown as IncomingMessage, { sessionId })
+    for (let index = 0; index < MAX_CLIENT_SESSION_BINDINGS; index++) bind("client-a", `session-${index}`)
+    expect(() => bind("client-a", "one-too-many")).toThrow("capacity")
+    expect(() => bind("client-b", "unrelated-client-session")).not.toThrow()
+    expect(() => bind("operator-token", "operator-session")).not.toThrow()
+    expect(() => bind("client-a", "session-0")).not.toThrow()
+  })
+
+  test("batch session overrides are rejected before any driver action", async () => {
+    await withServer(async (server) => {
+      for (const session of [undefined, "outer-session"]) {
+        const response = await fetch(`${server.url}/v1/computers/local/do`, {
+          method: "POST",
+          headers: headers(server, session === undefined ? undefined : sessionProof(server.token, session)),
+          body: JSON.stringify({
+            ...(session === undefined ? {} : { sessionId: session }),
+            steps: [{ action: "observe" }, { action: "observe", sessionId: "victim-session" }],
+          }),
+        })
+        expect(response.status).toBe(400)
+        expect((await response.json()).error).toBe("session_mismatch")
+      }
+      const response = await fetch(`${server.url}/v1/sessions`, { headers: headers(server) })
+      expect((await response.json()).sessions).toHaveLength(0)
+    })
   })
 
   test("rejects a body sessionId that disagrees with the x-omnia-session header", async () => {

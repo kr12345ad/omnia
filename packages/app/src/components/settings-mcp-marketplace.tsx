@@ -11,7 +11,7 @@ import { SettingsListV2 } from "./settings-v2/parts/list"
 import { useLanguage } from "@/context/language"
 import { useServerSync } from "@/context/server-sync"
 import { usePlatform } from "@/context/platform"
-import type { Config } from "@opencode-ai/sdk/v2/client"
+import type { Config, McpHealth } from "@opencode-ai/sdk/v2/client"
 import { loadCatalog } from "@/mcp/catalog"
 import {
   CATEGORY_ALL,
@@ -38,7 +38,7 @@ import "./settings-v2/settings-v2.css"
 
 const PAGE = 24
 
-export const SettingsMcpMarketplace: Component = () => {
+export const SettingsMcpMarketplace: Component<{ directory?: string }> = (props) => {
   const language = useLanguage()
   const dialog = useDialog()
   const sync = useServerSync()
@@ -55,6 +55,8 @@ export const SettingsMcpMarketplace: Component = () => {
     view: "browse" as "browse" | "installed",
     selected: undefined as MarketplaceServer | undefined,
     busy: undefined as string | undefined,
+    checking: undefined as string | undefined,
+    health: {} as Record<string, McpHealth | undefined>,
     error: "",
     mcp: undefined as Config["mcp"] | undefined,
   })
@@ -63,6 +65,7 @@ export const SettingsMcpMarketplace: Component = () => {
   const query = () => store.query
   const category = () => store.category
   const busy = () => store.busy
+  const checking = () => store.checking
   const error = () => store.error
   const setQuery = (value: string) => setStore({ query: value, page: 1 })
   const setCategory = (value: string) => setStore({ category: value, page: 1 })
@@ -98,7 +101,16 @@ export const SettingsMcpMarketplace: Component = () => {
       sort: store.sort,
     }),
   )
+  const categoryCounts = createMemo(() => {
+    const counts = new Map<string, number>([[CATEGORY_ALL, catalog().length]])
+    for (const server of catalog()) counts.set(server.category, (counts.get(server.category) ?? 0) + 1)
+    return counts
+  })
   const pageCount = () => Math.max(1, Math.ceil(results().total / PAGE))
+  const hasFilters = () =>
+    query().trim().length > 0 || category() !== CATEGORY_ALL || store.runtime !== "all" || store.sort !== "popular"
+  const resetFilters = () =>
+    setStore({ query: "", category: CATEGORY_ALL, runtime: "all", sort: "popular", page: 1 })
   createEffect(() => {
     if (store.page > pageCount()) setStore("page", pageCount())
   })
@@ -115,6 +127,10 @@ export const SettingsMcpMarketplace: Component = () => {
   }
   const runtimeName = (server: MarketplaceServer) =>
     language.t(`settings.mcpMarketplace.runtime.${serverRuntime(server)}`)
+  const healthName = (health: McpHealth) => {
+    const key = `mcp.status.${health.status.status}` as Parameters<typeof language.t>[0]
+    return language.t(key) ?? health.status.status
+  }
 
   const update = async (name: string, entry: McpEntry | undefined) => {
     if (busy() !== undefined) return
@@ -132,9 +148,25 @@ export const SettingsMcpMarketplace: Component = () => {
     }
   }
 
+  const checkHealth = async (name: string) => {
+    if (!props.directory || busy() !== undefined || checking() !== undefined) return
+    setStore("checking", name)
+    try {
+      const result = await sync().mcp.health(props.directory, name)
+      setStore("health", name, result)
+      setStore("error", "")
+    } catch (reason) {
+      const error = reason instanceof Error ? reason.message : String(reason)
+      setStore("health", name, { status: { status: "failed", error } })
+      setStore("error", error)
+    } finally {
+      setStore("checking", undefined)
+    }
+  }
+
   const install = (server: MarketplaceServer, environment: Record<string, string>) => {
     const name = uniqueServerKey(Object.keys(config().mcp ?? {}), serverKey(server))
-    return update(name, serverConfig(server, environment, true))
+    return update(name, serverConfig(server, environment, true)).then(() => checkHealth(name))
   }
 
   const start = (server: MarketplaceServer) => {
@@ -227,6 +259,11 @@ export const SettingsMcpMarketplace: Component = () => {
                   <option value="name">{language.t("settings.mcpMarketplace.sort.name")}</option>
                 </select>
               </label>
+              <Show when={hasFilters()}>
+                <ButtonV2 variant="ghost" size="small" icon="reset" onClick={resetFilters}>
+                  {language.t("common.reset")}
+                </ButtonV2>
+              </Show>
             </div>
             <div class="settings-v2-marketplace-categories">
               <For each={categories(catalog())}>
@@ -239,6 +276,9 @@ export const SettingsMcpMarketplace: Component = () => {
                     onClick={() => setCategory(item)}
                   >
                     {categoryName(item)}
+                    <span class="settings-v2-marketplace-chip-count" aria-hidden="true">
+                      {categoryCounts().get(item) ?? 0}
+                    </span>
                   </button>
                 )}
               </For>
@@ -355,6 +395,24 @@ export const SettingsMcpMarketplace: Component = () => {
                         <ButtonV2 variant="ghost" size="small" onClick={() => setStore("selected", item.catalog)}>
                           {language.t("settings.mcpMarketplace.details")}
                         </ButtonV2>
+                      </Show>
+                      <Show when={props.directory}>
+                        <ButtonV2
+                          variant={checking() === item.name ? "loading" : "ghost"}
+                          size="small"
+                          icon="reset"
+                          disabled={busy() !== undefined || checking() !== undefined}
+                          onClick={() => void checkHealth(item.name)}
+                        >
+                          {language.t("settings.updates.action.checkNow")}
+                        </ButtonV2>
+                      </Show>
+                      <Show when={store.health[item.name]}>
+                        {(health) => (
+                          <Tag variant={health().status.status === "connected" ? "accent" : undefined}>
+                            {healthName(health())}
+                          </Tag>
+                        )}
                       </Show>
                       <Switch
                         checked={item.entry.enabled !== false}

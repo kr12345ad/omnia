@@ -114,6 +114,7 @@ function makeMcp(instructions: MCP.ServerInstructions[] = []) {
     MCP.Service,
     MCP.Service.of({
       status: () => Effect.succeed({}),
+      health: () => Effect.succeed({ status: { status: "disabled" as const } }),
       clients: () => Effect.succeed({}),
       instructions: () => Effect.succeed(instructions),
       tools: () => Effect.succeed({}),

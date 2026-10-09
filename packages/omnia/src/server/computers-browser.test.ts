@@ -137,12 +137,20 @@ function browserHarness(overrides: Partial<BrowserController> = {}) {
   return { browser: { ...browser, ...overrides }, state }
 }
 
+async function createSessionManager(driver: ServerComputerDriver, options: Parameters<typeof createManager>[1], sessionId = "s") {
+  const fixture = createManager(driver, options)
+  const opened = await fixture.manager.execute(driver.id, { action: "browser_open", url: "https://example.com", sessionId })
+  expect(opened.result.success).toBe(true)
+  return fixture
+}
+
 describe("browser verification uses per-action readback", () => {
   test("navigate verifies against an independent page URL, not a hash delta", async () => {
     const { browser, state } = browserHarness({
       navigate: async (_url, tabId) => ({ id: tabId ?? "tab-1", url: "https://redirected.example" }),
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
+    state.readCalls = 0
     const outcome = await manager.execute("local", { action: "browser_navigate", url: "https://target.example", sessionId: "s" })
     expect(outcome.httpStatus).toBe(200)
     expect(outcome.result.verification?.status).toBe("unverified")
@@ -154,11 +162,11 @@ describe("browser verification uses per-action readback", () => {
 
   test("navigate verifies when the page read reports the navigated URL", async () => {
     const { browser } = browserHarness()
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_navigate", url: "https://target.example", sessionId: "s" })
     expect(outcome.result.verification?.status).toBe("verified")
     expect(outcome.result.verification?.method).toBe("browser-url-readback")
-    expect((outcome.result.metadata as { tab?: { id?: string } }).tab?.id).toBe("tab-1")
+    expect((outcome.result.metadata as { tab?: { id?: string } }).tab?.id).toBe("tab-2")
   })
 
   test("navigate reports an explicit unverified when the readback fails", async () => {
@@ -167,7 +175,7 @@ describe("browser verification uses per-action readback", () => {
         throw new CdpError("not_available", "no page")
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_navigate", url: "https://target.example", sessionId: "s" })
     expect(outcome.result.success).toBe(true)
     expect(outcome.result.verification?.status).toBe("unverified")
@@ -176,7 +184,8 @@ describe("browser verification uses per-action readback", () => {
 
   test("click needs a page change readback; an unchanged page is not verified", async () => {
     const changed = browserHarness()
-    const changedManager = createManager(baseDriver(), { browser: changed.browser }).manager
+    const changedManager = (await createSessionManager(baseDriver(), { browser: changed.browser })).manager
+    changed.state.readCalls = 0
     const verified = await changedManager.execute("local", {
       action: "browser_click",
       target: { elementId: "field-1" },
@@ -187,7 +196,7 @@ describe("browser verification uses per-action readback", () => {
     expect(changed.state.readCalls).toBe(2)
 
     const stuck = browserHarness({ click: async () => ({ clicked: true, name: "Export", role: "button" }) })
-    const stuckManager = createManager(baseDriver(), { browser: stuck.browser }).manager
+    const stuckManager = (await createSessionManager(baseDriver(), { browser: stuck.browser })).manager
     const unverified = await stuckManager.execute("local", {
       action: "browser_click",
       target: { elementId: "field-1" },
@@ -204,7 +213,7 @@ describe("browser verification uses per-action readback", () => {
         return { clicked: true, name: "Export", role: "button" }
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", {
       action: "browser_click",
       target: { elementId: "field-1" },
@@ -222,7 +231,7 @@ describe("browser verification uses per-action readback", () => {
         throw new CdpError("load_timeout", "slow")
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_click", target: { elementId: "x" }, sessionId: "s" })
     expect(outcome.result.verification?.status).toBe("unverified")
     expect(outcome.result.verification?.message).toContain("could not be read back")
@@ -237,7 +246,8 @@ describe("browser verification uses per-action readback", () => {
         return { dragged: true, method: "mouse" }
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
+    state.readCalls = 0
 
     const outcome = await manager.execute("local", {
       action: "browser_drag",
@@ -263,7 +273,7 @@ describe("browser verification uses per-action readback", () => {
       scroll: async () => undefined,
       scrollPosition: async () => positions.shift() ?? { x: 0, y: 800 },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
 
     const outcome = await manager.execute("local", {
       action: "browser_scroll",
@@ -284,7 +294,7 @@ describe("browser verification uses per-action readback", () => {
       scroll: async () => undefined,
       scrollPosition: async () => ({ x: 0, y: 0 }),
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
 
     const outcome = await manager.execute("local", {
       action: "browser_scroll",
@@ -303,7 +313,8 @@ describe("browser verification uses per-action readback", () => {
       scroll: async () => undefined,
       scrollPosition: async () => ({ x: 0, y: 0 }),
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
+    state.readCalls = 0
 
     const outcome = await manager.execute("local", { action: "browser_scroll", sessionId: "s" })
 
@@ -317,7 +328,7 @@ describe("browser verification uses per-action readback", () => {
         // The harness page changes only through navigate; simulate the history move here.
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const before = await manager.execute("local", { action: "browser_read", sessionId: "s" })
     expect(before.httpStatus).toBe(200)
     const outcome = await manager.execute("local", { action: "browser_back", sessionId: "s" })
@@ -331,7 +342,7 @@ describe("browser verification uses per-action readback", () => {
         state.page = { ...state.page, url: "https://previous.example", hash: "hash-previous" }
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_back", sessionId: "s" })
     expect(outcome.result.verification?.status).toBe("verified")
     expect(outcome.result.verification?.method).toBe("browser-history-readback")
@@ -339,7 +350,8 @@ describe("browser verification uses per-action readback", () => {
 
   test("reload is unverified when the document generation is unchanged", async () => {
     const { browser, state } = browserHarness()
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
+    state.readCalls = 0
     const outcome = await manager.execute("local", { action: "browser_reload", sessionId: "s" })
     expect(outcome.result.success).toBe(true)
     expect(outcome.result.verification?.status).toBe("unverified")
@@ -354,7 +366,7 @@ describe("browser verification uses per-action readback", () => {
         state.page = { ...state.page, url: "https://changed.example", hash: "hash-changed" }
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_reload", sessionId: "s" })
     expect(outcome.result.verification?.status).toBe("verified")
     expect(outcome.result.verification?.method).toBe("browser-reload-readback")
@@ -367,7 +379,7 @@ describe("browser verification uses per-action readback", () => {
         state.page = { ...state.page, documentId: "doc-2" }
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_reload", sessionId: "s" })
     expect(outcome.result.verification?.status).toBe("verified")
     expect(outcome.result.verification?.method).toBe("browser-reload-readback")
@@ -381,7 +393,7 @@ describe("browser verification uses per-action readback", () => {
         throw new CdpError("no_history", "There is no previous page in this tab.")
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_back", sessionId: "s" })
     expect(outcome.httpStatus).toBe(409)
     expect(errorCode(outcome.result.error)).toBe("no_history")
@@ -389,17 +401,18 @@ describe("browser verification uses per-action readback", () => {
 
   test("back/forward perform the action and both reads on the same resolved tab", async () => {
     const { browser, state } = browserHarness({
-      currentTab: () => "tab-1",
+      currentTab: () => "tab-2",
       back: async (tabId) => {
         state.actionTabs.push({ action: "back", ...(tabId === undefined ? {} : { tabId }) })
         state.page = { ...state.page, documentId: "doc-2" }
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
+    state.readTabs = []
     const outcome = await manager.execute("local", { action: "browser_back", sessionId: "s" })
     expect(outcome.result.verification?.status).toBe("verified")
-    expect(state.readTabs).toEqual(["tab-1", "tab-1"])
-    expect(state.actionTabs).toEqual([{ action: "back", tabId: "tab-1" }])
+    expect(state.readTabs).toEqual(["tab-2", "tab-2"])
+    expect(state.actionTabs).toEqual([{ action: "back", tabId: "tab-2" }])
   })
 
   test("history navigation verifies on a document change with an unchanged URL", async () => {
@@ -408,7 +421,7 @@ describe("browser verification uses per-action readback", () => {
         state.page = { ...state.page, documentId: "doc-2" }
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_forward", sessionId: "s" })
     expect(outcome.result.verification?.status).toBe("verified")
     expect(outcome.result.verification?.method).toBe("browser-history-readback")
@@ -416,7 +429,7 @@ describe("browser verification uses per-action readback", () => {
 
   test("key press verifies only from an independent page change", async () => {
     const { browser, state } = browserHarness()
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const stuck = await manager.execute("local", { action: "browser_key", key: "Enter", sessionId: "s" })
     expect(stuck.result.success).toBe(true)
     expect(stuck.result.verification?.status).toBe("unverified")
@@ -482,7 +495,7 @@ describe("browser verification uses per-action readback", () => {
       clicks += 1
       return { clicked: true, name: "Export", role: "button" }
     }
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const stale = await manager.execute("local", {
       action: "browser_click",
       target: { kind: "element", elementId: "field-1@doc-42", observationId: "doc-7" },
@@ -515,7 +528,7 @@ describe("browser_type independent readback", () => {
   test("coordinate typing is delivered through the browser but stays unverified", async () => {
     const typed: unknown[] = []
     const { browser } = browserHarness({ type: async (target) => { typed.push(target); return { typed: true } } })
-    const { manager } = createManager(baseDriver(), { browser, permissions: { SCREEN_READ: "denied", POINTER: "denied", BROWSER: "granted" } })
+    const { manager } = await createSessionManager(baseDriver(), { browser, permissions: { SCREEN_READ: "denied", POINTER: "denied", BROWSER: "granted" } })
     const outcome = await manager.execute("local", { action: "browser_type", x: 80, y: 90, text: "Example", sessionId: "s" })
     expect(outcome.result.success).toBe(true)
     expect(typed[0]).toMatchObject({ x: 80, y: 90, text: "Example" })
@@ -525,7 +538,7 @@ describe("browser_type independent readback", () => {
 
   test("browser screenshots do not require physical screen or pointer permission", async () => {
     const { browser } = browserHarness({ screenshot: async () => ({ mimeType: "image/png", data: "iVBORw0KGgo=", viewport: { width: 800, height: 600 } }) })
-    const { manager } = createManager(baseDriver(), { browser, permissions: { SCREEN_READ: "denied", POINTER: "denied", BROWSER: "granted" } })
+    const { manager } = await createSessionManager(baseDriver(), { browser, permissions: { SCREEN_READ: "denied", POINTER: "denied", BROWSER: "granted" } })
     const outcome = await manager.execute("local", { action: "browser_screenshot", sessionId: "s" })
     expect(outcome.result.success).toBe(true)
     expect(outcome.result.metadata).toMatchObject({ screenshot: { mimeType: "image/png", viewport: { width: 800, height: 600 } } })
@@ -534,7 +547,7 @@ describe("browser_type independent readback", () => {
     const { browser } = browserHarness({
       type: async (target) => ({ typed: true, value: `echo:${target.text}` }),
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", {
       action: "browser_type",
       target: { elementId: "field-1" },
@@ -550,7 +563,7 @@ describe("browser_type independent readback", () => {
       type: async (target) => ({ typed: true, value: target.text }),
       find: async () => [{ id: "field-1", role: "textbox", name: "something else", visible: true, disabled: false, score: 1 }],
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", {
       action: "browser_type",
       target: { elementId: "field-1" },
@@ -563,7 +576,7 @@ describe("browser_type independent readback", () => {
 
   test("a missing field in the re-read stays unverified", async () => {
     const { browser } = browserHarness({ find: async () => [] })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", {
       action: "browser_type",
       target: { elementId: "field-1" },
@@ -581,7 +594,7 @@ describe("browser error taxonomy and tab ownership", () => {
         throw new CdpError("element_not_found", "The element is gone.")
       },
     })
-    const missingOutcome = await createManager(baseDriver(), { browser: missing.browser }).manager.execute("local", {
+    const missingOutcome = await (await createSessionManager(baseDriver(), { browser: missing.browser })).manager.execute("local", {
       action: "browser_navigate",
       url: "https://target.example",
       sessionId: "s",
@@ -595,7 +608,7 @@ describe("browser error taxonomy and tab ownership", () => {
         throw new BrowserUrlError("https://blocked.example")
       },
     })
-    const blockedOutcome = await createManager(baseDriver(), { browser: blocked.browser }).manager.execute("local", {
+    const blockedOutcome = await (await createSessionManager(baseDriver(), { browser: blocked.browser })).manager.execute("local", {
       action: "browser_navigate",
       url: "https://blocked.example",
       sessionId: "s",
@@ -610,7 +623,7 @@ describe("browser error taxonomy and tab ownership", () => {
         throw Object.assign(new Error("The embedded browser page changed while handling the command."), { code: "target_closed" })
       },
     })
-    const outcome = await createManager(baseDriver(), { browser }).manager.execute("local", {
+    const outcome = await (await createSessionManager(baseDriver(), { browser })).manager.execute("local", {
       action: "browser_navigate",
       url: "https://target.example",
       sessionId: "s",
@@ -627,7 +640,7 @@ describe("browser error taxonomy and tab ownership", () => {
         throw new Error("secret page content at /home/user/private")
       },
     })
-    const outcome = await createManager(baseDriver(), { browser }).manager.execute("local", {
+    const outcome = await (await createSessionManager(baseDriver(), { browser })).manager.execute("local", {
       action: "browser_navigate",
       url: "https://target.example",
       sessionId: "s",
@@ -671,9 +684,10 @@ describe("browser error taxonomy and tab ownership", () => {
 
   test("read metadata reports the action's effective tab, not a process-wide cache", async () => {
     const { browser } = browserHarness({
+      open: async () => ({ id: "tab-x", url: "https://example.com" }),
       currentTab: (sessionId) => (sessionId === "session-x" ? "tab-x" : "tab-global"),
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser }, "session-x")
     const outcome = await manager.execute("local", { action: "browser_read", sessionId: "session-x" })
     expect((outcome.result.metadata as { tab?: string }).tab).toBe("tab-x")
   })
@@ -683,7 +697,7 @@ describe("browser error taxonomy and tab ownership", () => {
     const bare = { ...browser } as Record<string, unknown>
     delete bare.images
     delete bare.saveImage
-    const { manager } = createManager(baseDriver(), { browser: bare as unknown as BrowserController })
+    const { manager } = await createSessionManager(baseDriver(), { browser: bare as unknown as BrowserController })
     const images = await manager.execute("local", { action: "browser_images", sessionId: "s" })
     expect(images.httpStatus).toBe(501)
     expect(errorCode(images.result.error)).toBe("operation_unavailable")
@@ -695,7 +709,7 @@ describe("browser error taxonomy and tab ownership", () => {
 describe("browser image path sandbox", () => {
   test("writes outside the sandbox require FILES_WRITE and answer 403 when denied", async () => {
     const { browser, state } = browserHarness()
-    const { manager } = createManager(baseDriver(), {
+    const { manager } = await createSessionManager(baseDriver(), {
       browser,
       permissions: { BROWSER: "granted", FILES_WRITE: "denied" },
       policy: "ask_destructive",
@@ -708,7 +722,7 @@ describe("browser image path sandbox", () => {
 
   test("traversal out of the downloads sandbox is rejected", async () => {
     const { browser, state } = browserHarness()
-    const { manager } = createManager(baseDriver(), {
+    const { manager } = await createSessionManager(baseDriver(), {
       browser,
       permissions: { BROWSER: "granted", FILES_WRITE: "denied" },
       policy: "ask_destructive",
@@ -721,7 +735,7 @@ describe("browser image path sandbox", () => {
 
   test("an unapproved out-of-sandbox write answers 428", async () => {
     const { browser } = browserHarness()
-    const { manager } = createManager(baseDriver(), {
+    const { manager } = await createSessionManager(baseDriver(), {
       browser,
       permissions: { BROWSER: "granted", FILES_WRITE: "prompt" },
       policy: "ask_destructive",
@@ -733,7 +747,7 @@ describe("browser image path sandbox", () => {
 
   test("sandboxed temp writes proceed without FILES_WRITE", async () => {
     const { browser, state } = browserHarness()
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const target = join(tmpdir(), "omnia-image-test.png")
     const outcome = await manager.execute("local", { action: "browser_save_image", path: target, sessionId: "s" })
     expect(outcome.httpStatus).toBe(200)
@@ -786,7 +800,7 @@ describe("browser dialogs", () => {
         return { handled: true }
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_dialog", dialog: "accept", sessionId: "s" })
     expect(outcome.httpStatus).toBe(200)
     expect(outcome.result.success).toBe(true)
@@ -808,7 +822,7 @@ describe("browser dialogs", () => {
         return { handled: true }
       },
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", {
       action: "browser_dialog",
       dialog: "accept",
@@ -823,7 +837,7 @@ describe("browser dialogs", () => {
 
   test("dialog_not_open and dialog_mismatch are rejected with 409", async () => {
     const none = browserHarness({ pendingDialog: async () => null, handleDialog: async () => ({ handled: true }) })
-    const noneOutcome = await createManager(baseDriver(), { browser: none.browser }).manager.execute("local", {
+    const noneOutcome = await (await createSessionManager(baseDriver(), { browser: none.browser })).manager.execute("local", {
       action: "browser_dialog",
       dialog: "dismiss",
       sessionId: "s",
@@ -835,7 +849,7 @@ describe("browser dialogs", () => {
       pendingDialog: async () => ({ type: "alert", message: "Hi" }),
       handleDialog: async () => ({ handled: true }),
     })
-    const mismatch = await createManager(baseDriver(), { browser: stale.browser }).manager.execute("local", {
+    const mismatch = await (await createSessionManager(baseDriver(), { browser: stale.browser })).manager.execute("local", {
       action: "browser_dialog",
       dialog: "accept",
       expectedType: "confirm",
@@ -850,7 +864,7 @@ describe("browser dialogs", () => {
       pendingDialog: async () => ({ type: "alert", message: "Hi" }),
       handleDialog: async () => ({ handled: true }),
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_dialog", dialog: "dismiss", sessionId: "s" })
     expect(outcome.result.success).toBe(true)
     expect(outcome.result.verification?.status).toBe("unverified")
@@ -862,7 +876,8 @@ describe("browser dialogs", () => {
       pendingDialog: async () => ({ type: "alert", message: "Hi" }),
       handleDialog: async () => ({ handled: true }),
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
+    state.readCalls = 0
     const click = await manager.execute("local", {
       action: "browser_click",
       target: { elementId: "field-1" },
@@ -893,7 +908,7 @@ describe("browser dialogs", () => {
       },
       handleDialog: async () => ({ handled: true }),
     })
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_read", sessionId: "s" })
     expect(outcome.httpStatus).toBe(200)
     expect((outcome.result.metadata as { dialog?: { message?: string } }).dialog?.message).toBe("Later")
@@ -922,7 +937,7 @@ describe("browser events", () => {
         state.page = { ...state.page, documentId: "doc-2" }
       },
     })
-    const { manager, events } = createManager(baseDriver(), { browser })
+    const { manager, events } = await createSessionManager(baseDriver(), { browser })
     await manager.execute("local", { action: "browser_back", sessionId: "s" })
     await manager.execute("local", { action: "browser_reload", sessionId: "s" })
     const navigated = events.since(0).filter((event) => event.type === "browser.navigated")
@@ -932,6 +947,125 @@ describe("browser events", () => {
 })
 
 describe("browser tab integrity", () => {
+  test("empty sessions and sessionless agents cannot inspect or adopt the global active tab", async () => {
+    const calls: string[] = []
+    const { browser, state } = browserHarness({
+      currentTab: () => "tab-2",
+      pendingDialog: async () => { calls.push("pendingDialog"); return { type: "prompt", message: "A's private dialog" } },
+      screenshot: async () => { calls.push("screenshot"); return { mimeType: "image/png", data: "private-image" } },
+      upload: async (files) => { calls.push("upload"); return { files: [...files] } },
+      handleDialog: async () => { calls.push("handleDialog"); return { handled: true } },
+    })
+    const { manager } = createManager(baseDriver(), { browser })
+    await manager.execute("local", { action: "browser_open", sessionId: "A" })
+    state.readCalls = 0
+    const originalUrl = state.page.url
+    for (const context of [{ sessionId: "B" }, { origin: "agent" as const }]) {
+      for (const request of [
+        { action: "browser_read" },
+        { action: "browser_screenshot" },
+        { action: "browser_navigate", url: "https://attacker.example" },
+        { action: "browser_click", target: { elementId: "file-input" } },
+        { action: "browser_upload", files: ["/tmp/attachment.txt"] },
+        { action: "browser_dialog", dialog: "accept" },
+      ]) {
+        const denied = await manager.execute("local", { ...request, ...context })
+        expect(denied.httpStatus).toBe(403)
+        expect(errorCode(denied.result.error)).toBe("tab_not_owned")
+        expect(JSON.stringify(denied.result)).not.toContain("private")
+      }
+      const explicit = await manager.execute("local", { action: "browser_read", tab: "tab-2", ...context })
+      expect(explicit.httpStatus).toBe(403)
+      const tabs = await manager.execute("local", { action: "browser_tabs", ...context })
+      expect(tabs.result.metadata).toEqual({ tabs: [] })
+      const status = await manager.execute("local", { action: "browser_status", ...context })
+      expect(status.httpStatus).toBe(200)
+      expect(status.result.metadata).not.toHaveProperty("dialog")
+    }
+    expect(calls).toEqual([])
+    expect(state.readCalls).toBe(0)
+    expect(state.page.url).toBe(originalUrl)
+    const opened = await manager.execute("local", { action: "browser_open", sessionId: "B" })
+    expect(opened.result.success).toBe(true)
+    expect(calls).toEqual([])
+    const tabs = await manager.execute("local", { action: "browser_tabs", sessionId: "B" })
+    expect(tabs.result.metadata).toEqual({ tabs: [{ id: "tab-3", url: "about:blank" }] })
+  })
+
+  test("omitted tabs prefer an owned session current tab and fall back to the last used owned tab", async () => {
+    let current = "tab-2"
+    const queried: Array<string | undefined> = []
+    const { browser, state } = browserHarness({
+      currentTab: (sessionId) => { expect(sessionId).toBe("s"); return current },
+      pendingDialog: async (tabId) => { queried.push(tabId); return null },
+    })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
+    await manager.execute("local", { action: "browser_open", sessionId: "s" })
+    state.readTabs = []
+    await manager.execute("local", { action: "browser_read", sessionId: "s" })
+    current = "tab-1" // Unrelated global active tab must never be adopted.
+    await manager.execute("local", { action: "browser_read", sessionId: "s" })
+    expect(state.readTabs).toEqual(["tab-2", "tab-2"])
+    expect(queried).toEqual(["tab-2", "tab-2", "tab-2", "tab-2"])
+    const denied = await manager.execute("local", { action: "browser_read", tab: "tab-1", sessionId: "s" })
+    expect(denied.httpStatus).toBe(403)
+    expect(queried).toHaveLength(4)
+    await manager.execute("local", { action: "browser_close_tab", tab: "tab-2", sessionId: "s" })
+    const fallback = await manager.execute("local", { action: "browser_read", sessionId: "s" })
+    expect(fallback.result.metadata).toHaveProperty("tab", "tab-3")
+    await manager.execute("local", { action: "browser_close_tab", tab: "tab-3", sessionId: "s" })
+    const empty = await manager.execute("local", { action: "browser_read", sessionId: "s" })
+    expect(empty.httpStatus).toBe(403)
+  })
+
+  test("ownership is scoped to computer registration and browser controller, even with identical tab ids", async () => {
+    const first = browserHarness()
+    const second = browserHarness()
+    const driver = baseDriver({ browser: first.browser })
+    const { manager } = createManager(driver)
+    await manager.execute("local", { action: "browser_open", sessionId: "s" })
+    const unregister = manager.register(baseDriver({ id: "other", browser: second.browser }))
+    for (const tab of [undefined, "tab-2"]) {
+      const denied = await manager.execute("other", { action: "browser_read", tab, sessionId: "s" })
+      expect(denied.httpStatus).toBe(403)
+    }
+    expect(second.state.readCalls).toBe(0)
+    await manager.execute("other", { action: "browser_open", sessionId: "s" })
+    expect((await manager.execute("other", { action: "browser_read", sessionId: "s" })).httpStatus).toBe(200)
+    unregister()
+    manager.register(baseDriver({ id: "other", browser: second.browser }))
+    expect((await manager.execute("other", { action: "browser_read", sessionId: "s" })).httpStatus).toBe(403)
+    Object.assign(driver, { browser: second.browser })
+    expect((await manager.execute("local", { action: "browser_read", sessionId: "s" })).httpStatus).toBe(403)
+    Object.assign(driver, { browser: first.browser })
+    expect((await manager.execute("local", { action: "browser_read", sessionId: "s" })).httpStatus).toBe(200)
+  })
+
+  test("a session named agent does not share ownership with sessionless agent calls", async () => {
+    const { browser } = browserHarness()
+    const { manager } = createManager(baseDriver(), { browser })
+    await manager.execute("local", { action: "browser_open", sessionId: "agent" })
+    const denied = await manager.execute("local", { action: "browser_read", origin: "agent" })
+    expect(denied.httpStatus).toBe(403)
+    await manager.execute("local", { action: "browser_open", origin: "agent" })
+    const owned = await manager.execute("local", { action: "browser_read", origin: "agent" })
+    expect(owned.result.metadata).toHaveProperty("tab", "tab-3")
+  })
+
+  test("desktop omitted-tab page calls preserve the runtime's unrestricted selection", async () => {
+    const captured: Array<string | undefined> = []
+    const { browser, state } = browserHarness({
+      screenshot: async (tabId) => { captured.push(tabId); return { mimeType: "image/png", data: "image" } },
+    })
+    const { manager } = createManager(baseDriver(), { browser })
+    expect((await manager.execute("local", { action: "browser_read", origin: "desktop" })).httpStatus).toBe(200)
+    expect((await manager.execute("local", { action: "browser_screenshot" })).httpStatus).toBe(200)
+    expect((await manager.execute("local", { action: "browser_navigate", url: "https://desktop.example" })).httpStatus).toBe(200)
+    expect(state.readTabs[0]).toBeUndefined()
+    expect(captured).toEqual([undefined])
+    expect(state.page.url).toBe("https://desktop.example")
+  })
+
   test("agent tab listings include only tabs the session owns", async () => {
     const { browser } = browserHarness()
     const { manager } = createManager(baseDriver(), { browser })
@@ -1008,7 +1142,7 @@ describe("browser tab integrity", () => {
 describe("browser image verification", () => {
   test("save_image reports the runtime disk readback as verification evidence", async () => {
     const { browser } = browserHarness()
-    const { manager } = createManager(baseDriver(), { browser })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
     const outcome = await manager.execute("local", { action: "browser_save_image", query: "logo", sessionId: "s" })
     expect(outcome.httpStatus).toBe(200)
     expect(outcome.result.verification?.status).toBe("verified")
@@ -1018,7 +1152,7 @@ describe("browser image verification", () => {
 
   test("an approved out-of-sandbox save passes allowOutside to the runtime", async () => {
     const { browser, state } = browserHarness()
-    const { manager } = createManager(baseDriver(), {
+    const { manager } = await createSessionManager(baseDriver(), {
       browser,
       permissions: { BROWSER: "granted", FILES_WRITE: "granted" },
       policy: "ask_destructive",
@@ -1039,7 +1173,7 @@ describe("browser image verification", () => {
     try {
       const copied: string[] = []
       const { browser, state } = browserHarness()
-      const { manager } = createManager(
+      const { manager } = await createSessionManager(
         baseDriver({
           writeClipboardImage: async (path) => {
             copied.push(path)

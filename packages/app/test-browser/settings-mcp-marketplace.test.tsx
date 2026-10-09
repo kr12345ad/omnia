@@ -121,6 +121,7 @@ mock.module("@/context/language?marketplace-test", () => ({
 let config: Config = {}
 const writes: Config[] = []
 let writeError: string | undefined
+const healthChecks: Array<{ directory: string; name: string }> = []
 mock.module("@/context/server-sync?marketplace-test", () => ({
   useServerSync: () => () => ({
     data: { config },
@@ -128,6 +129,12 @@ mock.module("@/context/server-sync?marketplace-test", () => ({
       if (writeError) throw new Error(writeError)
       writes.push(next)
       config = next
+    },
+    mcp: {
+      health: async (directory: string, name: string) => {
+        healthChecks.push({ directory, name })
+        return { status: { status: "connected" as const }, tools: 2 }
+      },
     },
   }),
 }))
@@ -185,6 +192,7 @@ function row(container: HTMLElement, name: string) {
 beforeEach(() => {
   config = {}
   writes.length = 0
+  healthChecks.length = 0
   shown.length = 0
   closed.mockClear()
   catalog = [FETCH, GITHUB]
@@ -194,7 +202,7 @@ afterEach(() => cleanups.splice(0).forEach((cleanup) => cleanup()))
 
 describe.skipIf(isServer)("settings MCP marketplace", () => {
   test("lists the catalog with categories and installs a server that needs no settings", async () => {
-    const container = await mount(() => createComponent(SettingsMcpMarketplace, {}))
+    const container = await mount(() => createComponent(SettingsMcpMarketplace, { directory: "/workspace" }))
 
     expect(container.textContent).toContain("MCP Marketplace")
     expect(container.textContent).toContain("2 servers")
@@ -208,6 +216,7 @@ describe.skipIf(isServer)("settings MCP marketplace", () => {
     expect(writes[0].mcp).toEqual({
       fetch: { type: "local", command: ["docker", "run", "-i", "--rm", "mcp/fetch"], enabled: true },
     })
+    expect(healthChecks).toEqual([{ directory: "/workspace", name: "fetch" }])
     expect(shown).toHaveLength(0)
     expect(row(container, "Fetch").textContent).toContain("Installed")
   })
@@ -292,6 +301,10 @@ describe.skipIf(isServer)("settings MCP marketplace", () => {
   test("filters by search text and by category", async () => {
     const container = await mount(() => createComponent(SettingsMcpMarketplace, {}))
     expect(rows(container)).toHaveLength(2)
+    const searchCategory = [...container.querySelectorAll<HTMLElement>(".settings-v2-marketplace-chip")].find((item) =>
+      item.textContent?.includes("Search & research"),
+    )
+    expect(searchCategory?.querySelector(".settings-v2-marketplace-chip-count")?.textContent).toBe("1")
 
     const search = container.querySelector<HTMLInputElement>('input[type="search"]')!
     search.value = "github"
@@ -303,10 +316,26 @@ describe.skipIf(isServer)("settings MCP marketplace", () => {
     search.value = ""
     search.dispatchEvent(new Event("input", { bubbles: true }))
     await settle()
-    button(container, "Search & research").click()
+    expect(searchCategory).toBeTruthy()
+    searchCategory!.click()
     await settle()
     expect(rows(container)).toHaveLength(1)
     expect(rows(container)[0].textContent).toContain("Fetch")
+  })
+
+  test("resets every browse filter in one action", async () => {
+    const container = await mount(() => createComponent(SettingsMcpMarketplace, {}))
+    const search = container.querySelector<HTMLInputElement>('input[type="search"]')!
+    search.value = "github"
+    search.dispatchEvent(new Event("input", { bubbles: true }))
+    await settle()
+    expect(rows(container)).toHaveLength(1)
+
+    button(container, "Reset").click()
+    await settle()
+    expect(search.value).toBe("")
+    expect(rows(container)).toHaveLength(2)
+    expect(container.querySelector<HTMLSelectElement>("select")?.value).toBe("all")
   })
 
   test("reaches every page and resets pagination when searching", async () => {

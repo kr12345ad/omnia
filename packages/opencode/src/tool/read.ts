@@ -27,6 +27,7 @@ const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 const MAX_ATTACHMENT_LABEL = `${MAX_ATTACHMENT_BYTES / 1024 / 1024} MB`
 
 class ReadStop extends Schema.TaggedErrorClass<ReadStop>()("ReadStop", {}) {}
+class ReadBinary extends Schema.TaggedErrorClass<ReadBinary>()("ReadBinary", {}) {}
 
 // `offset` and `limit` were originally `z.coerce.number()` — the runtime
 // coercion was useful when the tool was called from a shell but serves no
@@ -152,9 +153,20 @@ export const ReadTool = Tool.define<
       // avoid Stream.runForEachWhile (it currently swallows the final unterminated
       // line of the upstream splitLines pipeline) and use a tagged error to stop the
       // upstream file stream as soon as the byte cap is reached.
-      const decoder = new TextDecoder("utf-8")
+      const decoder = new TextDecoder("utf-8", { fatal: true })
       yield* fs.stream(filepath).pipe(
-        Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
+        // The initial sample catches ordinary binary files cheaply. Reads with a
+        // later line offset can reach bytes beyond that sample, so validate each
+        // streamed chunk before it is decoded or returned to the model.
+        Stream.mapEffect((bytes) =>
+          Effect.try({
+            try: () => {
+              if (isBinaryBytes(bytes)) throw new Error("binary bytes")
+              return decoder.decode(bytes, { stream: true })
+            },
+            catch: () => new ReadBinary(),
+          }),
+        ),
         Stream.splitLines,
         Stream.runForEach((text) =>
           Effect.gen(function* () {
@@ -186,6 +198,14 @@ export const ReadTool = Tool.define<
 
       return { raw, count: flags.count, cut: flags.cut, more: flags.more, offset: opts.offset }
     })
+
+    const isBinaryBytes = (bytes: Uint8Array) => {
+      for (let i = 0; i < bytes.length; i++) {
+        if (bytes[i] === 0) return true
+        if (bytes[i] < 9 || (bytes[i] > 13 && bytes[i] < 32)) return true
+      }
+      return false
+    }
 
     const isBinaryFile = (filepath: string, bytes: Uint8Array) => {
       const ext = path.extname(filepath).toLowerCase()
@@ -229,15 +249,7 @@ export const ReadTool = Tool.define<
         return true
       }
 
-      let nonPrintableCount = 0
-      for (let i = 0; i < bytes.length; i++) {
-        if (bytes[i] === 0) return true
-        if (bytes[i] < 9 || (bytes[i] > 13 && bytes[i] < 32)) {
-          nonPrintableCount++
-        }
-      }
-
-      return nonPrintableCount / bytes.length > 0.3
+      return isBinaryBytes(bytes)
     }
 
     const run = Effect.fn("ReadTool.execute")(function* (
@@ -353,7 +365,9 @@ export const ReadTool = Tool.define<
         return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
       }
 
-      const file = yield* lines(filepath, { limit: params.limit || DEFAULT_READ_LIMIT, offset: params.offset || 1 })
+      const file = yield* lines(filepath, { limit: params.limit || DEFAULT_READ_LIMIT, offset: params.offset || 1 }).pipe(
+        Effect.catchTag("ReadBinary", () => Effect.fail(new Error(`Cannot read binary file: ${filepath}`))),
+      )
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
         return yield* Effect.fail(
           new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),

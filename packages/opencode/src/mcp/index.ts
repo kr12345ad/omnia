@@ -106,6 +106,14 @@ export const Status = Schema.Union([
 ]).annotate({ identifier: "MCPStatus", discriminator: "status" })
 export type Status = Schema.Schema.Type<typeof Status>
 
+// A health probe verifies protocol capability discovery without changing the
+// configured client's lifecycle. Its tool count is evidence of a usable MCP.
+export const Health = Schema.Struct({
+  status: Status,
+  tools: Schema.optional(Schema.Number),
+}).annotate({ identifier: "MCPHealth" })
+export type Health = Schema.Schema.Type<typeof Health>
+
 // Store transports for OAuth servers to allow finishing auth
 type TransportWithAuth = StreamableHTTPClientTransport | SSEClientTransport
 const pendingOAuthTransports = new Map<string, { transport: TransportWithAuth; provider?: McpOAuthPendingProvider }>()
@@ -163,6 +171,7 @@ export interface McpTool {
 
 export interface Interface {
   readonly status: () => Effect.Effect<Record<string, Status>>
+  readonly health: (name: string) => Effect.Effect<Health, NotFoundError>
   readonly clients: () => Effect.Effect<Record<string, MCPClient>>
   readonly instructions: () => Effect.Effect<ServerInstructions[]>
   readonly tools: () => Effect.Effect<Record<string, McpTool>>
@@ -803,6 +812,37 @@ const layer = Layer.effect(
       return mcpConfig
     })
 
+    const health = Effect.fn("MCP.health")(function* (mcpName: string) {
+      const mcpConfig = yield* requireMcpConfig(mcpName)
+      if (mcpConfig.enabled === false) return { status: DISABLED_RESULT.status } satisfies Health
+
+      const live = (yield* InstanceState.get(state)).clients[mcpName]
+      if (live) {
+        // Some MCPs permit one session at a time. Re-listing the live client's
+        // tools is an end-to-end protocol operation without breaking those
+        // servers or replacing the user's current connection.
+        return yield* Effect.gen(function* () {
+          const defs = live.getServerCapabilities()?.tools ? yield* McpCatalog.defs(live, mcpConfig.timeout) : []
+          if (!defs) return { status: { status: "failed" as const, error: "Failed to get tools" } } satisfies Health
+          return { status: { status: "connected" as const }, tools: defs.length } satisfies Health
+        }).pipe(
+          Effect.catchCause((cause) => {
+            const error = Cause.squash(cause)
+            return Effect.succeed({
+              status: { status: "failed" as const, error: error instanceof Error ? error.message : String(error) },
+            } satisfies Health)
+          }),
+        )
+      }
+
+      // No client is live, so establish and clean up a dedicated one rather
+      // than calling connect(), which would mutate runtime state.
+      const result = yield* create(mcpName, mcpConfig)
+      if (!result.mcpClient) return { status: result.status } satisfies Health
+      yield* Effect.tryPromise(() => result.mcpClient!.close()).pipe(Effect.ignore)
+      return { status: result.status, tools: result.defs?.length ?? 0 } satisfies Health
+    })
+
     const startAuth = Effect.fn("MCP.startAuth")(function* (mcpName: string) {
       const mcpConfig = yield* requireMcpConfig(mcpName)
       if (mcpConfig.type !== "remote") throw new Error(`MCP server ${mcpName} is not a remote server`)
@@ -971,6 +1011,7 @@ const layer = Layer.effect(
 
     return Service.of({
       status,
+      health,
       clients,
       instructions,
       tools,

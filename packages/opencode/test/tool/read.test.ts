@@ -620,4 +620,19 @@ describe("tool.read binary detection", () => {
       expect(err.message).toBe(`Cannot read binary file: ${file}`)
     }),
   )
+
+  it.live("rejects binary bytes beyond the sample when a later offset reaches them", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      // A read with a later line offset can skip the sampled prefix. The stream
+      // itself must still reject the raw PNG bytes before they become tool text.
+      const prefix = Buffer.from("valid source line\n".repeat(4_000), "utf8")
+      const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d])
+      const file = path.join(dir, "late-binary-bundle.js")
+      yield* put(file, Buffer.concat([prefix, png, Buffer.from("trailing")]))
+
+      const err = yield* fail(dir, { filePath: file, offset: 4_001 })
+      expect(err.message).toBe(`Cannot read binary file: ${file}`)
+    }),
+  )
 })

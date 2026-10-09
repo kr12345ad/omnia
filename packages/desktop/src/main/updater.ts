@@ -1,6 +1,6 @@
 import { app, dialog } from "electron"
 import pkg from "electron-updater"
-import { UPDATER_ENABLED } from "./constants"
+import { CHANNEL, UPDATER_ENABLED } from "./constants"
 import { createUpdaterController, type UpdaterReadyRecord } from "./updater-controller"
 import { getLogger } from "./logging"
 import { getStore } from "./store"
@@ -15,7 +15,7 @@ export function setupAutoUpdater(stop: () => Promise<void>) {
   if (UPDATER_ENABLED) {
     autoUpdater.logger = logger
     autoUpdater.channel = "latest"
-    autoUpdater.allowPrerelease = false
+    autoUpdater.allowPrerelease = CHANNEL === "beta"
     autoUpdater.allowDowngrade = true
     autoUpdater.autoDownload = false
     autoUpdater.autoInstallOnAppQuit = false

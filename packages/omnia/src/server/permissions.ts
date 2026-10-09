@@ -236,6 +236,20 @@ export class PermissionManager {
 
     const destructive = missing.filter((scope) => DESTRUCTIVE_SCOPES.includes(scope))
     const scopeMissing = destructive.length > 0 ? destructive : missing
+    // Autonomy never extends to executing processes or reading secrets: those
+    // cross from observing the machine to acting with its credentials, and a
+    // single compromised instruction must not be able to spend them silently.
+    const neverAutonomous: readonly OmniaScope[] = ["PROCESS_EXECUTE", "SECRETS"]
+    const reserved = missing.filter((scope) => neverAutonomous.includes(scope))
+    if (reserved.length > 0) {
+      return {
+        allowed: false,
+        status: "permission_required",
+        required,
+        missing: reserved,
+        reason: `Approval required for: ${reserved.join(", ")}`,
+      }
+    }
     if (this.policy === "fully_autonomous") {
       return { allowed: true, status: "granted", required, missing: [] }
     }
