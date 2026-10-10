@@ -27,12 +27,15 @@ export interface RemoteBrowserCommand {
 
 export type RemoteBrowserHandler = (command: RemoteBrowserCommand) => Promise<unknown>
 
+export type RemoteLinkSignalHandler = (params: unknown) => Promise<unknown>
+
 export interface RemoteAgentOptions {
   readonly serverUrl: string
   readonly computerId: string
   readonly token: string
   readonly driver: HostDriver
   readonly browser?: RemoteBrowserHandler
+  readonly onLinkSignal?: RemoteLinkSignalHandler
   readonly fetch?: typeof fetch
   readonly waitMs?: number
   readonly log?: (message: string) => void
@@ -70,6 +73,7 @@ export class RemoteAgent {
   private readonly token: string
   private readonly driver: HostDriver
   private readonly browser: RemoteBrowserHandler | undefined
+  private readonly linkSignal: RemoteLinkSignalHandler | undefined
   private readonly http: typeof fetch
   private readonly waitMs: number
   private readonly log: (message: string) => void
@@ -89,6 +93,7 @@ export class RemoteAgent {
     this.token = options.token
     this.driver = options.driver
     this.browser = options.browser
+    this.linkSignal = options.onLinkSignal
     this.http = options.fetch ?? fetch
     this.waitMs = options.waitMs ?? 25000
     this.log = options.log ?? (() => {})
@@ -308,6 +313,16 @@ export class RemoteAgent {
         case "runCommand": {
           if (this.driver.runCommand === undefined) return unavailable(command.id, "shell commands")
           return { id: command.id, ok: true, result: await this.driver.runCommand(command.params as CommandRequest) }
+        }
+        case "link-signal": {
+          if (this.linkSignal === undefined) {
+            return { id: command.id, ok: false, error: "Link signaling is not available on this computer." }
+          }
+          try {
+            return { id: command.id, ok: true, result: await this.linkSignal(command.params) }
+          } catch (error) {
+            return { id: command.id, ok: false, error: errorMessage(error) }
+          }
         }
         case "readText": {
           if (this.driver.readText === undefined) return unavailable(command.id, "reading text")

@@ -134,6 +134,88 @@ describe("remote agent signing", () => {
   })
 })
 
+describe("remote agent link signaling", () => {
+  test("dispatches link signals to the link handler and reports its answer", async () => {
+    const received: unknown[] = []
+    const results: unknown[] = []
+    let polls = 0
+    const http = fakeFetch(async (input, init) => {
+      const url = String(input)
+      if (url.includes("/results")) {
+        results.push(JSON.parse(String(init?.body ?? "{}")))
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      polls += 1
+      if (polls === 1) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            command: { id: "cmd-link-1", method: "link-signal", params: { linkId: "link-1", kind: "offer" } },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      return new Response(JSON.stringify({ ok: false }), { status: 401 })
+    })
+    const agent = new RemoteAgent({
+      serverUrl: "http://127.0.0.1:9999",
+      computerId: "remote-1",
+      token: "token-1",
+      driver,
+      fetch: http,
+      onLinkSignal: async (params) => {
+        received.push(params)
+        return { kind: "answer", linkId: "link-1" }
+      },
+    })
+    agent.start()
+    while (agent.running) await new Promise((resolve) => setTimeout(resolve, 1))
+    expect(received).toEqual([{ linkId: "link-1", kind: "offer" }])
+    expect(results).toEqual([{ id: "cmd-link-1", ok: true, result: { kind: "answer", linkId: "link-1" } }])
+  })
+
+  test("answers link signals as unavailable without a handler", async () => {
+    const results: unknown[] = []
+    let polls = 0
+    const http = fakeFetch(async (input, init) => {
+      const url = String(input)
+      if (url.includes("/results")) {
+        results.push(JSON.parse(String(init?.body ?? "{}")))
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      polls += 1
+      if (polls === 1) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            command: { id: "cmd-link-2", method: "link-signal", params: { linkId: "link-2", kind: "offer" } },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      return new Response(JSON.stringify({ ok: false }), { status: 401 })
+    })
+    const agent = new RemoteAgent({
+      serverUrl: "http://127.0.0.1:9999",
+      computerId: "remote-1",
+      token: "token-1",
+      driver,
+      fetch: http,
+    })
+    agent.start()
+    while (agent.running) await new Promise((resolve) => setTimeout(resolve, 1))
+    expect(results).toEqual([
+      { id: "cmd-link-2", ok: false, error: "Link signaling is not available on this computer." },
+    ])
+  })
+})
+
 describe("remote agent stop", () => {
   const command = { id: "cmd-1", method: "execute", params: { type: "click", x: 1, y: 2 } }
 

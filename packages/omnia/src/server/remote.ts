@@ -53,6 +53,8 @@ interface PendingCall {
 }
 
 const MAX_QUEUED_COMMANDS = 64
+const MAX_LINK_SIGNAL_BYTES = 16 * 1024
+const LINK_SIGNAL_TIMEOUT_MS = 30_000
 // A computer long-polls once per command; only one poll can be parked at a
 // time in normal operation, so a handful of extras already means a duplicated
 // or malicious client. The cap bounds that parked set (and its timers) instead
@@ -334,6 +336,22 @@ export class RemoteComputerDriver implements ServerComputerDriver {
     return this.call<ActionResult>("writeClipboard", { text })
   }
 
+  // Link signaling for direct device links (session sync, live attach). Unlike
+  // input or shell commands this never executes anything on the computer: the
+  // agent hands the payload to its local link manager and reports the answer.
+  async signal(params: unknown, timeoutMs?: number): Promise<unknown> {
+    let encoded = ""
+    try {
+      encoded = JSON.stringify(params ?? {})
+    } catch {
+      return Promise.reject(new Error("The link signal payload is not serializable."))
+    }
+    if (encoded.length > MAX_LINK_SIGNAL_BYTES) {
+      return Promise.reject(new Error("The link signal payload is too large."))
+    }
+    return this.call<unknown>("link-signal", params, timeoutMs ?? LINK_SIGNAL_TIMEOUT_MS)
+  }
+
   async pointerPosition(): Promise<ActionResult & { x?: number; y?: number; held?: boolean }> {
     return this.call("pointerPosition")
   }
@@ -545,6 +563,12 @@ export class RemoteRegistry {
     const entry = this.entries.get(id)
     if (entry === undefined) return Promise.resolve(undefined)
     return entry.driver.nextCommand(timeoutMs)
+  }
+
+  signal(id: string, params: unknown, timeoutMs?: number): Promise<unknown> {
+    const entry = this.entries.get(id)
+    if (entry === undefined) return Promise.reject(new Error(`Unknown computer ${id}.`))
+    return entry.driver.signal(params, timeoutMs)
   }
 
   complete(id: string, message: RemoteResultMessage): boolean {
