@@ -2,6 +2,15 @@ import { dict as en } from "./en"
 
 export const dict = {
   // TODO(i18n): needs a native review
+...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.sessions."))),
+  // TODO(i18n): needs a native review
+  ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("ui.onboarding."))),
+  "ui.onboarding.sessions.zero": "{{count}} sessions", // TODO(i18n): needs a native review
+  "ui.onboarding.messages.zero": "{{count}} messages", // TODO(i18n): needs a native review
+  "ui.onboarding.importedSessions.zero": "Imported {{count}} sessions", // TODO(i18n): needs a native review
+  "ui.onboarding.importedMessages.zero": "Imported {{count}} messages", // TODO(i18n): needs a native review
+  "ui.onboarding.skippedSessions.zero": "Skipped {{count}} sessions already here", // TODO(i18n): needs a native review
+  // TODO(i18n): needs a native review
   ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.mcpMarketplace."))),
   // TODO(i18n): needs a native review
   ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.runs."))),

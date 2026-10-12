@@ -62,6 +62,7 @@ import LegacyLayout from "@/pages/layout"
 import NewLayout from "@/pages/layout-new"
 import { ErrorPage } from "./pages/error"
 import { FirstRunGate } from "./components/first-run-gate"
+import { OnboardingWizard } from "./components/onboarding-wizard"
 import { useCheckServerHealth } from "./utils/server-health"
 import { legacySessionHref, legacySessionServer, requireServerKey, sessionHref } from "./utils/session-route"
 import { createSessionLineage } from "@/pages/session/session-lineage"
@@ -276,6 +277,28 @@ declare global {
     api?: {
       setTitlebar?: (theme: { mode: "light" | "dark"; scheme?: "system" | "light" | "dark" }) => Promise<void>
       exportDebugLogs?: () => Promise<string>
+      isFirstLaunchOnboardingPending?: () => Promise<boolean>
+      finishFirstLaunchOnboarding?: (createDefaultProject: boolean) => Promise<string | null>
+      importSourcesDetect?: () => Promise<
+        {
+          kind: "opencode" | "codex"
+          path: string
+          bytes: number
+          sessions: number
+          messages: number
+          oldest: number | null
+          newest: number | null
+        }[]
+      >
+      importSessionsRun?: (input: { kind: "opencode" | "codex"; path: string }) => Promise<{
+        source: string
+        kind: "opencode" | "codex"
+        importedSessions: number
+        importedMessages: number
+        importedParts: number
+        skippedSessions: number
+        errors: string[]
+      }>
     }
   }
 }
@@ -583,6 +606,7 @@ export function AppInterface(props: {
 
   return (
     <FirstRunGate>
+      <OnboardingWizard />
       <ServerProvider
         defaultServer={props.defaultServer}
         canonicalLocalServer={props.canonicalLocalServer}

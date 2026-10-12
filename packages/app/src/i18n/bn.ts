@@ -2,6 +2,10 @@ import { dict as en } from "./en"
 
 export const dict: Record<string, string> = {
   // TODO(i18n): needs a native review
+...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.sessions."))),
+  // TODO(i18n): needs a native review
+  ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("ui.onboarding."))),
+  // TODO(i18n): needs a native review
   ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.mcpMarketplace."))),
   "desktop.menu.app": "Omnia",
   "desktop.menu.file": "ফাইল",

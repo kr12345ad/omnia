@@ -101,6 +101,20 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("finish-first-launch-onboarding", (_event: IpcMainInvokeEvent, createDefaultProject: boolean) =>
     deps.finishFirstLaunchOnboarding(createDefaultProject),
   )
+  ipcMain.handle("import-sources-detect", async () => {
+    const { detectImportSources } = await import("./session-import")
+    return detectImportSources(join(app.getPath("userData"), "OMNIA.db"))
+  })
+  ipcMain.handle(
+    "import-sessions-run",
+    async (_event: IpcMainInvokeEvent, input: { kind: "opencode" | "codex"; path: string }) => {
+      const { importCodexFile, importOpencodeDb } = await import("./session-import")
+      const userData = app.getPath("userData")
+      const destination = join(userData, "OMNIA.db")
+      if (input.kind === "codex") return importCodexFile(destination, input.path, userData)
+      return importOpencodeDb(destination, input.path, userData)
+    },
+  )
   ipcMain.handle("is-old-layout-eligible", () => deps.isOldLayoutEligible())
   ipcMain.handle("get-display-backend", () => deps.getDisplayBackend())
   ipcMain.handle("set-display-backend", (_event: IpcMainInvokeEvent, backend: string | null) =>

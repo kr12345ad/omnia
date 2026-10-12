@@ -15,6 +15,7 @@ import { usePlatform, type DisplayBackend } from "@/context/platform"
 import { useServerSync } from "@/context/server-sync"
 import { useServerSDK } from "@/context/server-sdk"
 import { useUpdaterAction } from "./updater-action"
+import { SettingsSessions } from "./settings-sessions"
 import {
   monoDefault,
   monoFontFamily,
@@ -451,6 +452,9 @@ export const SettingsGeneral: Component = () => {
           </div>
         </SettingsRow>
       </SettingsList>
+      <div class="pt-4">
+        <SettingsSessions />
+      </div>
     </div>
   )
 

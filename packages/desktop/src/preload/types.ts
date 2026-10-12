@@ -157,6 +157,26 @@ export type ElectronAPI = {
   setDefaultServerUrl: (url: string | null) => Promise<void>
   isFirstLaunchOnboardingPending: () => Promise<boolean>
   finishFirstLaunchOnboarding: (createDefaultProject: boolean) => Promise<string | null>
+  importSourcesDetect: () => Promise<
+    {
+      kind: "opencode" | "codex"
+      path: string
+      bytes: number
+      sessions: number
+      messages: number
+      oldest: number | null
+      newest: number | null
+    }[]
+  >
+  importSessionsRun: (input: { kind: "opencode" | "codex"; path: string }) => Promise<{
+    source: string
+    kind: "opencode" | "codex"
+    importedSessions: number
+    importedMessages: number
+    importedParts: number
+    skippedSessions: number
+    errors: string[]
+  }>
   isOldLayoutEligible: () => Promise<boolean>
   getDisplayBackend: () => Promise<LinuxDisplayBackend | null>
   setDisplayBackend: (backend: LinuxDisplayBackend | null) => Promise<void>
