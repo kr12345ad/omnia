@@ -1264,7 +1264,8 @@ const layer = Layer.effect(
             ])
             const system = [
               ...env,
-              ...(sessionModeFromMetadata(session.metadata) === "code" ? sys.codeMode() : []),
+              ...sys.renderUI(),
+              ...(sessionModeFromMetadata(session.metadata) === "chat" ? sys.chatMode() : []),
               ...instructions,
               ...(mcpInstructions ? [mcpInstructions] : []),
               ...(skills ? [skills] : []),

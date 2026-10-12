@@ -238,7 +238,7 @@ describe("discussion room tool", () => {
 
   it.instance("refuses to run in Code mode", () =>
     Effect.gen(function* () {
-      const { chat, assistant } = yield* seed({ mode: "code" })
+      const { chat, assistant } = yield* seed({ mode: "chat" })
       const tool = yield* DiscussionRoomTool
       const def = yield* tool.init()
       const exit = yield* def

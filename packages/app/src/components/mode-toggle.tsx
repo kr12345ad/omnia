@@ -8,7 +8,7 @@ import type { SessionMode } from "@/utils/session-mode"
 
 const MODES = [
   { id: "work", icon: "window-cursor", labelKey: "mode.work" },
-  { id: "code", icon: "code-lines", labelKey: "mode.code" },
+  { id: "chat", icon: "speech-bubble", labelKey: "mode.chat" },
 ] as const
 
 const PILL_DURATION = 320
@@ -142,7 +142,7 @@ export function ModeToggle(props: { mode?: SessionMode; fixed?: boolean; onSelec
   createEffect(() => {
     const count = Object.keys(buttons()).length
     language.t("mode.work")
-    language.t("mode.code")
+    language.t("mode.chat")
     if (count > 0) {
       if (observer !== undefined) {
         for (const button of Object.values(buttons())) observer.observe(button)

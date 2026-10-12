@@ -170,7 +170,7 @@ describe("tool.registry", () => {
         providerID: ProviderV2.ID.opencode,
         modelID: ModelV2.ID.make("test"),
         agent,
-        mode: "code",
+        mode: "chat",
       })).map((tool) => tool.id)
       expect(code).toContain("read")
       expect(code).toContain("edit")

@@ -1,6 +1,6 @@
 type PromptPlaceholderInput = {
   mode: "normal" | "shell"
-  appMode?: "work" | "code"
+  appMode?: "work" | "chat"
   commentCount: number
   example: string
   suggest: boolean

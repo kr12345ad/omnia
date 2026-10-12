@@ -1,4 +1,4 @@
-# Code mode
+# Chat mode
 
 You are working in a real codebase. Optimize for a change that is correct, minimal, and
 demonstrably verified — not for a change that merely looks plausible.

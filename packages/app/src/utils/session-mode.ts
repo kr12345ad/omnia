@@ -1,4 +1,4 @@
-export type SessionMode = "work" | "code"
+export type SessionMode = "work" | "chat"
 
 export const DEFAULT_SESSION_MODE: SessionMode = "work"
 
@@ -7,9 +7,19 @@ export const DEFAULT_SESSION_MODE: SessionMode = "work"
 // agent tool surface.
 export const SESSION_MODE_METADATA_KEY = "mode"
 
+// Chat replaced an earlier "code" mode. Sessions, drafts and the persisted mode
+// map written by older builds still carry that id, so it reads back as chat
+// rather than falling through to the default mode.
+const LEGACY_SESSION_MODE = "code"
+
+export function knownSessionMode(value: unknown): SessionMode | undefined {
+  if (value === "work" || value === "chat") return value
+  if (value === LEGACY_SESSION_MODE) return "chat"
+  return undefined
+}
+
 export function sessionModeFromMetadata(metadata: Record<string, unknown> | undefined | null): SessionMode | undefined {
-  const value = metadata?.[SESSION_MODE_METADATA_KEY]
-  return value === "work" || value === "code" ? value : undefined
+  return knownSessionMode(metadata?.[SESSION_MODE_METADATA_KEY])
 }
 
 export function sessionModeMetadata(mode: SessionMode): Record<string, SessionMode> {

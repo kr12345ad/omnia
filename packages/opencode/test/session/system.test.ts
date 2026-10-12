@@ -9,6 +9,8 @@ import type { Provider } from "../../src/provider/provider"
 import { SystemPrompt } from "../../src/session/system"
 import { MCP } from "../../src/mcp"
 import { testEffect } from "../lib/effect"
+import { OPENUI_EXTENSION_PROMPT, OPENUI_EXTENSION_SIGNATURES } from "@opencode-ai/core/openui/extensions"
+import { OPENUI_SYSTEM_PROMPT } from "@opencode-ai/core/openui/prompt"
 
 const skills: Skill.Info[] = [
   {
@@ -102,9 +104,9 @@ describe("session.system", () => {
     }
   })
 
-  test("code mode contributes an operational playbook for code sessions", () => {
-    const playbook = SystemPrompt.codeMode().join("\n")
-    expect(playbook).toContain("# Code mode")
+  test("chat mode contributes an operational playbook for chat sessions", () => {
+    const playbook = SystemPrompt.chatMode().join("\n")
+    expect(playbook).toContain("# Chat mode")
     // The disciplines that decide whether a coding agent's change actually
     // works: read before editing, verify before claiming, and report honestly.
     expect(playbook).toContain("Read a file end to end before editing it")
@@ -116,7 +118,7 @@ describe("session.system", () => {
     expect(playbook).toContain("findReferences")
   })
 
-  test("the code-mode playbook is a system-prompt section, not a base prompt", () => {
+  test("the chat-mode playbook is a system-prompt section, not a base prompt", () => {
     // It must not leak into a base provider prompt: that would change every
     // session, including non-code ones.
     for (const id of ["anthropic/claude-sonnet-4-5", "openai/gpt-5"]) {
@@ -129,6 +131,29 @@ describe("session.system", () => {
       const prompt = SystemPrompt.provider({ providerID, api: { id: "k3" } } as Provider.Model)[0]
       expect(prompt).toContain("# Prompt and Tool Use")
     }
+  })
+
+  test("the generated-UI prompt lets a model draw its own graphics, not only use the library's", () => {
+    const prompt = SystemPrompt.renderUI().join("\n")
+
+    // Both halves ship together. Losing the second is silent: the model simply
+    // never learns it may draw, and every answer falls back to the built-in
+    // charts even when the visual is the answer.
+    expect(prompt).toContain(OPENUI_SYSTEM_PROMPT)
+    expect(prompt).toContain(OPENUI_EXTENSION_PROMPT)
+
+    // The fence is the contract with the client: it splits the answer on it and
+    // draws the program instead of printing it.
+    expect(prompt).toContain("```openui-lang")
+
+    // A model can only choose the hand-drawn path if the section names the
+    // components, says what the frame is allowed to do, and keeps the built-in
+    // charts the default when they fit.
+    expect(OPENUI_EXTENSION_PROMPT).toContain("### Generated graphics")
+    expect(OPENUI_EXTENSION_PROMPT).toContain(OPENUI_EXTENSION_SIGNATURES.Html)
+    expect(OPENUI_EXTENSION_PROMPT).toContain(OPENUI_EXTENSION_SIGNATURES.Svg)
+    expect(OPENUI_EXTENSION_PROMPT).toContain("sandboxed frame with scripts enabled")
+    expect(OPENUI_EXTENSION_PROMPT).toContain("Prefer the built-in charts above when they fit.")
   })
 
   it.effect("skills output is sorted by name and stable across calls", () =>

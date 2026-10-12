@@ -125,7 +125,7 @@ export const DiscussionRoomTool = Tool.define(
 
       const parent = yield* sessions.get(ctx.sessionID)
       const mode = sessionModeMetadata(parent.metadata)
-      if (mode?.mode === "code") {
+      if (mode?.mode === "chat") {
         return yield* Effect.fail(new Error("The discussion room is only available in Agent mode."))
       }
 

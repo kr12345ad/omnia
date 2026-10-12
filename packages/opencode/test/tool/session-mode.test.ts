@@ -35,14 +35,22 @@ const codingEditToolIds = [EditTool.id, WriteTool.id, ApplyPatchTool.id]
 describe("tool.session-mode", () => {
   test("reads only valid modes from session metadata", () => {
     expect(sessionModeFromMetadata({ [SESSION_MODE_METADATA_KEY]: "work" })).toBe("work")
-    expect(sessionModeFromMetadata({ [SESSION_MODE_METADATA_KEY]: "code" })).toBe("code")
+    expect(sessionModeFromMetadata({ [SESSION_MODE_METADATA_KEY]: "chat" })).toBe("chat")
     expect(sessionModeFromMetadata({ [SESSION_MODE_METADATA_KEY]: "other" })).toBeUndefined()
     expect(sessionModeFromMetadata({})).toBeUndefined()
     expect(sessionModeFromMetadata(undefined)).toBeUndefined()
   })
 
+  test("reads the retired code mode as chat so old sessions keep their tool surface", () => {
+    expect(sessionModeFromMetadata({ [SESSION_MODE_METADATA_KEY]: "code" })).toBe("chat")
+    expect(sessionModeMetadata({ [SESSION_MODE_METADATA_KEY]: "code" })).toEqual({ mode: "chat" })
+    for (const id of computerToolIds) {
+      expect(toolEnabledInMode(sessionModeFromMetadata({ mode: "code" }), id)).toBe(false)
+    }
+  })
+
   test("stamps mode metadata only for known modes", () => {
-    expect(sessionModeMetadata({ [SESSION_MODE_METADATA_KEY]: "code" })).toEqual({ mode: "code" })
+    expect(sessionModeMetadata({ [SESSION_MODE_METADATA_KEY]: "chat" })).toEqual({ mode: "chat" })
     expect(sessionModeMetadata({ unrelated: true })).toBeUndefined()
     expect(sessionModeMetadata(undefined)).toBeUndefined()
   })
@@ -53,13 +61,13 @@ describe("tool.session-mode", () => {
     }
   })
 
-  test("excludes computer tools from Code sessions", () => {
+  test("excludes computer tools from Chat sessions", () => {
     expect([...COMPUTER_TOOL_IDS].sort()).toEqual([...computerToolIds].sort())
     for (const id of computerToolIds) {
-      expect(toolEnabledInMode("code", id)).toBe(false)
+      expect(toolEnabledInMode("chat", id)).toBe(false)
     }
     for (const id of [...codingEditToolIds, "read", "glob", "grep", "shell", "task", "todowrite", "skill"]) {
-      expect(toolEnabledInMode("code", id)).toBe(true)
+      expect(toolEnabledInMode("chat", id)).toBe(true)
     }
   })
 
@@ -72,10 +80,10 @@ describe("tool.session-mode", () => {
     }
   })
 
-  test("keeps Agent-only tools out of Code sessions", () => {
+  test("keeps Agent-only tools out of Chat sessions", () => {
     expect([...AGENT_ONLY_TOOL_IDS]).toEqual(["discussion_room"])
     expect(toolEnabledInMode("work", "discussion_room")).toBe(true)
     expect(toolEnabledInMode(undefined, "discussion_room")).toBe(true)
-    expect(toolEnabledInMode("code", "discussion_room")).toBe(false)
+    expect(toolEnabledInMode("chat", "discussion_room")).toBe(false)
   })
 })
