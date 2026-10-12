@@ -100,6 +100,9 @@ const api: ElectronAPI = {
     calibrationMeasure: (pointId: string) => ipcRenderer.invoke("computer-use-calibration-measure", pointId),
     calibrationSave: (measurements: unknown) => ipcRenderer.invoke("computer-use-calibration-save", measurements),
     calibrationReset: () => ipcRenderer.invoke("computer-use-calibration-reset"),
+    resolveTarget: (input) => ipcRenderer.invoke("computer-use-resolve-target", input),
+    preview: (request) => ipcRenderer.invoke("computer-use-preview", request),
+    clearPreview: () => ipcRenderer.invoke("computer-use-preview-clear"),
   },
   browserPanel: {
     register: (input) => ipcRenderer.invoke("browser-panel-register", input),

@@ -1,9 +1,13 @@
 import { Effect, Schema } from "effect"
 import { HttpClient } from "effect/unstable/http"
+import { computeAim } from "@opencode-ai/omnia/computer-use/aim"
+import { MATCH_THRESHOLD, scoreMatch } from "@opencode-ai/omnia/computer-use/match-score"
 import * as Tool from "../tool"
 import DESCRIPTION from "./act.txt"
 import { ActionEnvelope, configFromEnv, computerId, request } from "./client"
+import type { OmniaServerConfig } from "./client"
 import { UI_ACTIONS } from "./actions"
+import { observationRefusal, recordObservation } from "./switch"
 import {
   TILE_POSITIONS,
   actPermissionPattern,
@@ -14,6 +18,7 @@ import {
   validateAction,
 } from "./policy"
 import { CAPS, clip, renderFailure } from "./output"
+import type { SessionID } from "@/session/schema"
 
 export const ACTIONS = UI_ACTIONS
 
@@ -29,11 +34,11 @@ export const Parameters = Schema.Struct({
   }),
   target: Schema.optional(Schema.String).annotate({
     description:
-      "Stable element ID from computer_find or computer_observe, for example atspi:3.5. One of target or query is required for click, double_click, right_click, middle_click, hover, type, focus, move, and scroll-on-element; pointer actions also accept x/y coordinates.",
+      "Stable element ID from computer_find, computer_observe, or computer_snapshot, for example cua:window/kitty/OC | Quick hello/3/button/Minimize/1 or atspi:3.5. It is resolved against a live observation and refused when it is no longer there, so always pair it with observationId. One of target or query is required for click, double_click, right_click, middle_click, hover, type, focus, move, scroll, and set_value.",
   }),
   query: Schema.optional(Schema.String).annotate({
     description:
-      "Control to act on by meaning, for example 'Export button'. The runtime resolves it server-side and rejects ambiguous matches instead of guessing.",
+      "Control to act on by meaning, for example 'Export button'. Resolved locally against the current observation with the shared 0.6 match floor: below it nothing is clicked.",
   }),
   role: Schema.optional(Schema.String).annotate({ description: "Optional role filter for query, for example button." }),
   window: Schema.optional(Schema.String).annotate({
@@ -41,7 +46,8 @@ export const Parameters = Schema.Struct({
       "Window title fragment. For focus_window it selects the window; for type, key, hotkey, and paste it focuses that window first.",
   }),
   observationId: Schema.optional(Schema.String).annotate({
-    description: "Observation the target came from, for staleness checking. Defaults to re-observing.",
+    description:
+      "Observation the target came from, from computer_snapshot or computer_observe. Pass it with every target: a ref that is not in that observation is refused as stale instead of being rebound to whatever matches now. Defaults to the newest observation for the computer.",
   }),
   text: Schema.optional(Schema.String).annotate({ description: "Text for the type and set_value actions." }),
   start: Schema.optional(Schema.String).annotate({
@@ -80,9 +86,20 @@ export const Parameters = Schema.Struct({
     description: "2D array for paste_table; fills the target range in one paste.",
   }),
   x: Schema.optional(Schema.Int).annotate({
-    description: "Screen x coordinate for pointer actions when no element target is available.",
+    description:
+      "Screen x coordinate for pointer actions. Only honoured on a declared canvas surface (surface) or with allowCoordinates when no accessible control resolves there; a pixel that lands on a control is refused.",
   }),
-  y: Schema.optional(Schema.Int).annotate({ description: "Screen y coordinate for pointer actions." }),
+  y: Schema.optional(Schema.Int).annotate({
+    description: "Screen y coordinate for pointer actions. See x for when raw pixels are accepted at all.",
+  }),
+  surface: Schema.optional(Schema.Union([Schema.Literals(["canvas"]), Schema.Boolean])).annotate({
+    description:
+      'Declares that the surface being addressed has no accessible controls: true or "canvas". This is the only unconditional permission to use x/y, because a canvas cannot be addressed by ref.',
+  }),
+  allowCoordinates: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Allow x/y pixels for this pointer action when no accessible control resolves under the point. The runtime refuses the pixels when a control is there, so the point is never a blind guess inside a real button.",
+  }),
   from: Schema.optional(Endpoint).annotate({ description: "Start of a drag action." }),
   to: Schema.optional(Endpoint).annotate({ description: "End of a drag action, for example an image resize handle." }),
   position: Schema.optional(Schema.Literals(TILE_POSITIONS)).annotate({
@@ -108,6 +125,402 @@ export const Parameters = Schema.Struct({
       'Which part of the stored credential to type: "secret" (default) or "username". Only used when credential is set.',
   }),
 })
+
+// ---------------------------------------------------------------------------
+// Targeting
+//
+// docs/computer-use-reliability.md: an action that lands on a control resolves
+// before the runtime is asked to perform it. The tool reads the current
+// observation and refuses anything it cannot resolve honestly — a ref from an
+// older generation, a semantic query under the shared match floor, or raw
+// pixels over a real control. A refusal never falls back to another targeting
+// mode, and it never prompts for approval of an action that will not run.
+// ---------------------------------------------------------------------------
+
+/** Actions that address one control and therefore must resolve a target. */
+const ELEMENT_ACTIONS: ReadonlySet<string> = new Set([
+  "click",
+  "double_click",
+  "right_click",
+  "middle_click",
+  "hover",
+  "move",
+  "mouse_down",
+  "mouse_up",
+  "type",
+  "focus",
+  "set_value",
+  "select",
+  "toggle",
+  "expand",
+  "collapse",
+  "increment",
+  "decrement",
+  "scroll_into_view",
+  "scroll",
+  "menu",
+  "drag",
+])
+
+// A ref is either the cua: form ("cua:window/kitty/OC | Quick hello/3/button/Minimize/1")
+// or a provider id such as "atspi:3.5". A description never carries a colon
+// before its first space, so the shape separates a ref from a name.
+const REF_PATTERN = /^[a-z][a-z0-9+.-]{0,15}:\S/
+
+function isElementRef(target: string): boolean {
+  return REF_PATTERN.test(target)
+}
+
+function isCanvasSurface(surface: boolean | "canvas" | undefined): boolean {
+  return surface === true || surface === "canvas"
+}
+
+const ElementShape = Schema.Struct({
+  id: Schema.optional(Schema.String),
+  ref: Schema.optional(Schema.String),
+  reference: Schema.optional(
+    Schema.Struct({ elementId: Schema.optional(Schema.String), id: Schema.optional(Schema.String) }),
+  ),
+  role: Schema.optional(Schema.String),
+  name: Schema.optional(Schema.String),
+  text: Schema.optional(Schema.String),
+  states: Schema.optional(Schema.Array(Schema.String)),
+  actions: Schema.optional(Schema.Array(Schema.String)),
+  bounds: Schema.optional(
+    Schema.Struct({ x: Schema.Number, y: Schema.Number, width: Schema.Number, height: Schema.Number }),
+  ),
+  aim: Schema.optional(Schema.Struct({ x: Schema.Number, y: Schema.Number, strategy: Schema.optional(Schema.String) })),
+  focusPoint: Schema.optional(Schema.Unknown),
+  aimHint: Schema.optional(Schema.Unknown),
+  metadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+})
+
+const ObservationShape = Schema.Struct({
+  ok: Schema.Boolean,
+  observation: Schema.Struct({
+    id: Schema.String,
+    elements: Schema.optional(Schema.Array(ElementShape)),
+  }),
+})
+
+type Element = Schema.Schema.Type<typeof ElementShape>
+type ObservationBody = Schema.Schema.Type<typeof ObservationShape>
+type Observation = { id: string; elements: readonly Element[] }
+
+type Aim = { x: number; y: number; strategy: string }
+
+interface TargetingInput {
+  action: string
+  target?: string
+  query?: string
+  role?: string
+  window?: string
+  observationId?: string
+  surface?: boolean | "canvas"
+  allowCoordinates?: boolean
+  x?: number
+  y?: number
+  from?: { elementId?: string; x?: number; y?: number }
+  to?: { elementId?: string; x?: number; y?: number }
+}
+
+type Targeting =
+  | { kind: "skipped" }
+  | { kind: "resolved"; element: Element; aim?: Aim; confidence: number }
+  | { kind: "coordinates"; aim: Aim }
+  | { kind: "refused"; code: string; message: string }
+
+function refOf(element: Element): string | undefined {
+  return element.id ?? element.ref ?? element.reference?.elementId ?? element.reference?.id
+}
+
+function pointOf(value: unknown): { x: number; y: number } | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  const x = (value as { x?: unknown }).x
+  const y = (value as { y?: unknown }).y
+  if (typeof x !== "number" || !Number.isFinite(x) || typeof y !== "number" || !Number.isFinite(y)) return undefined
+  return { x, y }
+}
+
+/**
+ * The point this action is aimed at. Element metadata decides it — a provider
+ * hint, a focus point, a role-specific point, or the control centre — and only
+ * a role that says nothing about where it is actionable falls back to the
+ * centre of the bounds, which is reported as a guess.
+ */
+function aimOf(element: Element): Aim | undefined {
+  const explicit = element.aim
+  if (explicit !== undefined) return { x: explicit.x, y: explicit.y, strategy: explicit.strategy ?? "provider-hint" }
+  const bounds = element.bounds
+  if (bounds === undefined) return undefined
+  const computed = computeAim({
+    bounds,
+    role: element.role,
+    focusPoint: pointOf(element.focusPoint ?? element.metadata?.focusPoint),
+    aimHint: pointOf(element.aimHint ?? element.metadata?.aimHint),
+  })
+  return { x: computed.x, y: computed.y, strategy: computed.strategy }
+}
+
+function describeElement(element: Element): string {
+  const label = element.name ?? element.text ?? refOf(element) ?? "unnamed control"
+  const ref = refOf(element)
+  return `${element.role ?? "control"} "${label}"${ref === undefined ? "" : ` ref=${ref}`}`
+}
+
+function containsPoint(bounds: Element["bounds"], x: number, y: number): boolean {
+  if (bounds === undefined) return false
+  return x >= bounds.x && x <= bounds.x + bounds.width && y >= bounds.y && y <= bounds.y + bounds.height
+}
+
+function areaOf(bounds: Element["bounds"]): number {
+  return bounds === undefined ? Number.MAX_SAFE_INTEGER : bounds.width * bounds.height
+}
+
+/**
+ * The smallest control that contains the point. Windows and applications are
+ * skipped: they contain every point on the screen, so they would make every
+ * pixel look like it addresses a control.
+ */
+function elementAtPoint(elements: readonly Element[], x: number, y: number): Element | undefined {
+  const roles = new Set(["window", "application"])
+  return elements
+    .filter((element) => !roles.has((element.role ?? "").toLowerCase()) && containsPoint(element.bounds, x, y))
+    .sort((left, right) => areaOf(left.bounds) - areaOf(right.bounds))[0]
+}
+
+function searchedIn(observation: Observation | undefined, observationId: string | undefined): string {
+  const id = observationId ?? observation?.id
+  return id === undefined ? "the current observation" : `observation ${id}`
+}
+
+function snapshotAdvice(observationId: string | undefined): string {
+  const id = observationId === undefined ? "" : ` ${observationId}`
+  return (
+    `Take a fresh snapshot with computer_snapshot (or computer_find), then act on the ref and observationId it returns.` +
+    (id.length === 0 ? "" : ` The failed target claimed observation${id}.`)
+  )
+}
+
+/** The observation the runtime resolves against: newest first, then unscoped. */
+function observeForAct(
+  http: HttpClient.HttpClient,
+  config: OmniaServerConfig,
+  computer: string,
+  sessionID: SessionID,
+  window: string | undefined,
+): Effect.Effect<Observation | undefined> {
+  return Effect.gen(function* () {
+    const scoped = yield* readObservation(http, config, computer, sessionID, window)
+    if (scoped !== undefined || window === undefined) return scoped
+    // A window fragment that no longer matches must not cost the action its
+    // target: re-read the whole desktop rather than acting blind.
+    return yield* readObservation(http, config, computer, sessionID, undefined)
+  })
+}
+
+function readObservation(
+  http: HttpClient.HttpClient,
+  config: OmniaServerConfig,
+  computer: string,
+  sessionID: SessionID,
+  window: string | undefined,
+): Effect.Effect<Observation | undefined> {
+  return request<ObservationBody>(
+    http,
+    config,
+    "POST",
+    `/v1/computers/${computer}/observe`,
+    {
+      approve: true,
+      approvedBy: `session:${sessionID}`,
+      approvedScopes: ["UI_READ"],
+      sessionId: sessionID,
+      ...(window === undefined ? {} : { window }),
+    },
+    { validate: Schema.is(ObservationShape) },
+  ).pipe(
+    Effect.map((body) => ({ id: body.observation.id, elements: body.observation.elements ?? [] })),
+    // An unreadable interface is never a reason to act: the caller refuses.
+    Effect.catchCause(() => Effect.succeed(undefined)),
+  )
+}
+
+function needsObservation(input: TargetingInput): boolean {
+  if (!ELEMENT_ACTIONS.has(input.action)) return false
+  if (input.target !== undefined || input.query !== undefined) return true
+  return coordinatePoints(input).length > 0 && !isCanvasSurface(input.surface)
+}
+
+/** The pixels this action would land on, whether top-level or a drag endpoint. */
+function coordinatePoints(input: TargetingInput): { x: number; y: number; label: string }[] {
+  if (input.x !== undefined && input.y !== undefined) return [{ x: input.x, y: input.y, label: "the requested pixel" }]
+  if (input.action !== "drag") return []
+  return [input.from, input.to].flatMap((endpoint, index) =>
+    endpoint !== undefined &&
+    endpoint.elementId === undefined &&
+    typeof endpoint.x === "number" &&
+    typeof endpoint.y === "number"
+      ? [{ x: endpoint.x, y: endpoint.y, label: index === 0 ? "the drag start" : "the drag end" }]
+      : [],
+  )
+}
+
+function resolveElementTarget(input: TargetingInput, observation: Observation | undefined): Targeting {
+  const target = input.target?.trim() ?? ""
+  const label = isElementRef(target) ? `ref "${target}"` : `element id "${target}"`
+  if (observation === undefined) {
+    return {
+      kind: "refused",
+      code: "observation_unavailable",
+      message:
+        `The current interface could not be read, so the ${label} cannot be resolved and nothing was acted on. ` +
+        snapshotAdvice(input.observationId),
+    }
+  }
+  const element = observation.elements.find((entry) => refOf(entry) === target)
+  if (element === undefined) {
+    return {
+      kind: "refused",
+      code: "target_stale",
+      message: isElementRef(target)
+        ? `The ref "${target}" is not in ${searchedIn(observation, input.observationId)} (` +
+          `${observation.elements.length} elements were read), so it belongs to an older state of the interface and is never ` +
+          `rebound to whatever matches now. ${snapshotAdvice(input.observationId)}`
+        : `No element with the id "${target}" is in ${searchedIn(observation, input.observationId)} (` +
+          `${observation.elements.length} elements were read), so there is nothing to act on and no guess was made. ` +
+          snapshotAdvice(input.observationId),
+    }
+  }
+  return { kind: "resolved", element, aim: aimOf(element), confidence: 1 }
+}
+
+function resolveQueryTarget(input: TargetingInput, observation: Observation | undefined): Targeting {
+  const query = input.query?.trim() ?? ""
+  if (observation === undefined) {
+    return {
+      kind: "refused",
+      code: "observation_unavailable",
+      message:
+        `The current interface could not be read, so the query "${query}" cannot be resolved and nothing was acted on. ` +
+        snapshotAdvice(input.observationId),
+    }
+  }
+  const role = input.role?.trim().toLowerCase()
+  const window = input.window?.trim()
+  const candidates =
+    role === undefined || role.length === 0
+      ? observation.elements
+      : observation.elements.filter((element) => (element.role ?? "").toLowerCase().includes(role))
+  const searched =
+    `searched "${query}"` +
+    (role === undefined || role.length === 0 ? "" : ` with role "${role}"`) +
+    (window === undefined || window.length === 0 ? "" : ` in window "${window}"`) +
+    ` against ${candidates.length} elements in ${searchedIn(observation, input.observationId)}`
+  const scored = candidates.map((element) => ({
+    element,
+    score: scoreMatch(query, { name: element.name, role: element.role, text: element.text }),
+  }))
+  const closest = scored.reduce<{ element: Element; score: number } | undefined>(
+    (highest, entry) => (highest === undefined || entry.score > highest.score ? entry : highest),
+    undefined,
+  )
+  const floor = scored.filter((entry) => entry.score >= MATCH_THRESHOLD)
+  if (floor.length === 0) {
+    return {
+      kind: "refused",
+      code: "target_not_found",
+      message:
+        `No control matched the query: ${searched}; the closest candidate was ` +
+        `${closest === undefined ? "nothing" : `${describeElement(closest.element)} at ${closest.score.toFixed(2)}`}, ` +
+        `below the ${MATCH_THRESHOLD} floor. Refusing to ${input.action} instead of guessing. Take a fresh snapshot ` +
+        `with computer_snapshot (or computer_find) and act on a ref, or name the control more precisely.`,
+    }
+  }
+  const top = floor.reduce((highest, entry) => Math.max(highest, entry.score), 0)
+  const winners = floor.filter((entry) => entry.score === top)
+  const distinct = new Set(
+    winners.flatMap((entry) => (refOf(entry.element) === undefined ? [] : [refOf(entry.element)])),
+  )
+  if (distinct.size > 1) {
+    return {
+      kind: "refused",
+      code: "ambiguous_target",
+      message:
+        `The query is ambiguous: ${distinct.size} controls tie at ${top.toFixed(2)} in ${searchedIn(observation, input.observationId)} ` +
+        `(${winners.map((entry) => describeElement(entry.element)).join(", ")}). Refusing to ${input.action} instead of picking one. ` +
+        `Narrow with role or window, or act on a ref from a fresh snapshot.`,
+    }
+  }
+  return { kind: "resolved", element: winners[0].element, aim: aimOf(winners[0].element), confidence: top }
+}
+
+function resolveCoordinate(
+  input: TargetingInput,
+  observation: Observation | undefined,
+  point: { x: number; y: number; label: string },
+): Targeting {
+  if (isCanvasSurface(input.surface)) {
+    return { kind: "coordinates", aim: { x: point.x, y: point.y, strategy: "explicit-coordinate" } }
+  }
+  if (input.allowCoordinates !== true) {
+    return {
+      kind: "refused",
+      code: "coordinates_required",
+      message:
+        `Refusing to act on ${point.label} (${point.x},${point.y}): raw pixels are only accepted on a declared canvas surface ` +
+        `(surface: "canvas") or with allowCoordinates: true when no accessible control resolves there. Resolve the control ` +
+        `instead with computer_find, computer_snapshot, or a query, and use the aim point it reports.`,
+    }
+  }
+  if (observation === undefined) {
+    return {
+      kind: "refused",
+      code: "observation_unavailable",
+      message:
+        `The current interface could not be read, so nothing can prove that ${point.label} (${point.x},${point.y}) is empty ` +
+        `canvas. ${snapshotAdvice(input.observationId)}`,
+    }
+  }
+  const element = elementAtPoint(observation.elements, point.x, point.y)
+  if (element !== undefined) {
+    return {
+      kind: "refused",
+      code: "coordinate_on_control",
+      message:
+        `Refusing to act on ${point.label} (${point.x},${point.y}): ${describeElement(element)} sits there, so the pixel would ` +
+        `be a guess inside a real control. Act on that control with its ref or a query, or declare surface: "canvas" only if ` +
+        `the surface truly exposes no controls.`,
+    }
+  }
+  return { kind: "coordinates", aim: { x: point.x, y: point.y, strategy: "explicit-coordinate" } }
+}
+
+function resolveTargeting(input: TargetingInput, observation: Observation | undefined): Targeting {
+  if (!ELEMENT_ACTIONS.has(input.action)) return { kind: "skipped" }
+  // A ref or a query always decides the target; pixels are only consulted when
+  // neither is present, so they can never override a resolvable control.
+  if (input.target !== undefined && input.target.trim().length > 0) return resolveElementTarget(input, observation)
+  if (input.query !== undefined && input.query.trim().length > 0) return resolveQueryTarget(input, observation)
+  const points = coordinatePoints(input)
+  if (points.length === 0) return { kind: "skipped" }
+  const aims = points.map((point) => resolveCoordinate(input, observation, point))
+  const refusal = aims.find((aiming) => aiming.kind === "refused")
+  if (refusal !== undefined) return refusal
+  return aims[0]
+}
+
+/**
+ * A caller-supplied identity this session read off another computer, or that a
+ * switch invalidated, is refused before it is resolved against this computer's
+ * tree: a ref never travels between computers, and an invalidated ref is never
+ * rebound to whatever matches now (docs/computer-use-reliability.md rule 4).
+ */
+function identityRefusal(computer: string, input: TargetingInput): Targeting | undefined {
+  const message = observationRefusal(computer, { observationId: input.observationId, ref: input.target })
+  if (message === undefined) return undefined
+  return { kind: "refused", code: "identity_not_for_this_computer", message }
+}
 
 type ActResponse = {
   ok: true
@@ -212,6 +625,37 @@ export const ComputerActTool = Tool.define<typeof Parameters, Record<string, unk
         Effect.gen(function* () {
           validateAction(params)
           const config = yield* configFromEnv()
+          const id = yield* computerId(http, config, ctx.sessionID)
+          // Resolve before asking: a target that cannot be resolved must never
+          // prompt for an action that will not run.
+          const observation = needsObservation(params)
+            ? yield* observeForAct(http, config, id, ctx.sessionID, params.window?.trim() || undefined)
+            : undefined
+          // The tree just read is the one the session holds for this computer,
+          // and it is what makes a bare ref addressable here: a ref this tree
+          // carries belongs to this computer whatever string another computer's
+          // tree uses, so it is registered before an identity is judged.
+          if (observation !== undefined) recordObservation(id, observation.id, observation.elements)
+          const refused = identityRefusal(id, params)
+          const targeting = refused ?? resolveTargeting(params, observation)
+          if (targeting.kind === "refused") {
+            const title = `Refused ${params.action} ${params.target ?? params.query ?? "target"} (${targeting.code})`
+            yield* ctx.metadata({ title, metadata: {} })
+            return {
+              title,
+              output: [targeting.message, "No action was performed."].join("\n"),
+              metadata: {
+                action: params.action,
+                target: params.target,
+                targetName: params.target ?? params.query ?? "target",
+                success: false,
+                verification: "refused",
+                observationId: params.observationId ?? observation?.id,
+                refused: true,
+                error: { code: targeting.code, message: targeting.message },
+              },
+            }
+          }
           yield* ctx.ask({
             permission: "computer",
             patterns: [actPermissionPattern(params)],
@@ -228,7 +672,6 @@ export const ComputerActTool = Tool.define<typeof Parameters, Record<string, unk
               ...(params.credential === undefined ? {} : { credential: params.credential }),
             },
           })
-          const id = yield* computerId(http, config, ctx.sessionID)
           const result = yield* request<ActResponse>(
             http,
             config,
@@ -263,8 +706,8 @@ export const ComputerActTool = Tool.define<typeof Parameters, Record<string, unk
               ...(params.amount === undefined ? {} : { amount: params.amount }),
               ...(params.button === undefined ? {} : { button: params.button }),
               ...(params.rows === undefined ? {} : { rows: params.rows }),
-              ...(params.x === undefined ? {} : { x: params.x }),
-              ...(params.y === undefined ? {} : { y: params.y }),
+              ...(params.x === undefined || targeting.kind === "resolved" ? {} : { x: params.x }),
+              ...(params.y === undefined || targeting.kind === "resolved" ? {} : { y: params.y }),
               ...(params.from === undefined ? {} : { from: params.from }),
               ...(params.to === undefined ? {} : { to: params.to }),
               ...(params.command === undefined ? {} : { command: params.command }),
@@ -280,21 +723,37 @@ export const ComputerActTool = Tool.define<typeof Parameters, Record<string, unk
             { validate: Schema.is(ActionEnvelope) },
           )
           const outcome = result.result
+          const resolved = targeting.kind === "resolved" ? targeting : undefined
+          const resolvedElement = resolved?.element
           const targetName =
             typeof outcome.metadata?.target?.name === "string" && outcome.metadata.target.name.length > 0
               ? outcome.metadata.target.name
-              : (params.target ??
-                params.query ??
-                params.app ??
-                params.url ??
-                params.path ??
-                shortenCommand(params.command) ??
-                "desktop")
+              : resolvedElement !== undefined
+                ? (resolvedElement.name ?? resolvedElement.text ?? refOf(resolvedElement) ?? "control")
+                : (params.target ??
+                  params.query ??
+                  params.app ??
+                  params.url ??
+                  params.path ??
+                  shortenCommand(params.command) ??
+                  "desktop")
           const verification = outcome.verification?.status ?? (outcome.success ? "unverified" : "failed")
           const statusLabel = !outcome.success ? (outcome.error?.code ?? outcome.status ?? "failed") : verification
           const title = `${ACTION_LABEL[params.action] ?? params.action} ${targetName} (${statusLabel})`
           yield* ctx.metadata({ title, metadata: {} })
           const lines = [outcome.message ?? `${params.action} ${outcome.success ? "completed" : "did not complete"}.`]
+          // How the point was chosen: the resolved element's own aim, or the
+          // caller's pixel on a declared surface.
+          const aim = "aim" in targeting ? targeting.aim : undefined
+          if (resolvedElement !== undefined) lines.push(`resolved: ${describeElement(resolvedElement)}`)
+          if (aim !== undefined) {
+            lines.push(`aim: ${aim.x},${aim.y} (${aim.strategy})`)
+            if (aim.strategy === "bounds-center") {
+              lines.push(
+                "warning: that aim is the centre of the reported bounds because the element exposes no focus point, no aim hint, and no role that identifies an actionable region; treat it as a guess.",
+              )
+            }
+          }
           if (outcome.metadata?.stateDelta?.summary)
             lines.push(`observed change: ${outcome.metadata.stateDelta.summary}`)
           if (outcome.command) {
@@ -373,6 +832,17 @@ export const ComputerActTool = Tool.define<typeof Parameters, Record<string, unk
               success: outcome.success,
               verification,
               observationId: outcome.observation?.id,
+              ...(resolved === undefined
+                ? {}
+                : {
+                    resolved: {
+                      ref: refOf(resolved.element),
+                      role: resolved.element.role,
+                      name: resolved.element.name ?? resolved.element.text,
+                      confidence: resolved.confidence,
+                    },
+                  }),
+              ...(aim === undefined ? {} : { aim }),
             },
           }
         }),

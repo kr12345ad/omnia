@@ -14,6 +14,7 @@
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "test": "bun test",
+    "test:computer-use": "bun test src/computer-use/live-harness/ src/computer-use/",
     "standalone": "bun ./src/server/standalone.ts"
   },
   "devDependencies": {

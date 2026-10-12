@@ -1,32 +1,31 @@
 Summarize the current computer state with enough detail to act without guessing.
 
-Returns the observation id, the applications and windows present, the element
-that currently holds keyboard focus, and a compact list of controls. Every
-control line includes its role, name, stable ref, exact screen pixel center,
-current value when it has one, its states (enabled, focused, checked, expanded,
-and so on), and the actions it supports.
+The output is grouped per window, focused window first, and every window gets a
+one-line header:
 
-Reading one line looks like this:
+  1. kitty — "OC | Quick hello" [focused] @0,0 1920x1080 ref=x11:1
+  - textfield "Command" ref=atspi:1 @410,52 [enabled, focused] value="ls" actions=set-value
+  - button "Run" ref=atspi:2 @120,90 [enabled] actions=click
+  … 7 elements omitted in this window — use computer_snapshot with limit/offset or computer_find by name
 
-  - button "Save" at 412,88 ref=atspi:3 [enabled] actions=click
-  - textbox "Name" at 200,140 ref=atspi:4 value="Ada" [enabled, focused] actions=set-text
-  - window "Budget 2026 (LibreOffice Calc)" at 960,540 ref=atspi:1
+Read the focused window first. Inside a window the actionable controls come
+before inert text, and each of those two groups runs in reading order
+(top-to-bottom, left-to-right), so the first lines are the ones you can act on.
+Each element line carries its role, name, stable ref, the aim point as `@x,y`,
+its states, and its value or supported actions; `(bounds-center)` after an aim
+means only the bounding box was available, so prefer a control with a proper
+aim for a click.
 
-Windows are grouped first, then the focused element, then up to `limit`
-controls (default 120, max 1000). When the list is cut short the output says
-so and names how many more exist; that is a signal to narrow, not to ask for
-a bigger dump.
+Warnings at the top are load-bearing. When the accessibility tree is degraded or
+unavailable the list is partial by definition, so confirm what you cannot see
+with computer_screenshot instead of assuming the tree is complete. Trust only
+what is listed.
 
-Use it to orient yourself at the start of a task and after any change. If a
-control you need is not listed, narrow with computer_find instead of asking for
-a bigger dump, and use computer_inspect for full detail on one control.
-
-Refs are stable identifiers for accessible controls and are the preferred way
-to act: pass a control's ref as the target of computer_act. No vision model is
-needed to act on accessible controls; coordinates are a fallback only for
-canvas or image surfaces that expose no ref. For the full structured JSON of
-a snapshot (refs, roles, values, states, and bounds for every control),
-use computer_snapshot instead of a bigger text dump.
+Caps are reported, never silently applied: the output says how many elements
+were omitted in each window and how many windows were dropped. When a count is
+missing from a window, recover it with computer_snapshot (page with `limit` and
+`offset`) or, better, ask for the control by name with computer_find — searching
+by name is cheaper than reading the whole tree.
 
 Parameters:
 
@@ -36,10 +35,19 @@ Parameters:
 - window: restrict further to one window by title or app fragment, for
   example "Default Project". Combine with the application when several
   windows share a title.
-- limit: maximum controls in the text summary (1-1000). Keep it small when
-  scouting and raise it only when the target is known to be further down.
+- limit: maximum controls in the text summary (1-1000), shared across windows
+  with the focused window served first. Defaults to 120. Keep it small when
+  scouting; a cut list is a hint to narrow, not to ask for a bigger dump.
+- focusFirst: list only the focused window (default true). Set false when you
+  need to survey every window, for example before switching focus.
 
-Warnings at the end of the output are load-bearing: a truncated or degraded
-tree means some controls are invisible to the runtime. Trust only what is
-listed. After any click, keypress, dialog, or window change the previous
-observation is stale: observe again before the next act.
+Refs are stable identifiers for accessible controls and are the preferred way
+to act: pass a control's ref as the target of computer_act. No vision model is
+needed to act on accessible controls; coordinates are a fallback only for
+canvas or image surfaces that expose no ref. For the full structured JSON of
+a snapshot (refs, roles, values, states, and bounds for every control),
+use computer_snapshot instead of a bigger text dump.
+
+Warnings at the end of the output are equally load-bearing: after any click,
+keypress, dialog, or window change the previous observation is stale, so
+observe again before the next act.

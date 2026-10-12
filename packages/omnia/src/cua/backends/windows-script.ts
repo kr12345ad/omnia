@@ -9,6 +9,33 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 `
 
+// Roles whose Name/Value is displayed text rather than a settable value.
+export const WINDOWS_TEXT_ROLES: ReadonlySet<string> = new Set([
+  "text",
+  "document",
+  "header",
+  "headeritem",
+  "tooltip",
+  "edit",
+])
+
+// The display text UIA reports for one element. An editable control's value is
+// both its text and its readback value; a slider's value is only a value.
+export function windowsDisplayText(
+  role: string | undefined,
+  value: string | undefined,
+  editable = false,
+): string | undefined {
+  const compact = role?.trim().toLowerCase().replace(/^ControlType\./i, "").replaceAll(" ", "").replaceAll("_", "") ?? ""
+  if (!WINDOWS_TEXT_ROLES.has(compact)) return undefined
+  if (value === undefined || value.length === 0) return undefined
+  return value
+}
+
+// The same role vocabulary as a PowerShell array literal, so the helper script
+// and the TypeScript snapshot builder can never disagree.
+const WINDOWS_TEXT_ROLES_PS = [...WINDOWS_TEXT_ROLES].map((role) => `'${role}'`).join(", ")
+
 const WINDOWS_HELPERS = `
 function Write-OmniaJson($payload) {
   ConvertTo-Json -InputObject $payload -Depth 32 -Compress
@@ -73,6 +100,28 @@ function Get-OmniaInfo($element) {
       if ($null -ne $pattern.Current.Value) { $value = [string]$pattern.Current.Value }
     } catch {}
   }
+  # The display text UIA reports for the element: the control's own Name for a
+  # text control, the value for an editable one. A slider's value is only a
+  # value and never reaches the text field.
+  $text = $null
+  $compactRole = ([string]$current.ControlType.ProgrammaticName).Replace('ControlType.', '').Replace(' ', '').Replace('_', '').ToLower()
+  if ($textRoles -contains $compactRole) {
+    if ($null -ne $current.Name -and [string]$current.Name -ne '') { $text = [string]$current.Name }
+    elseif ($null -ne $value -and [string]$value -ne '') { $text = [string]$value }
+  }
+  elseif ($editable -and $null -ne $value) { $text = [string]$value }
+  # The clickable point UIA computes for the element. It is the one point the
+  # platform itself says a pointer action lands on, so it is only fetched for
+  # elements whose control patterns make them pointer-actionable; calling it
+  # for every node would slow the walk without adding anything.
+  $clickablePoint = $null
+  $pointerActionable = ($patterns -contains 'Invoke') -or ($patterns -contains 'Toggle') -or ($patterns -contains 'SelectionItem') -or ($patterns -contains 'ExpandCollapse')
+  if ($pointerActionable) {
+    try {
+      $point = $element.GetClickablePoint()
+      $clickablePoint = [ordered]@{ x = [int]$point.X; y = [int]$point.Y }
+    } catch { $clickablePoint = $null }
+  }
   $states = New-Object System.Collections.ArrayList
   try { if ($current.HasKeyboardFocus) { [void]$states.Add('focused') } } catch {}
   try { if (-not $current.IsEnabled) { [void]$states.Add('disabled') } } catch {}
@@ -111,6 +160,7 @@ function Get-OmniaInfo($element) {
     role = $current.ControlType.ProgrammaticName
     name = $current.Name
     description = $current.HelpText
+    text = $text
     value = $value
     states = @($states)
     patterns = @($patterns)
@@ -120,6 +170,7 @@ function Get-OmniaInfo($element) {
     maxValue = $maxValue
     stepValue = $stepValue
     bounds = $bounds
+    clickablePoint = $clickablePoint
     automationId = $current.AutomationId
     className = $current.ClassName
     hwnd = [long]$current.NativeWindowHandle
@@ -128,10 +179,18 @@ function Get-OmniaInfo($element) {
 }
 `
 
+export const WINDOWS_MAX_WINDOWS = 64
+// A cooperative walk deadline. UIA calls are COM round trips whose cost varies
+// wildly by application, so the element budget alone cannot bound a walk; a
+// deadline can. The observe timeout in windows.ts must stay above this so a
+// deadline-limited walk reports a truncated tree instead of being killed.
+export const WINDOWS_TIME_BUDGET_MS = 10000
+
 export interface WindowsObserveOptions {
   app?: string
   maxElements?: number
   maxDepth?: number
+  timeBudgetMs?: number
 }
 
 export function windowsObserveScript(options: WindowsObserveOptions = {}): string {
@@ -139,6 +198,11 @@ export function windowsObserveScript(options: WindowsObserveOptions = {}): strin
     app: options.app ?? null,
     maxElements: options.maxElements ?? WINDOWS_MAX_ELEMENTS,
     maxDepth: options.maxDepth ?? WINDOWS_MAX_DEPTH,
+    // A per-window share of the whole desktop budget so one window with a
+    // thousand rows cannot consume the walk and drop every other window.
+    maxElementsPerWindow: Math.max(1, Math.floor((options.maxElements ?? WINDOWS_MAX_ELEMENTS) / 2)),
+    maxWindows: WINDOWS_MAX_WINDOWS,
+    timeBudgetMs: options.timeBudgetMs ?? WINDOWS_TIME_BUDGET_MS,
   }
   return `
 ${WINDOWS_UIA_PREAMBLE}
@@ -146,20 +210,26 @@ ${WINDOWS_HELPERS}
 $config = ConvertFrom-Json '${JSON.stringify(config).replaceAll("'", "''")}'
 $maxElements = [int]$config.maxElements
 $maxDepth = [int]$config.maxDepth
+$maxElementsPerWindow = [int]$config.maxElementsPerWindow
+$maxWindows = [int]$config.maxWindows
+$textRoles = @(${WINDOWS_TEXT_ROLES_PS})
+$script:omniaDeadline = [System.DateTime]::UtcNow.AddMilliseconds([double]$config.timeBudgetMs)
 $filter = $null
 if ($null -ne $config.app -and [string]$config.app -ne '') { $filter = ([string]$config.app).ToLower() }
 $script:omniaCount = 0
+$script:omniaWindowCount = 0
 $script:omniaTruncated = $false
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 $root = [System.Windows.Automation.AutomationElement]::RootElement
 $focusedPid = -1
 try { $focusedPid = [System.Windows.Automation.AutomationElement]::FocusedElement.Current.ProcessId } catch {}
 function Convert-OmniaNode($element, [int]$index, [int]$depth, [long]$windowHandle) {
-  if ($script:omniaCount -ge $maxElements -or $depth -gt $maxDepth) {
+  if ($script:omniaCount -ge $maxElements -or $script:omniaWindowCount -ge $maxElementsPerWindow -or $depth -gt $maxDepth -or [System.DateTime]::UtcNow -gt $script:omniaDeadline) {
     $script:omniaTruncated = $true
     return $null
   }
   $script:omniaCount = $script:omniaCount + 1
+  $script:omniaWindowCount = $script:omniaWindowCount + 1
   $info = Get-OmniaInfo $element
   if ($info.hwnd -ne 0) { $windowHandle = $info.hwnd }
   $node = [ordered]@{
@@ -168,6 +238,7 @@ function Convert-OmniaNode($element, [int]$index, [int]$depth, [long]$windowHand
     role = $info.role
     name = $info.name
     description = $info.description
+    text = $info.text
     value = $info.value
     states = $info.states
     patterns = $info.patterns
@@ -177,6 +248,7 @@ function Convert-OmniaNode($element, [int]$index, [int]$depth, [long]$windowHand
     maxValue = $info.maxValue
     stepValue = $info.stepValue
     bounds = $info.bounds
+    clickablePoint = $info.clickablePoint
     automationId = $info.automationId
     className = $info.className
     hwnd = $windowHandle
@@ -198,6 +270,13 @@ $windows = New-Object System.Collections.ArrayList
 $errors = New-Object System.Collections.ArrayList
 $window = $walker.GetFirstChild($root)
 while ($null -ne $window -and -not $script:omniaTruncated) {
+  if ($windows.Count -ge $maxWindows -or [System.DateTime]::UtcNow -gt $script:omniaDeadline) {
+    $script:omniaTruncated = $true
+    break
+  }
+  # A per-window share of the budget: reset the counter at each window boundary
+  # so one window cannot eat the whole walk.
+  $script:omniaWindowCount = 0
   $app = $null
   $title = $null
   $processId = 0
@@ -739,6 +818,13 @@ export interface WindowsElementSnapshot {
   maxValue?: number
   stepValue?: number
   bounds?: Bounds
+  // Display text UIA reports for the element. Distinct from `value`, which is
+  // the settable value a control reads back: a text control's text is its Name,
+  // an editable control's text is its content, a slider's value is only a value.
+  text?: string
+  // The clickable point UIA computes via GetClickablePoint: the one point the
+  // platform itself says a pointer action lands on.
+  clickablePoint?: Point
   automationId?: string
   className?: string
   hwnd?: number
@@ -776,6 +862,9 @@ export interface WindowsResolvedPayload {
   maxValue?: number
   stepValue?: number
   bounds?: Bounds
+  // The clickable point UIA computes via GetClickablePoint: the one point the
+  // platform itself says a pointer action lands on.
+  clickablePoint?: Point
   hwnd?: number
   pid?: number
 }
@@ -814,6 +903,16 @@ export function parseWindowsBounds(value: unknown): Bounds | undefined {
   return { x, y, width, height }
 }
 
+// A point the platform itself reports; a malformed object is treated as absent
+// so a broken helper never invents a click target.
+export function parseWindowsPoint(value: unknown): Point | undefined {
+  if (!isRecord(value)) return undefined
+  const x = finiteNumber(value.x)
+  const y = finiteNumber(value.y)
+  if (x === undefined || y === undefined) return undefined
+  return { x, y }
+}
+
 function parseWindowsNode(value: unknown): WindowsElementSnapshot | undefined {
   if (!isRecord(value)) return undefined
   const runtimeId = optionalString(value.runtimeId)
@@ -821,7 +920,9 @@ function parseWindowsNode(value: unknown): WindowsElementSnapshot | undefined {
   const bounds = parseWindowsBounds(value.bounds)
   const name = optionalString(value.name)
   const description = optionalString(value.description)
+  const text = optionalString(value.text)
   const elementValue = optionalString(value.value)
+  const clickablePoint = parseWindowsPoint(value.clickablePoint)
   const automationId = optionalString(value.automationId)
   const className = optionalString(value.className)
   const minValue = finiteNumber(value.minValue)
@@ -835,7 +936,9 @@ function parseWindowsNode(value: unknown): WindowsElementSnapshot | undefined {
     role: typeof value.role === "string" && value.role.length > 0 ? value.role : "unknown",
     ...(name === undefined ? {} : { name }),
     ...(description === undefined ? {} : { description }),
+    ...(text === undefined || text.length === 0 ? {} : { text }),
     ...(elementValue === undefined ? {} : { value: elementValue }),
+    ...(clickablePoint === undefined ? {} : { clickablePoint }),
     states: stringArray(value.states),
     patterns: stringArray(value.patterns),
     editable: value.editable === true,
@@ -918,6 +1021,7 @@ export function parseWindowsResolvedPayload(value: unknown): WindowsResolvedPayl
   const name = optionalString(value.name)
   const description = optionalString(value.description)
   const elementValue = optionalString(value.value)
+  const clickablePoint = parseWindowsPoint(value.clickablePoint)
   const minValue = finiteNumber(value.minValue)
   const maxValue = finiteNumber(value.maxValue)
   const stepValue = finiteNumber(value.stepValue)
@@ -928,6 +1032,7 @@ export function parseWindowsResolvedPayload(value: unknown): WindowsResolvedPayl
     ...(name === undefined ? {} : { name }),
     ...(description === undefined ? {} : { description }),
     ...(elementValue === undefined ? {} : { value: elementValue }),
+    ...(clickablePoint === undefined ? {} : { clickablePoint }),
     states: stringArray(value.states),
     patterns: stringArray(value.patterns),
     editable: value.editable === true,

@@ -16,7 +16,7 @@ import { runHeadless } from "../agent-run/runner"
 import { openCodeRunnerFromEnv } from "../agent-run/client"
 import { cuaDriverFor, type ComputerUseService } from "../computer-use/service"
 import type { CalibrationManager, CalibrationMeasurement, CalibrationProfile } from "../computer-use/calibration"
-import type { CuaAction, CuaFindQuery, CuaWaitCondition } from "../cua/types"
+import type { CuaAction, CuaActionResult, CuaFindQuery, CuaSnapshot, CuaWaitCondition } from "../cua/types"
 import { renderGitHubCallbackPage, type GitHubAuth } from "../auth/github"
 import type {
   ComputerUseContext,
@@ -50,6 +50,13 @@ import {
   type ElementReference,
 } from "../protocol"
 import { operationFingerprint, type ApprovalRegistry } from "../security/approval"
+import type {
+  ComputerUseExecutionInput,
+  ComputerUseObservationInput,
+  ComputerUseResultInput,
+  ComputerUseTrail,
+  ComputerUseTrailFilter,
+} from "../security/journal"
 import type { OperationInput } from "../security/types"
 
 export const OMNIA_PROTOCOL_VERSION = 1
@@ -159,6 +166,16 @@ export interface ApiContext {
   readonly calibration: CalibrationManager
   readonly approvals: ApprovalRegistry
   readonly auth: GitHubAuth
+  // Read-only view over the local security journal's computer-use records. The
+  // journal is opened for reading here, never for writing, and the records it
+  // returns are the chain-verified ones.
+  readonly computerUseTrail?: (filter?: ComputerUseTrailFilter) => ComputerUseTrail
+  // The one writer for the computer-use audit trail. The Cua routes reach their
+  // engine driver directly instead of through ComputerManager.execute, so the
+  // manager's journaling wrapper never sees those actions; they are handed to
+  // the server's single computer-use writer here, with the same record and the
+  // same failure handling every other action gets.
+  readonly journalComputerUse: (input: ComputerUseExecutionInput) => void
   readonly health: () => ServerHealth
   readonly subscribe: (response: ServerResponse) => () => void
   readonly now: () => number
@@ -1205,6 +1222,42 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
 
   if (parsed.method === "GET" && segments.length === 2 && segments[1] === "computers") {
     json(response, 200, { ok: true, computers: await context.computers.list() })
+    return true
+  }
+
+  // The computer-use audit trail: the tamper-evident journal, read back. The
+  // journal holds what the agent did to a real desktop, so it is readable only
+  // by the signed-in desktop operator - a remote computer token or an agent
+  // session is refused before any record is read. Nothing here writes: the
+  // records come back with their chain-verified status attached, so a caller
+  // can tell an intact trail from one that stops verifying.
+  if (parsed.method === "GET" && segments.length === 3 && segments[1] === "audit" && segments[2] === "computer-use") {
+    if (!isTrustedDesktopRequest(context, request)) {
+      json(response, 403, {
+        ok: false,
+        error: "Only the signed-in desktop can read the computer-use audit trail.",
+      })
+      return true
+    }
+    const params = parsed.url.searchParams
+    const computerId = params.get("computerId")
+    const since = params.get("since")
+    const limit = params.get("limit")
+    const trail =
+      context.computerUseTrail?.({
+        ...(computerId === null || computerId.length === 0 || computerId.length > 128
+          ? {}
+          : { computerId }),
+        ...(since === null || !Number.isFinite(Number(since)) || Number(since) < 0 ? {} : { since: Math.floor(Number(since)) }),
+        ...(limit === null || !Number.isFinite(Number(limit)) ? {} : { limit: Math.floor(Number(limit)) }),
+      }) ?? {
+        records: [],
+        chain: "unavailable" as const,
+        verifiedThrough: 0,
+        total: 0,
+        error: "This server has no readable computer-use audit journal.",
+      }
+    json(response, 200, { ok: true, trail })
     return true
   }
 
@@ -2849,6 +2902,10 @@ async function handleCuaRequest(
     const required = requiredScopesForAction(CUA_SCOPE_ACTIONS[action.type])
     const denied = cuaPermission(context, request, computerId, action.type, record, required)
     if (denied !== undefined) {
+      // The engine was never reached, but the caller's attempt to put an action
+      // on the desktop is part of the trail: the permission gate decided, and
+      // that decision is recorded exactly as the /actions route records it.
+      journalCuaAction(context, request, computerId, action, record, required, cuaRefusalOutcome(denied.result))
       json(response, denied.status, { ok: false, result: denied.result })
       return true
     }
@@ -2858,6 +2915,7 @@ async function handleCuaRequest(
       data: { action: action.type, engine: "cua" },
     })
     const result = await cua.act(action)
+    journalCuaAction(context, request, computerId, action, record, required, cuaActionOutcome(result))
     context.events.emit(result.ok ? "action.completed" : "action.failed", {
       computerId,
       ...(typeof record.sessionId === "string" ? { sessionId: record.sessionId } : {}),
@@ -2901,6 +2959,122 @@ function cuaUnavailable(response: ServerResponse): true {
     error: { code: "cua_unavailable", message: "The Cua accessibility engine does not support this operation." },
   })
   return true
+}
+
+// The Cua engine is reached directly by POST /v1/computers/:id/cua/act, so
+// ComputerManager.execute - and the journaling wrapper around it - never sees
+// these actions. They are journaled through the server's single computer-use
+// writer with the fields every other computer-use action records: the ref the
+// caller bound and the observation it came from, the aim point and the strategy
+// behind it, the permission decision, and the verdict the engine reported.
+//
+// The record is built by the journal, not here: this hands it what the route
+// parsed out of the request and what the engine answered, which is the same
+// split the manager boundary uses.
+function journalCuaAction(
+  context: ApiContext,
+  request: IncomingMessage,
+  computerId: string,
+  action: CuaAction,
+  body: Record<string, unknown>,
+  required: readonly OmniaScope[],
+  outcome: ComputerUseResultInput,
+): void {
+  // The ref binding travels inside the action object, so the observation a ref
+  // was scoped to is read from the caller's own copy of it.
+  const binding = isRecord(body.action) ? body.action : {}
+  const point = cuaActionPoint(action)
+  const ref = cuaActionRef(action)
+  context.journalComputerUse({
+    computerId,
+    serverId: context.descriptor.serverId,
+    at: context.now(),
+    request: {
+      action: action.type,
+      ...(ref === undefined ? {} : { ref }),
+      ...(typeof binding.observationId === "string" ? { observationId: binding.observationId } : {}),
+      ...(typeof binding.generation === "number" ? { generation: binding.generation } : {}),
+      // Pointer coordinates are recorded as the canvas/unknown-surface aim they
+      // are, never dressed up as a resolved control (contract rule 6).
+      ...(point === undefined ? {} : { x: point.x, y: point.y }),
+      ...(typeof body.approvedBy === "string" ? { approvedBy: body.approvedBy } : {}),
+      ...(typeof body.sessionId === "string" ? { sessionId: body.sessionId } : {}),
+      origin: isAgentRequest(context, request, body) ? "agent" : "desktop",
+    },
+    outcome,
+    scopes: required,
+    // The engine's post-action read, so the aim can be resolved from the
+    // element's own metadata and the generation is the one it landed in.
+    ...(outcome.observation === undefined ? {} : { after: outcome.observation }),
+  })
+}
+
+function cuaActionRef(action: CuaAction): string | undefined {
+  return "ref" in action && typeof action.ref === "string" && action.ref.length > 0 ? action.ref : undefined
+}
+
+// A permission refusal as a result. The journal reads the permission decision
+// off the error code, exactly as it does for an action the manager refused, so
+// a refusal lands in the trail as a permission outcome and never as a click
+// that happened.
+function cuaRefusalOutcome(result: Record<string, unknown>): ComputerUseResultInput {
+  return {
+    ...(typeof result.message === "string" ? { message: result.message } : {}),
+    ...(result.error === undefined ? {} : { error: result.error }),
+  }
+}
+
+function cuaActionPoint(action: CuaAction): { x: number; y: number } | undefined {
+  if (action.type === "click") return action.point
+  if (action.type === "drag") return action.from
+  return undefined
+}
+
+// The engine's answer in the journal's result shape. The verdict is the
+// engine's own, the method is how the action was delivered, and the observed
+// state is the generation it read back plus what its post-action delta named -
+// counts, not refs, so the record stays a bounded audit entry instead of a dump
+// of the screen tree. A post-action snapshot is attached as the observation for
+// aim resolution and generation only; it is never copied into the record.
+function cuaActionOutcome(result: CuaActionResult): ComputerUseResultInput {
+  const delta = result.delta
+  return {
+    message: result.message,
+    verification: {
+      status: result.verified ? "verified" : "not_verified",
+      method: result.delivery,
+      actual: {
+        generation: result.generation,
+        ...(delta?.focusedRef === undefined ? {} : { focusedRef: delta.focusedRef }),
+        ...(delta === undefined
+          ? {}
+          : {
+            added: delta.addedRefs?.length ?? 0,
+            removed: delta.removedRefs?.length ?? 0,
+            changed: delta.changedRefs?.length ?? 0,
+          }),
+      },
+    },
+    ...(result.observation === undefined ? {} : { observation: cuaObservation(result.observation) }),
+    ...(result.error === undefined ? {} : { error: result.error }),
+  }
+}
+
+// A Cua snapshot as the journal's observation input: element ids are refs, and
+// generation is read the same way whether it sits on the snapshot or on each
+// element.
+function cuaObservation(snapshot: CuaSnapshot): ComputerUseObservationInput {
+  return {
+    id: snapshot.id,
+    metadata: { generation: snapshot.generation },
+    elements: snapshot.elements.map((element) => ({
+      id: element.ref,
+      role: element.role,
+      name: element.name,
+      ...(element.bounds === undefined ? {} : { bounds: element.bounds }),
+      metadata: { generation: element.generation },
+    })),
+  }
 }
 
 function cuaPermission(

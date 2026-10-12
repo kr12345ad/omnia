@@ -742,7 +742,7 @@ describe("titled window-focus routing (Kitty OC | Quick hello regression)", () =
       [{ role: "button", name: "Export", bounds: { x: 10, y: 10, width: 100, height: 30 }, source: "accessibility" as const }],
       "Export",
     )
-    expect(valid?.score).toBeGreaterThanOrEqual(0.6)
+    expect(valid?.score).toBe(SEMANTIC_MATCH_THRESHOLD + 0.25)
     expect(valid?.element.name).toBe("Export")
   })
 
@@ -798,6 +798,135 @@ describe("titled window-focus routing (Kitty OC | Quick hello regression)", () =
       action: "focus_window",
       window: "OC | Quick hello",
     })
+  })
+})
+
+describe("bestMatch honest scoring (semantic over-match regression)", () => {
+  const fullScreen = { x: 0, y: 0, width: 1920, height: 1080 }
+  // The kitty window really is the full-screen root: its center is exactly the
+  // (960,539) blind click the 0.4 over-match produced.
+  const kittyWindow = {
+    role: "window",
+    name: "OC | Quick hello",
+    bounds: fullScreen,
+    source: "accessibility" as const,
+  }
+  const genericRoot = {
+    role: "window",
+    name: "Terminal",
+    bounds: fullScreen,
+    source: "accessibility" as const,
+  }
+  const commandField = {
+    role: "textfield",
+    name: "Command",
+    bounds: { x: 10, y: 40, width: 800, height: 24 },
+    source: "accessibility" as const,
+  }
+  const exportButton = {
+    role: "button",
+    name: "Export",
+    bounds: { x: 10, y: 10, width: 100, height: 30 },
+    source: "accessibility" as const,
+  }
+  const screen = [kittyWindow, commandField, exportButton]
+
+  test("an exact normalized title match scores 0.85 and outranks weaker candidates", () => {
+    const weaker = { role: "window", name: "OC | Quick hello - zsh", bounds: fullScreen, source: "accessibility" as const }
+    const match = bestMatch([...screen, weaker], "OC | Quick hello")
+    expect(match?.element.name).toBe("OC | Quick hello")
+    expect(match?.exact).toBe(true)
+    expect(match?.score).toBeCloseTo(0.85, 5)
+  })
+
+  test("a vague query returns undefined instead of resolving the full-screen root", () => {
+    for (const query of ["window", "terminal", "kitty", "the window", "the kitty terminal", "focus the kitty terminal"]) {
+      expect(bestMatch(screen, query)).toBeUndefined()
+    }
+    // The over-match direction: a vague fragment inside a long query once
+    // scored the short generic root 0.4 and clicked its center.
+    for (const query of ["window", "the kitty terminal", "focus the kitty terminal window titled OC | Quick hello"]) {
+      expect(bestMatch([genericRoot, kittyWindow, commandField], query)).toBeUndefined()
+    }
+  })
+
+  test("a generic substring clears the 0.6 floor but never beats an exact control", () => {
+    const loose = bestMatch([kittyWindow, commandField], "OC")
+    expect(loose?.element.name).toBe("OC | Quick hello")
+    expect(loose?.score).toBeGreaterThanOrEqual(SEMANTIC_MATCH_THRESHOLD)
+    expect(loose?.score).toBeCloseTo(0.7, 5)
+    const ocButton = {
+      role: "button",
+      name: "OC",
+      bounds: { x: 600, y: 300, width: 40, height: 20 },
+      source: "accessibility" as const,
+    }
+    const race = bestMatch([kittyWindow, ocButton], "OC")
+    expect(race?.element.name).toBe("OC")
+    expect(race?.score).toBeCloseTo(0.85, 5)
+  })
+
+  test("the correct control beats the generic root in a two-element race", () => {
+    const command = bestMatch([kittyWindow, commandField], "Command")
+    expect(command?.element.name).toBe("Command")
+    expect(command?.score).toBeCloseTo(0.85, 5)
+    expect(command?.element.bounds).toEqual({ x: 10, y: 40, width: 800, height: 24 })
+    const closeButton = {
+      role: "button",
+      name: "Close dialog button",
+      bounds: { x: 1862, y: 6, width: 16, height: 16 },
+      source: "accessibility" as const,
+    }
+    const close = bestMatch([genericRoot, closeButton], "close")
+    expect(close?.element.name).toBe("Close dialog button")
+    expect(close?.score).toBeCloseTo(0.7, 5)
+    // The generic root scores nothing at all for either query.
+    expect(bestMatch([genericRoot], "Command")).toBeUndefined()
+    expect(bestMatch([genericRoot], "close")).toBeUndefined()
+  })
+
+  test("normalization: case, whitespace and pipe-separated titles", () => {
+    expect(bestMatch([kittyWindow], "  oc |   QUICK hello ")?.score).toBeCloseTo(0.85, 5)
+    expect(bestMatch([kittyWindow], "OC|Quick hello")?.score).toBeCloseTo(0.85, 5)
+    const segment = bestMatch(screen, "  QUICK   hello ")
+    expect(segment?.element.name).toBe("OC | Quick hello")
+    expect(segment?.score).toBeCloseTo(0.7, 5)
+  })
+
+  test("an explicit role in the query lifts a substring match above the floor", () => {
+    const named = { role: "button", name: "Close button area", bounds: fullScreen, source: "accessibility" as const }
+    const roleless = { name: "Close button area", bounds: fullScreen, source: "accessibility" as const }
+    expect(bestMatch([named], "close button")?.score).toBeCloseTo(0.75, 5)
+    expect(bestMatch([roleless], "close button")?.score).toBeCloseTo(0.7, 5)
+  })
+
+  test("a query shorter than three characters only counts as a whole token", () => {
+    const catalog = { role: "label", name: "Catalog", bounds: { x: 0, y: 0, width: 50, height: 20 }, source: "accessibility" as const }
+    expect(bestMatch([catalog], "at")).toBeUndefined()
+    expect(bestMatch([kittyWindow], "c")).toBeUndefined()
+    expect(bestMatch([kittyWindow], "q")).toBeUndefined()
+  })
+
+  test("a query that is the whole name still matches, even on a generic-looking control", () => {
+    // Exact normalized equality is 0.85 by contract: the name carries the
+    // entire query, so it is never vague.
+    const exact = bestMatch([genericRoot], "terminal")
+    expect(exact?.element.name).toBe("Terminal")
+    expect(exact?.exact).toBe(true)
+    expect(exact?.score).toBeCloseTo(0.85, 5)
+  })
+
+  test("SemanticProvider refuses a vague query instead of clicking the root", async () => {
+    const provider = new SemanticProvider()
+    const result = await provider.analyze({
+      computerId: "local",
+      requestedOperation: "click",
+      targetDescription: "window",
+      semanticContext: { coverage: 0.8, windowTitle: "OC | Quick hello", elements: screen },
+    })
+    expect(result.success).toBe(false)
+    expect(result.action).toBeUndefined()
+    expect(result.confidence).toBe(0)
   })
 })
 

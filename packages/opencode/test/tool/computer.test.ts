@@ -10,19 +10,22 @@ import { Truncate } from "@/tool/truncate"
 import { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
-import { configFromEnv, request } from "@/tool/computer/client"
+import { configFromEnv, rememberObservation, request } from "@/tool/computer/client"
 import { ComputerActTool, Parameters as ActParameters } from "@/tool/computer/act"
 import { ComputerAppsTool } from "@/tool/computer/apps"
 import { ComputerCapabilitiesTool } from "@/tool/computer/capabilities"
 import { ComputerContextTool } from "@/tool/computer/context"
 import { ComputerDoTool, Parameters as DoParameters } from "@/tool/computer/do"
 import { ComputerFindTool, Parameters as FindParameters } from "@/tool/computer/find"
+import { ComputerInspectTool, Parameters as InspectParameters } from "@/tool/computer/inspect"
 import { MemoryTool, Parameters as MemoryParameters } from "@/tool/computer/memory"
 import { ComputerObserveTool, Parameters as ObserveParameters } from "@/tool/computer/observe"
 import { ComputerSnapshotTool, Parameters as SnapshotParameters } from "@/tool/computer/snapshot"
 import { ComputerReadTool, Parameters as ReadParameters } from "@/tool/computer/read"
 import { ComputerScreenshotTool, Parameters as ScreenshotParameters } from "@/tool/computer/screenshot"
 import { SuperskillTool, Parameters as SuperskillParameters } from "@/tool/computer/superskill"
+import { invalidateObservations, recordObservation } from "@/tool/computer/switch"
+import { ComputerVisualTool, Parameters as VisualParameters } from "@/tool/computer/visual"
 import {
   alwaysPatternsForAct,
   alwaysPatternsForSteps,
@@ -187,6 +190,12 @@ const execSuperskill = Effect.fn("test.execSuperskill")(function* (
   return yield* tool.execute(args, makeCtx(mock.asked))
 })
 
+const execVisual = Effect.fn("test.execVisual")(function* (args: Schema.Schema.Type<typeof VisualParameters>) {
+  const info = yield* ComputerVisualTool
+  const tool = yield* info.init()
+  return yield* tool.execute(args, makeCtx(mock.asked))
+})
+
 const execContext = Effect.fn("test.execContext")(function* () {
   const info = yield* ComputerContextTool
   const tool = yield* info.init()
@@ -195,6 +204,12 @@ const execContext = Effect.fn("test.execContext")(function* () {
 
 const execFind = Effect.fn("test.execFind")(function* (args: Schema.Schema.Type<typeof FindParameters>) {
   const info = yield* ComputerFindTool
+  const tool = yield* info.init()
+  return yield* tool.execute(args, makeCtx(mock.asked))
+})
+
+const execInspect = Effect.fn("test.execInspect")(function* (args: Schema.Schema.Type<typeof InspectParameters>) {
+  const info = yield* ComputerInspectTool
   const tool = yield* info.init()
   return yield* tool.execute(args, makeCtx(mock.asked))
 })
@@ -295,6 +310,11 @@ describe("computer tool schemas", () => {
     expect(decodeObserve({ limit: 5 })).toEqual({ limit: 5 })
     expect(() => decodeObserve({ limit: 0 })).toThrow()
     expect(() => decodeObserve({ limit: 1001 })).toThrow()
+  })
+
+  test("observe accepts focusFirst as a boolean", () => {
+    expect(decodeObserve({ focusFirst: false })).toEqual({ focusFirst: false })
+    expect(() => decodeObserve({ focusFirst: "false" })).toThrow()
   })
 
   test("snapshot accepts empty params and pages elements", () => {
@@ -429,9 +449,7 @@ describe("computer action policy", () => {
     expect(() => validateAction({ action: "browser_key" })).toThrow("requires key")
     expect(() => validateAction({ action: "browser_activate_tab" })).toThrow("requires tab")
     expect(() => validateAction({ action: "browser_dialog" })).toThrow('dialog "accept" or "dismiss"')
-    expect(() => validateAction({ action: "browser_dialog", dialog: "later" })).toThrow(
-      'dialog "accept" or "dismiss"',
-    )
+    expect(() => validateAction({ action: "browser_dialog", dialog: "later" })).toThrow('dialog "accept" or "dismiss"')
     expect(() => validateAction({ action: "browser_dialog", dialog: "dismiss" })).not.toThrow()
     expect(() => validateAction({ action: "type", target: "a" })).toThrow("requires text")
     expect(() => validateAction({ action: "type", target: "a", credential: "auto" })).not.toThrow()
@@ -518,12 +536,60 @@ describe("computer action policy", () => {
   })
 })
 
+// computer_act reads the current observation before it acts, so an act mock
+// must answer the observe request as well as the action request.
+const ACT_ELEMENTS = [
+  { id: "cua:window/kitty/Editor", role: "window", name: "Editor", bounds: { x: 0, y: 0, width: 1920, height: 1080 } },
+  {
+    id: "cua:window/kitty/Editor/3/button/Minimize/1",
+    role: "button",
+    name: "Minimize",
+    bounds: { x: 1800, y: 36, width: 24, height: 24 },
+    actions: ["click"],
+  },
+  {
+    id: "el-save",
+    role: "button",
+    name: "Save",
+    bounds: { x: 200, y: 100, width: 60, height: 24 },
+    actions: ["click"],
+  },
+  {
+    id: "el-export",
+    role: "button",
+    name: "Export",
+    bounds: { x: 270, y: 100, width: 60, height: 24 },
+    actions: ["click"],
+  },
+  {
+    id: "atspi:1",
+    role: "textfield",
+    name: "Command",
+    bounds: { x: 10, y: 40, width: 800, height: 24 },
+    actions: ["set_value"],
+  },
+]
+
+function actResponder(options: { elements?: unknown[]; observationId?: string; result?: unknown }) {
+  return (req: MockRequest) =>
+    req.url.endsWith("/observe")
+      ? respond(req, {
+          ok: true,
+          observation: { id: options.observationId ?? "obs-1", elements: options.elements ?? ACT_ELEMENTS },
+        })
+      : respond(req, { ok: true, result: options.result ?? { success: true, verification: { status: "verified" } } })
+}
+
+/** The request bodies sent to /actions, without the observation read. */
+function actionBodies(): Record<string, unknown>[] {
+  return mock.bodies.filter((body) => body.action !== undefined)
+}
+
 describe("computer tool execution", () => {
   it.instance("scopes act permission always-patterns and redacts typed text", () =>
     Effect.gen(function* () {
       resetMock()
-      mock.handler = (req) =>
-        respond(req, { ok: true, result: { success: true, verification: { status: "verified" } } })
+      mock.handler = actResponder({})
       yield* withEnv({ computerId: "test-computer" }, () =>
         execAct({ action: "type", target: "atspi:1", text: "hunter2" }),
       )
@@ -531,7 +597,7 @@ describe("computer tool execution", () => {
       expect(mock.asked[0].always).toEqual(["act:type:*"])
       expect(mock.asked[0].patterns).toEqual(["act:type:atspi:1"])
       expect(mock.asked[0].metadata?.text).toBe("[redacted 7 characters]")
-      expect(mock.bodies[0].approvedScopes).toEqual(["UI_CONTROL", "KEYBOARD"])
+      expect(actionBodies()[0].approvedScopes).toEqual(["UI_CONTROL", "KEYBOARD"])
     }),
   )
 
@@ -552,12 +618,150 @@ describe("computer tool execution", () => {
   it.instance("attaches observationId to query targets at the top level", () =>
     Effect.gen(function* () {
       resetMock()
-      mock.handler = (req) => respond(req, { ok: true, result: { success: true } })
+      mock.handler = actResponder({})
       yield* withEnv({ computerId: "test-computer" }, () =>
-        execAct({ action: "click", query: "Export button", observationId: "obs-7" }),
+        execAct({ action: "click", query: "Export", observationId: "obs-7" }),
       )
-      expect(mock.bodies[0].observationId).toBe("obs-7")
-      expect(mock.bodies[0].target).toBeUndefined()
+      expect(actionBodies()[0].observationId).toBe("obs-7")
+      expect(actionBodies()[0].target).toBeUndefined()
+    }),
+  )
+
+  it.instance("refuses a ref that is not in the observation it claims", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = actResponder({
+        observationId: "obs-9",
+        elements: [
+          { id: "cua:window/kitty/Editor", role: "window", name: "Editor" },
+          { id: "el-save", role: "button", name: "Save", bounds: { x: 200, y: 100, width: 60, height: 24 } },
+        ],
+      })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", target: "cua:window/kitty/Editor/3/button/Minimize/1", observationId: "obs-1" }),
+      )
+      expect((result.metadata as { success?: boolean }).success).toBe(false)
+      expect((result.metadata as { refused?: boolean }).refused).toBe(true)
+      expect((result.metadata as { error?: { code?: string } }).error?.code).toBe("target_stale")
+      expect(result.output).toContain("obs-1")
+      expect(result.output).toContain("computer_snapshot")
+      expect(mock.urls.some((url) => url.endsWith("/actions"))).toBe(false)
+      expect(mock.asked).toHaveLength(0)
+    }),
+  )
+
+  it.instance("resolves a ref against the newest observation when no observationId is given", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-12" })
+      yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", target: "cua:window/kitty/Editor/3/button/Minimize/1" }),
+      )
+      expect(mock.asked).toHaveLength(1)
+      expect(actionBodies()[0].target).toEqual({
+        elementId: "cua:window/kitty/Editor/3/button/Minimize/1",
+      })
+    }),
+  )
+
+  it.instance("fails a ref when no observation can be read", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        req.url.endsWith("/observe")
+          ? respond(req, { ok: true, result: { success: true } })
+          : respond(req, { ok: false })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", target: "cua:window/kitty/Editor/3/button/Minimize/1" }),
+      )
+      expect((result.metadata as { refused?: boolean }).refused).toBe(true)
+      expect((result.metadata as { error?: { code?: string } }).error?.code).toBe("observation_unavailable")
+      expect(result.output).toContain("computer_snapshot")
+      expect(mock.urls.some((url) => url.endsWith("/actions"))).toBe(false)
+    }),
+  )
+
+  it.instance("refuses a low-confidence query instead of clicking a guess", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-3" })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", query: "window", observationId: "obs-3" }),
+      )
+      expect((result.metadata as { refused?: boolean }).refused).toBe(true)
+      expect((result.metadata as { error?: { code?: string } }).error?.code).toBe("target_not_found")
+      expect(result.output).toContain('searched "window"')
+      expect(result.output).toContain("obs-3")
+      expect(result.output).toContain("0.6 floor")
+      expect(mock.urls.some((url) => url.endsWith("/actions"))).toBe(false)
+    }),
+  )
+
+  it.instance("refuses raw pixels unless the surface is a canvas or coordinates are allowed", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-4" })
+      const refused = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", x: 500, y: 500 }),
+      )
+      expect((refused.metadata as { refused?: boolean }).refused).toBe(true)
+      expect((refused.metadata as { error?: { code?: string } }).error?.code).toBe("coordinates_required")
+      expect(refused.output).toContain('surface: "canvas"')
+      expect(mock.urls.some((url) => url.endsWith("/actions"))).toBe(false)
+
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-4" })
+      const onControl = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", x: 210, y: 112, allowCoordinates: true }),
+      )
+      expect((onControl.metadata as { error?: { code?: string } }).error?.code).toBe("coordinate_on_control")
+      expect(onControl.output).toContain("ref=el-save")
+      expect(mock.urls.some((url) => url.endsWith("/actions"))).toBe(false)
+
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-4" })
+      const canvas = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", x: 500, y: 500, surface: "canvas" }),
+      )
+      expect((canvas.metadata as { refused?: boolean }).refused).toBeUndefined()
+      expect(actionBodies()[0]).toMatchObject({ x: 500, y: 500 })
+
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-4" })
+      const declared = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", x: 500, y: 500, surface: true }),
+      )
+      expect((declared.metadata as { refused?: boolean }).refused).toBeUndefined()
+      expect(actionBodies()[0]).toMatchObject({ x: 500, y: 500 })
+
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-4" })
+      const empty = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", x: 500, y: 500, allowCoordinates: true }),
+      )
+      expect((empty.metadata as { refused?: boolean }).refused).toBeUndefined()
+      expect(actionBodies()[0]).toMatchObject({ x: 500, y: 500 })
+    }),
+  )
+
+  it.instance("reports the aim point it resolved for the target", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-5" })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", target: "el-save", observationId: "obs-5" }),
+      )
+      expect(result.metadata).toMatchObject({ aim: { x: 230, y: 112, strategy: "control-center" } })
+      expect(result.output).toContain("aim: 230,112 (control-center)")
+      expect(result.output).toContain('resolved: button "Save" ref=el-save')
+
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-5" })
+      const queried = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", query: "Save", observationId: "obs-5" }),
+      )
+      expect(queried.metadata).toMatchObject({ aim: { x: 230, y: 112, strategy: "control-center" } })
+      expect(queried.output).toContain("aim: 230,112 (control-center)")
     }),
   )
 
@@ -620,6 +824,85 @@ describe("computer tool execution", () => {
       expect(mock.asked[0].always).toContain("do:browser_click:*")
       expect(mock.asked[0].always).toContain("do:run_command:*")
       expect(mock.asked[0].always).not.toContain("*")
+    }),
+  )
+
+  it.instance("binds all ref steps to one cached observation and reports aim", () =>
+    Effect.gen(function* () {
+      resetMock()
+      const observationId = `obs-do-${crypto.randomUUID()}`
+      const ref = `cua:button/save@g${Date.now()}`
+      const observation = rememberObservation("test-computer", "*\n*", observationId, [], [
+        { id: ref, role: "button", name: "Save", actions: ["click"], bounds: { x: 10, y: 20, width: 80, height: 24 } },
+      ])
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          result: {
+            success: true,
+            completed: 1,
+            total: 1,
+            message: "Completed 1 of 1 step(s).",
+            steps: [{
+              index: 0,
+              action: "click",
+              success: true,
+              verified: true,
+              verification: { status: "verified", method: "state-delta" },
+              aim: { x: 50, y: 32, strategy: "bounds-center" },
+              warnings: ["aim strategy bounds-center is a guess"],
+              message: "Clicked Save.",
+            }],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execDo({
+          observationId,
+          steps: [{ action: "click", target: ref }],
+        }),
+      )
+      const body = mock.bodies[0]!
+      const step = (body.steps as Array<Record<string, unknown>>)[0]!
+      expect(body.observationId).toBe(observationId)
+      expect(body.resumeFrom).toBeUndefined()
+      expect((step.target as Record<string, unknown>).observationId).toBe(observationId)
+      expect((step.target as Record<string, unknown>).generation).toBe(observation.generation)
+      expect(result.output).toContain("aim: 50,32 (bounds-center)")
+      expect(result.output).toContain("aim strategy bounds-center is a guess")
+      expect(result.metadata.success).toBe(true)
+    }),
+  )
+
+  it.instance("refuses mixed-observation plans before permission or request", () =>
+    Effect.gen(function* () {
+      resetMock()
+      const exit = yield* Effect.exit(withEnv({ computerId: "test-computer" }, () =>
+        execDo({
+          steps: [
+            { action: "click", target: "ref-one", observationId: "obs-one" },
+            { action: "click", target: "ref-two", observationId: "obs-two" },
+          ],
+        }),
+      ))
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(Cause.pretty(exit.cause)).toContain("one observationId")
+      expect(mock.asked).toHaveLength(0)
+      expect(mock.bodies).toHaveLength(0)
+    }),
+  )
+
+  it.instance("refuses a plan whose target is absent from its cached observation", () =>
+    Effect.gen(function* () {
+      resetMock()
+      const observationId = `obs-do-missing-${crypto.randomUUID()}`
+      rememberObservation("test-computer", "*\n*", observationId, [], [{ id: "cua:button/other@g1", role: "button" }])
+      const exit = yield* Effect.exit(withEnv({ computerId: "test-computer" }, () =>
+        execDo({ observationId, steps: [{ action: "click", target: "cua:button/save@g1" }] }),
+      ))
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(Cause.pretty(exit.cause)).toContain("not in observation")
+      expect(mock.asked).toHaveLength(0)
+      expect(mock.bodies).toHaveLength(0)
     }),
   )
 
@@ -1189,9 +1472,286 @@ describe("computer tool execution", () => {
           },
         })
       const result = yield* withEnv({ computerId: "test-computer" }, () => execObserve({}))
-      expect(result.output).toContain('- "Editor" (?)')
+      expect(result.output).toContain('1. soffice — "Editor"')
+      expect(result.output).toContain('- button "Save" ref=el-1')
       expect(result.output).not.toContain("[object Object]")
       expect(result.output).not.toContain("applications:")
+    }),
+  )
+
+  it.instance("orders the focused window first and actionable controls ahead of inert text", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-20",
+            elements: [
+              {
+                id: "w-panel",
+                role: "window",
+                name: "Panel",
+                metadata: { application: "panel" },
+                bounds: { x: 0, y: 900, width: 1920, height: 100 },
+              },
+              {
+                id: "w-main",
+                role: "window",
+                name: "Editor",
+                states: ["focused"],
+                metadata: { application: "soffice" },
+                bounds: { x: 0, y: 0, width: 1900, height: 800 },
+              },
+              {
+                id: "el-title",
+                role: "label",
+                name: "Untitled",
+                bounds: { x: 10, y: 10, width: 200, height: 20 },
+                metadata: { application: "soffice" },
+              },
+              {
+                id: "el-save",
+                role: "button",
+                name: "Save",
+                states: ["enabled"],
+                actions: ["click"],
+                bounds: { x: 200, y: 100, width: 60, height: 24 },
+                metadata: { application: "soffice" },
+              },
+              {
+                id: "el-name",
+                role: "textbox",
+                name: "Name",
+                states: ["enabled", "focused"],
+                actions: ["set-value"],
+                bounds: { x: 10, y: 100, width: 150, height: 24 },
+                metadata: { application: "soffice" },
+              },
+              {
+                id: "el-reload",
+                role: "button",
+                name: "Reload",
+                states: ["enabled"],
+                actions: ["click"],
+                bounds: { x: 1000, y: 100, width: 60, height: 24 },
+                metadata: { application: "panel" },
+              },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execObserve({ focusFirst: false }))
+      const lines = result.output.split("\n")
+      const editor = lines.findIndex((line) => line.includes('"Editor"'))
+      const panel = lines.findIndex((line) => line.includes('"Panel"'))
+      const body = lines.slice(editor)
+      const name = body.findIndex((line) => line.includes("ref=el-name"))
+      const save = body.findIndex((line) => line.includes("ref=el-save"))
+      const title = body.findIndex((line) => line.includes("ref=el-title"))
+      expect(lines[editor]).toBe('1. soffice — "Editor" [focused] @0,0 1900x800 ref=w-main')
+      expect(lines[panel]).toBe('2. panel — "Panel" @0,900 1920x100 ref=w-panel')
+      expect(editor).toBeLessThan(panel)
+      // Actionable first, then reading order inside that group, inert text last
+      // even though the label sits higher on screen.
+      expect(name).toBeLessThan(save)
+      expect(save).toBeLessThan(title)
+      expect(body[name]).toBe('  - textbox "Name" ref=el-name @22,112 [enabled, focused] actions=set-value')
+      expect(body[save]).toBe('  - button "Save" ref=el-save @230,112 [enabled] actions=click')
+      expect(body[title]).toBe('  - label "Untitled" ref=el-title @110,20 (bounds-center)')
+      expect(body[panel - editor]).toBe('2. panel — "Panel" @0,900 1920x100 ref=w-panel')
+      expect(body[panel - editor + 1]).toBe('  - button "Reload" ref=el-reload @1030,112 [enabled] actions=click')
+    }),
+  )
+
+  it.instance("focusFirst lists only the focused window and reports what it skipped", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-22",
+            elements: [
+              {
+                id: "w-editor",
+                role: "window",
+                name: "Editor",
+                states: ["focused"],
+                metadata: { application: "soffice" },
+              },
+              { id: "w-browser", role: "window", name: "Firefox", metadata: { application: "firefox" } },
+              {
+                id: "el-save",
+                role: "button",
+                name: "Save",
+                states: ["enabled", "focused"],
+                actions: ["click"],
+                metadata: { application: "soffice" },
+              },
+              {
+                id: "el-reload",
+                role: "button",
+                name: "Reload",
+                states: ["enabled"],
+                actions: ["click"],
+                metadata: { application: "firefox" },
+              },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execObserve({}))
+      expect(result.output).toContain('1. soffice — "Editor" [focused]')
+      expect(result.output).toContain('- button "Save" ref=el-save')
+      expect(result.output).not.toContain("w-browser")
+      expect(result.output).not.toContain("el-reload")
+      expect(result.output).toContain(
+        "… 1 control outside the focused window not shown — re-run with focusFirst: false, narrow with applicationId or window, or use computer_find",
+      )
+      expect(result.output).toContain('focused: button "Save" ref=el-save')
+    }),
+  )
+
+  it.instance("reports dropped controls per window instead of truncating silently", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-23",
+            elements: [
+              { id: "w1", role: "window", name: "Writer", states: ["focused"], metadata: { application: "soffice" } },
+              ...Array.from({ length: 5 }, (_, index) => ({
+                id: `atspi:${index}`,
+                role: "button",
+                name: `Button ${index}`,
+                states: ["enabled"],
+                actions: ["click"],
+                metadata: { application: "soffice" },
+              })),
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execObserve({ limit: 2 }))
+      expect(result.output).toContain(
+        "… 3 elements omitted in this window — use computer_snapshot with limit/offset or computer_find by name",
+      )
+      expect(result.output).toContain("ref=atspi:0")
+      expect(result.output).not.toContain("ref=atspi:3")
+      expect(result.output).toContain("5 controls · 2 shown")
+      expect((result.metadata as { truncated?: boolean }).truncated).toBe(true)
+      expect((result.metadata as { dropped?: number }).dropped).toBe(3)
+    }),
+  )
+
+  it.instance("reports windows dropped by the window cap", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-24",
+            elements: Array.from({ length: CAPS.observeWindows + 1 }, (_, index) => ({
+              id: `w${index}`,
+              role: "window",
+              name: `Window ${index}`,
+              metadata: { application: `app${index}` },
+            })),
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execObserve({}))
+      expect(result.output).toContain("focus: no window reported focus — listing every window")
+      expect(result.output).toContain(
+        "… 1 window omitted — narrow with applicationId or window, or page with computer_snapshot limit/offset",
+      )
+      expect((result.metadata as { truncated?: boolean }).truncated).toBe(true)
+    }),
+  )
+
+  it.instance("groups controls under the window reference the backend reports", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-27",
+            elements: [
+              { id: "w1", role: "window", name: "Writer", states: ["focused"], metadata: { application: "soffice" } },
+              { id: "w2", role: "window", name: "Inbox", metadata: { application: "firefox" } },
+              { id: "w2/el-1", role: "button", name: "Compose", states: ["enabled"], actions: ["click"] },
+              {
+                id: "el-2",
+                role: "button",
+                name: "Save",
+                states: ["enabled"],
+                actions: ["click"],
+                metadata: { windowRef: "w1" },
+              },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execObserve({ focusFirst: false }))
+      const lines = result.output.split("\n")
+      const writer = lines.findIndex((line) => line.startsWith("1. soffice"))
+      const inbox = lines.findIndex((line) => line.startsWith("2. firefox"))
+      expect(writer).toBeGreaterThanOrEqual(0)
+      expect(inbox).toBeGreaterThan(writer)
+      expect(lines[writer + 1]).toBe('  - button "Save" ref=el-2 [enabled] actions=click')
+      expect(lines[inbox + 1]).toBe('  - button "Compose" ref=w2/el-1 [enabled] actions=click')
+    }),
+  )
+
+  it.instance("banners a degraded accessibility tree and points at computer_screenshot", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-25",
+            capabilities: { accessibility: "degraded" },
+            elements: [
+              { id: "w1", role: "window", name: "Editor", states: ["focused"], metadata: { application: "soffice" } },
+              {
+                id: "el-1",
+                role: "button",
+                name: "Save",
+                states: ["enabled"],
+                actions: ["click"],
+                metadata: { application: "soffice" },
+              },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execObserve({}))
+      expect(result.output.split("\n")[1]).toBe(
+        "accessibility: degraded — the accessibility tree is incomplete, so some controls are invisible in this list; confirm with computer_screenshot.",
+      )
+      expect(result.output).toContain("computer_screenshot")
+      expect((result.metadata as { accessibility?: string }).accessibility).toBe("degraded")
+    }),
+  )
+
+  it.instance("banners an unavailable accessibility tree", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-26",
+            capabilities: { accessibility: "unavailable" },
+            elements: [
+              { id: "w1", role: "window", name: "Editor", states: ["focused"], metadata: { application: "soffice" } },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execObserve({}))
+      expect(result.output).toContain(
+        "accessibility: unavailable — no accessibility tree is available; use computer_screenshot to see the screen.",
+      )
     }),
   )
 
@@ -1395,15 +1955,192 @@ describe("computer snapshot", () => {
           ok: true,
           observation: {
             id: "obs-11",
-            elements: [
-              { id: "atspi:1", role: "document", name: "Big", text: "x".repeat(CAPS.snapshotChars + 10) },
-            ],
+            elements: [{ id: "atspi:1", role: "document", name: "Big", text: "x".repeat(CAPS.snapshotChars + 10) }],
           },
         })
       const result = yield* withEnv({ computerId: "test-computer" }, () => execSnapshot({}))
       const parsed = JSON.parse(result.output.split("\n…")[0]) as { truncated?: boolean }
       expect(parsed.truncated).toBe(true)
       expect((result.metadata as { truncated?: boolean }).truncated).toBe(true)
+    }),
+  )
+
+  it.instance("precomputes an aim point on actionable elements and omits it on the rest", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-12",
+            elements: [
+              {
+                id: "atspi:1",
+                role: "button",
+                name: "Close",
+                actions: ["click"],
+                bounds: { x: 900, y: 10, width: 40, height: 20 },
+              },
+              {
+                id: "atspi:2",
+                role: "textfield",
+                name: "Command",
+                actions: ["focus", "set_value"],
+                bounds: { x: 10, y: 40, width: 800, height: 24 },
+              },
+              { id: "atspi:3", role: "label", name: "Status", bounds: { x: 3, y: 4, width: 50, height: 20 } },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execSnapshot({}))
+      const parsed = JSON.parse(result.output.split("\n…")[0]) as {
+        truncated?: boolean
+        elements?: Array<{ ref?: string; aim?: { x?: number; y?: number; strategy?: string } }>
+        warnings?: Array<string | { elementRef?: string; reason?: string }>
+      }
+      const byRef = new Map((parsed.elements ?? []).map((element) => [element.ref, element]))
+      expect(parsed.truncated).toBe(false)
+      expect(byRef.get("atspi:1")?.aim).toEqual({ x: 900, y: 20, strategy: "role-inset" })
+      expect(byRef.get("atspi:2")?.aim).toEqual({ x: 410, y: 52, strategy: "control-center" })
+      expect(byRef.get("atspi:3")?.aim).toBeUndefined()
+      expect(parsed.warnings).toEqual([])
+      expect((result.metadata as { warnings?: unknown[] }).warnings).toEqual([])
+    }),
+  )
+
+  it.instance("prefers a provider hint and a focus point over the role inset", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-13",
+            elements: [
+              {
+                id: "atspi:1",
+                role: "button",
+                name: "Hinted",
+                actions: ["click"],
+                bounds: { x: 0, y: 0, width: 100, height: 40 },
+                metadata: { aimHint: { x: 30, y: 12 } },
+              },
+              {
+                id: "atspi:2",
+                role: "slider",
+                name: "Volume",
+                actions: ["click"],
+                bounds: { x: 0, y: 50, width: 100, height: 20 },
+                focusPoint: { x: 40, y: 58 },
+              },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execSnapshot({}))
+      const parsed = JSON.parse(result.output.split("\n…")[0]) as {
+        elements?: Array<{ ref?: string; aim?: { x?: number; y?: number; strategy?: string } }>
+      }
+      expect(parsed.elements?.[0]?.aim).toEqual({ x: 30, y: 12, strategy: "provider-hint" })
+      expect(parsed.elements?.[1]?.aim).toEqual({ x: 40, y: 58, strategy: "focus-point" })
+    }),
+  )
+
+  it.instance("records a warning instead of silently center-clicking an unknown role", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-14",
+            elements: [
+              {
+                id: "atspi:1",
+                role: "unknown",
+                name: "Mystery",
+                actions: ["click"],
+                bounds: { x: 4, y: 6, width: 20, height: 10 },
+              },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execSnapshot({}))
+      const parsed = JSON.parse(result.output.split("\n…")[0]) as {
+        elements?: Array<{ aim?: { x?: number; y?: number; strategy?: string } }>
+        warnings?: Array<string | { elementRef?: string; reason?: string }>
+      }
+      expect(parsed.elements?.[0]?.aim).toEqual({ x: 14, y: 11, strategy: "bounds-center" })
+      expect(parsed.warnings).toEqual([{ elementRef: "atspi:1", reason: "center-guess" }])
+      expect((result.metadata as { warnings?: unknown[] }).warnings).toEqual([
+        { elementRef: "atspi:1", reason: "center-guess" },
+      ])
+    }),
+  )
+
+  it.instance("caps warnings at twenty and marks the snapshot truncated", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-15",
+            elements: Array.from({ length: 25 }, (_, index) => ({
+              id: `atspi:${index}`,
+              role: "unknown",
+              name: `Mystery ${index}`,
+              actions: ["click"],
+              bounds: { x: index, y: 0, width: 10, height: 10 },
+            })),
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execSnapshot({}))
+      const parsed = JSON.parse(result.output.split("\n…")[0]) as {
+        truncated?: boolean
+        elements?: Array<{ aim?: { strategy?: string } }>
+        warnings?: Array<string | { elementRef?: string; reason?: string }>
+      }
+      expect(parsed.warnings).toHaveLength(20)
+      expect(
+        parsed.warnings?.every((warning) => typeof warning !== "string" && warning.reason === "center-guess"),
+      ).toBe(true)
+      expect(parsed.truncated).toBe(true)
+      expect((result.metadata as { truncated?: boolean }).truncated).toBe(true)
+      expect((result.metadata as { warnings?: unknown[] }).warnings).toHaveLength(20)
+      expect(parsed.elements?.every((element) => element.aim?.strategy === "bounds-center")).toBe(true)
+    }),
+  )
+
+  it.instance("keeps the element cap while adding aim points", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          observation: {
+            id: "obs-16",
+            elements: Array.from({ length: CAPS.snapshotElements + 6 }, (_, index) => ({
+              id: `atspi:${index}`,
+              role: "button",
+              name: `Button ${index}`,
+              actions: ["click"],
+              bounds: { x: 0, y: 0, width: 10, height: 10 },
+            })),
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execSnapshot({}))
+      const parsed = JSON.parse(result.output.split("\n…")[0]) as {
+        totalElements?: number
+        returnedElements?: number
+        truncated?: boolean
+        elements?: Array<{ aim?: { strategy?: string } }>
+      }
+      expect(parsed.totalElements).toBe(CAPS.snapshotElements + 6)
+      expect(parsed.returnedElements).toBe(CAPS.snapshotElements)
+      expect(parsed.elements).toHaveLength(CAPS.snapshotElements)
+      expect(parsed.elements?.every((element) => element.aim?.strategy === "control-center")).toBe(true)
+      expect(parsed.truncated).toBe(true)
+      expect(result.output).toContain(`offset=${CAPS.snapshotElements}`)
     }),
   )
 })
@@ -1509,6 +2246,852 @@ describe("computer client errors", () => {
       const forbiddenMessage = Exit.isFailure(forbiddenExit) ? Cause.pretty(forbiddenExit.cause) : ""
       expect(forbiddenMessage).toContain("denied by policy")
       expect(forbiddenMessage).toContain("approve")
+    }),
+  )
+})
+
+describe("computer aim targets", () => {
+  it.instance("returns an aim strategy per candidate and rejects matches below the floor", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          result: {
+            observation: { id: "obs-30" },
+            matches: [
+              {
+                element: {
+                  id: "atspi:7.2",
+                  role: "close",
+                  name: "Close",
+                  states: ["enabled"],
+                  actions: ["click"],
+                  bounds: { x: 900, y: 10, width: 40, height: 20 },
+                },
+                reference: { elementId: "atspi:7.2", observationId: "obs-30" },
+                score: 0.93,
+              },
+              {
+                element: {
+                  id: "atspi:7.9",
+                  role: "mystery",
+                  name: "Mystery",
+                  actions: ["click"],
+                  bounds: { x: 4, y: 6, width: 20, height: 10 },
+                },
+                score: 0.61,
+              },
+              { element: { id: "atspi:9.9", role: "label", name: "Export status" }, score: 0.3 },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execFind({ query: "Close" }))
+      const lines = result.output.split("\n")
+      expect(lines[0]).toBe(
+        '1. close "Close" id=atspi:7.2 aim=935,20 strategy=role-inset [enabled] actions=click confidence=0.93 observation=obs-30',
+      )
+      expect(lines[1]).toContain("aim=14,11 strategy=bounds-center (guess)")
+      expect(result.output).toContain("do not trust that point")
+      expect(result.output).toContain("1 candidate rejected for scoring below the 0.6 confidence floor")
+      expect(result.output).not.toContain("atspi:9.9")
+      expect(result.metadata).toMatchObject({
+        matches: 2,
+        rejected: 1,
+        best: { id: "atspi:7.2", aim: { x: 935, y: 20, strategy: "role-inset" } },
+      })
+    }),
+  )
+
+  it.instance("prefers a provider hint and a focus point over the role inset in find results", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          result: {
+            matches: [
+              {
+                element: {
+                  id: "atspi:1",
+                  role: "button",
+                  name: "Hinted",
+                  actions: ["click"],
+                  bounds: { x: 0, y: 0, width: 100, height: 40 },
+                  metadata: { aimHint: { x: 30, y: 12 } },
+                },
+                score: 0.7,
+              },
+              {
+                element: {
+                  id: "atspi:2",
+                  role: "slider",
+                  name: "Volume",
+                  actions: ["click"],
+                  bounds: { x: 0, y: 50, width: 100, height: 20 },
+                  focusPoint: { x: 40, y: 58 },
+                },
+                score: 0.66,
+              },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execFind({ query: "controls" }))
+      expect(result.output).toContain("aim=30,12 strategy=provider-hint")
+      expect(result.output).toContain("aim=40,58 strategy=focus-point")
+      expect((result.metadata as { rejected?: number }).rejected).toBe(0)
+    }),
+  )
+
+  it.instance("refuses a find whose only candidate scores below the floor and counts it", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          result: {
+            matches: [
+              { element: { id: "atspi:1", role: "label", name: "Export status" }, score: 0.42 },
+              { element: { id: "atspi:2", role: "label", name: "Exported" }, score: 0.2 },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execFind({ query: "Export" }))
+      expect(result.title).toBe("No confident match for Export")
+      expect(result.output).toContain("2 candidates were rejected for scoring below the floor")
+      expect(result.output).not.toContain("aim=")
+      expect(result.metadata).toMatchObject({ matches: 0, rejected: 2 })
+    }),
+  )
+
+  it.instance("resolves a query read by ref and reports the parent chain and aim", () =>
+    Effect.gen(function* () {
+      resetMock()
+      const commandRef = "cua:window/kitty/OC | Quick hello/3"
+      mock.handler = (req) =>
+        req.url.endsWith("/find")
+          ? respond(req, {
+              ok: true,
+              result: {
+                observation: { id: "obs-31" },
+                matches: [
+                  {
+                    element: {
+                      id: commandRef,
+                      role: "textfield",
+                      name: "Command",
+                      states: ["enabled", "focused"],
+                      actions: ["set_value"],
+                      parentId: "cua:window/kitty/OC | Quick hello/2",
+                      bounds: { x: 10, y: 40, width: 800, height: 24 },
+                    },
+                    reference: { elementId: commandRef, observationId: "obs-31" },
+                    score: 0.91,
+                  },
+                  {
+                    element: {
+                      id: "cua:window/kitty/OC | Quick hello/8",
+                      role: "unknown",
+                      name: "Mystery",
+                      bounds: { x: 4, y: 6, width: 20, height: 10 },
+                    },
+                    score: 0.55,
+                  },
+                ],
+              },
+            })
+          : respond(req, { ok: true, result: { success: true, text: "ls", length: 2, hash: "hash-1" } })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execRead({ query: "Command" }))
+      expect(mock.bodies[0]).toMatchObject({ query: "Command" })
+      expect(mock.bodies[1]).toMatchObject({ action: "read_text", target: { elementId: commandRef } })
+      expect(result.output).toBe(
+        `read textfield "Command" ref=${commandRef} parent=cua:window/kitty/OC | Quick hello/2 aim=410,52 strategy=control-center confidence=0.91\nls\n\n[length=2 offset=0 returned=2 hash=hash-1 truncated=false]\n1 candidate scored below the 0.6 confidence floor and was not read.`,
+      )
+      expect(result.metadata).toMatchObject({
+        success: true,
+        ref: commandRef,
+        parentRef: "cua:window/kitty/OC | Quick hello/2",
+        aim: { x: 410, y: 52, strategy: "control-center" },
+        rejected: 1,
+      })
+    }),
+  )
+
+  it.instance("labels a bounds-center read surface as a guess instead of a precise point", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        req.url.endsWith("/find")
+          ? respond(req, {
+              ok: true,
+              result: {
+                matches: [
+                  {
+                    element: {
+                      id: "atspi:4",
+                      role: "canvas",
+                      name: "Plot",
+                      actions: ["click"],
+                      bounds: { x: 8, y: 6, width: 20, height: 10 },
+                    },
+                    score: 0.7,
+                  },
+                ],
+              },
+            })
+          : respond(req, { ok: true, result: { success: true, text: "42", length: 2 } })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execRead({ query: "Plot" }))
+      expect(result.output).toContain("aim=18,11 strategy=bounds-center — guess: do not trust this point")
+      expect(result.output).toContain("re-resolve it by ref before acting on it")
+    }),
+  )
+
+  it.instance("refuses a query read whose candidates all score below the floor", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, { ok: true, result: { matches: [{ element: { id: "atspi:1", role: "label" }, score: 0.31 }] } })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execRead({ query: "document text" }))
+      expect(result.title).toBe("No confident surface for document text")
+      expect(result.output).toContain("1 candidate was rejected for scoring below the floor")
+      expect(mock.bodies).toHaveLength(1)
+      expect(result.metadata).toMatchObject({ success: false, rejected: 1 })
+    }),
+  )
+
+  it.instance("refuses an ambiguous query read instead of reading the top hit", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          result: {
+            matches: [
+              { element: { id: "atspi:1", role: "button", name: "Save" }, score: 0.9 },
+              { element: { id: "atspi:2", role: "button", name: "Save" }, score: 0.86 },
+            ],
+          },
+        })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execRead({ query: "Save" }))
+      expect(result.title).toBe('Read of "Save" is ambiguous')
+      expect(result.output).toContain('"Save" matched more than one surface')
+      expect(result.output).toContain("atspi:1")
+      expect(mock.bodies).toHaveLength(1)
+      expect((result.metadata as { success?: boolean }).success).toBe(false)
+    }),
+  )
+
+  it.instance("reports the aim, window, and parent ref for one inspected control", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        req.url.endsWith("/observe")
+          ? respond(req, {
+              ok: true,
+              observation: {
+                id: "obs-32",
+                elements: [
+                  {
+                    id: "win_1",
+                    role: "window",
+                    name: "Writer",
+                    states: ["focused"],
+                    bounds: { x: 0, y: 0, width: 800, height: 600 },
+                    metadata: { application: "soffice" },
+                  },
+                  {
+                    id: "atspi:2",
+                    role: "panel",
+                    name: "Toolbar",
+                    parentId: "win_1",
+                    metadata: { windowRef: "win_1" },
+                  },
+                  {
+                    id: "atspi:3",
+                    role: "close",
+                    name: "Close",
+                    parentId: "atspi:2",
+                    bounds: { x: 900, y: 10, width: 40, height: 20 },
+                    metadata: { windowRef: "win_1" },
+                  },
+                ],
+              },
+            })
+          : respond(req, {
+              ok: true,
+              result: {
+                success: true,
+                message: 'Inspected button "Close".',
+                metadata: {
+                  element: {
+                    id: "atspi:3",
+                    role: "close",
+                    name: "Close",
+                    application: "soffice",
+                    states: ["enabled"],
+                    actions: ["click"],
+                    bounds: { x: 900, y: 10, width: 40, height: 20 },
+                    center: { x: 920, y: 20 },
+                  },
+                  ancestors: [
+                    { id: "atspi:2", role: "panel", name: "Toolbar" },
+                    { id: "win_1", role: "window", name: "Writer" },
+                  ],
+                  children: [],
+                },
+              },
+            })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execInspect({ target: "atspi:3" }))
+      expect(result.output).toContain("bounds: x=900 y=10 40x20 center: 920,20")
+      expect(result.output).toContain("aim: 935,20 (role-inset)")
+      expect(result.output).not.toContain("guess")
+      expect(result.output).toContain("parent: atspi:2")
+      expect(result.output).toContain('window: "Writer" (soffice) @0,0 800x600 ref=win_1')
+      expect(result.output).not.toContain("risk:")
+      expect(result.output).toContain('ancestors: panel "Toolbar" > window "Writer"')
+      expect(result.metadata).toMatchObject({
+        success: true,
+        aim: { x: 935, y: 20, strategy: "role-inset" },
+        parentRef: "atspi:2",
+        window: { ref: "win_1", title: "Writer", application: "soffice" },
+      })
+    }),
+  )
+
+  it.instance("labels a bounds-center inspect aim as a guess and reports the risk", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        req.url.endsWith("/observe")
+          ? respond(req, {
+              ok: true,
+              observation: {
+                id: "obs-33",
+                elements: [
+                  { id: "w1", role: "window", name: "Writer", states: ["focused"] },
+                  { id: "atspi:5", role: "unknown", name: "Mystery", bounds: { x: 4, y: 6, width: 20, height: 10 } },
+                ],
+              },
+            })
+          : respond(req, {
+              ok: true,
+              result: {
+                success: true,
+                metadata: {
+                  element: {
+                    id: "atspi:5",
+                    role: "unknown",
+                    name: "Mystery",
+                    actions: ["click"],
+                    bounds: { x: 4, y: 6, width: 20, height: 10 },
+                  },
+                },
+              },
+            })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execInspect({ target: "atspi:5" }))
+      expect(result.output).toContain("aim: 14,11 (bounds-center) — guess: do not trust this point, re-resolve")
+      expect(result.output).toContain('risk: Aim (14, 11) resolved with strategy "bounds-center"')
+      expect(result.metadata).toMatchObject({ aim: { x: 14, y: 11, strategy: "bounds-center" } })
+    }),
+  )
+
+  it.instance("keeps the inspect answer when the window context cannot be observed", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        req.url.endsWith("/observe")
+          ? Effect.die(new Error("observation unavailable"))
+          : respond(req, {
+              ok: true,
+              result: {
+                success: true,
+                metadata: {
+                  element: {
+                    id: "atspi:6",
+                    role: "button",
+                    name: "Save",
+                    bounds: { x: 10, y: 10, width: 60, height: 24 },
+                  },
+                },
+              },
+            })
+      const result = yield* withEnv({ computerId: "test-computer" }, () => execInspect({ target: "atspi:6" }))
+      expect(result.output).toContain('button "Save"')
+      expect(result.output).toContain("aim: 40,22 (control-center)")
+      expect(result.output).not.toContain("window:")
+      expect(result.output).not.toContain("risk:")
+    }),
+  )
+})
+
+// Visual grounding answers over HTTP: the analyze response carries the decision,
+// the result, the analysis context (screenshot + platform) and, when the action
+// ran, the execution record with its post-action confirmation.
+function visualResponder(options: {
+  result: Record<string, unknown>
+  execution?: Record<string, unknown>
+  context?: Record<string, unknown>
+  decision?: Record<string, unknown>
+  windows?: Record<string, unknown>[]
+}) {
+  return (req: MockRequest) => {
+    if (req.url.endsWith("/v1/computer-use/analyze"))
+      return respond(req, {
+        ok: options.result.success !== false,
+        analysis: {
+          decision: options.decision ?? { provider: "ui-tars", local: true },
+          result: options.result,
+          fallbacks: 0,
+          ...(options.context === undefined ? {} : { context: options.context }),
+        },
+        ...(options.execution === undefined ? {} : { execution: options.execution }),
+      })
+    if (req.url.endsWith("/observe"))
+      return respond(req, { ok: true, observation: { id: "obs-visual", elements: options.windows ?? [] } })
+    return respond(req, { ok: true, result: { success: true } })
+  }
+}
+
+const VISUAL_WINDOW = {
+  role: "window",
+  name: "Editor",
+  bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+}
+
+const VISUAL_IMAGE_CONTEXT = { platform: "linux", image: { width: 1920, height: 1080 } }
+
+describe("computer visual grounding", () => {
+  it.instance("reports the coordinate space and scale the vision point was produced in", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = visualResponder({
+        windows: [VISUAL_WINDOW],
+        context: VISUAL_IMAGE_CONTEXT,
+        result: {
+          success: true,
+          provider: "ui-tars",
+          confidence: 0.82,
+          action: { type: "click", target: { x: 400, y: 300, label: "Export button" } },
+          evidence: ["model output: click(start_box='208,278')"],
+        },
+      })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execVisual({ operation: "click", target: "the Export button", execute: false }),
+      )
+      expect(result.output).toContain("coordinates: absolute logical screen pixels")
+      expect(result.output).toContain("normalized-1000")
+      expect(result.output).toContain("scale 1000")
+      expect(result.output).toContain("1920x1080")
+      expect(result.metadata).toMatchObject({
+        coordinate: {
+          space: "absolute",
+          modelSpace: "normalized-1000",
+          scale: 1000,
+          screenshot: { width: 1920, height: 1080 },
+        },
+      })
+
+      resetMock()
+      mock.handler = visualResponder({
+        windows: [VISUAL_WINDOW],
+        context: VISUAL_IMAGE_CONTEXT,
+        result: {
+          success: true,
+          provider: "ui-tars",
+          confidence: 0.82,
+          action: { type: "click", target: { x: 200, y: 150 } },
+          evidence: [
+            "retina: screenshot 1920x1080 to logical 960x540",
+            "calibration: applied display profile to visual point",
+          ],
+        },
+      })
+      const converted = yield* withEnv({ computerId: "test-computer" }, () =>
+        execVisual({ operation: "click", target: "the Export button", execute: false }),
+      )
+      expect(converted.output).toContain("retina-converted to logical 960x540")
+      expect(converted.output).toContain("calibration profile")
+      expect(converted.metadata).toMatchObject({
+        coordinate: { logical: { width: 960, height: 540 }, calibrated: true },
+      })
+    }),
+  )
+
+  it.instance("reports the coordinate space as unverifiable when no screenshot dimensions arrive", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = visualResponder({
+        windows: [VISUAL_WINDOW],
+        result: {
+          success: true,
+          provider: "ui-tars",
+          confidence: 0.5,
+          action: { type: "click", target: { x: 400, y: 300 } },
+        },
+      })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execVisual({ operation: "click", target: "the Export button", execute: false }),
+      )
+      expect(result.output).toContain("no screenshot dimensions")
+      expect((result.metadata as { coordinate?: { screenshot?: unknown } }).coordinate?.screenshot).toBeUndefined()
+    }),
+  )
+
+  it.instance("refuses to ground onto a window title bar and reports the strip that rejected the point", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = visualResponder({
+        windows: [VISUAL_WINDOW],
+        context: VISUAL_IMAGE_CONTEXT,
+        result: {
+          success: true,
+          provider: "ui-tars",
+          confidence: 0.93,
+          action: { type: "click", target: { x: 1843, y: 45, label: "Close" } },
+        },
+      })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execVisual({ operation: "click", target: "the Close button", execute: false }),
+      )
+      expect(result.title).toBe("Refused visual click (title_bar_ban)")
+      expect((result.metadata as { refused?: boolean }).refused).toBe(true)
+      expect((result.metadata as { error?: { code?: string } }).error?.code).toBe("title_bar_ban")
+      expect(result.output).toContain("(1843, 45)")
+      expect(result.output).toContain('window "Editor"')
+      expect(result.output).toContain("top 120px strip")
+      expect(result.output).toContain("no click landed")
+      expect((result.metadata as { aim?: unknown }).aim).toBeUndefined()
+      expect(result.output).not.toContain("aim:")
+    }),
+  )
+
+  it.instance("discloses the execution when a title-bar point already landed and scales the strip to the window", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = visualResponder({
+        windows: [{ role: "window", name: "Panel", bounds: { x: 0, y: 800, width: 1280, height: 280 } }],
+        context: { platform: "linux", image: { width: 1280, height: 1080 } },
+        result: {
+          success: true,
+          provider: "ui-tars",
+          confidence: 0.71,
+          action: { type: "click", target: { x: 1200, y: 830 } },
+        },
+        execution: { outcome: { result: { success: true, message: "Clicked at 1200,830." } }, verified: false },
+      })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execVisual({ operation: "click", target: "the window menu" }),
+      )
+      expect((result.metadata as { refused?: boolean }).refused).toBe(true)
+      expect((result.metadata as { executed?: boolean }).executed).toBe(true)
+      expect(result.output).toContain("top 48px strip")
+      expect(result.output).toContain("already executed")
+      expect(result.output).toContain("re-observe with computer_observe")
+    }),
+  )
+
+  it.instance("keeps a point below the title strip and names the vision-ground aim when the click lands", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = visualResponder({
+        windows: [VISUAL_WINDOW],
+        context: VISUAL_IMAGE_CONTEXT,
+        result: {
+          success: true,
+          provider: "ui-tars",
+          confidence: 0.8,
+          action: { type: "click", target: { x: 410, y: 312, label: "Export" } },
+        },
+        execution: { outcome: { result: { success: true, message: "Clicked." } }, verified: false },
+      })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execVisual({ operation: "click", target: "the Export button" }),
+      )
+      expect((result.metadata as { refused?: boolean }).refused).toBeUndefined()
+      expect(result.metadata).toMatchObject({
+        aim: { x: 410, y: 312, strategy: "vision-ground" },
+        executed: true,
+      })
+      expect(result.output).toContain("aim: 410,312 (vision-ground)")
+      expect(result.output).toContain("not a resolved control")
+    }),
+  )
+
+  it.instance("never marks a vision result verified on the model's confidence or the execution record", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = visualResponder({
+        windows: [VISUAL_WINDOW],
+        context: VISUAL_IMAGE_CONTEXT,
+        result: {
+          success: true,
+          provider: "ui-tars",
+          confidence: 0.99,
+          action: { type: "click", target: { x: 410, y: 312 } },
+        },
+        execution: {
+          outcome: {
+            result: { success: true, message: "Clicked.", verification: { verified: true, status: "verified" } },
+          },
+          verified: true,
+          confirmation: { status: "verified", method: "execution-verification" },
+        },
+      })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execVisual({ operation: "click", target: "the Export button" }),
+      )
+      expect((result.metadata as { verified?: boolean }).verified).toBe(false)
+      expect((result.metadata as { verification?: string }).verification).toBe("not_verified")
+      expect((result.metadata as { verificationMethod?: string }).verificationMethod).toBe("execution-verification")
+      expect(result.output).toContain("Not verified (execution-verification)")
+      expect(result.output).toContain("computer_observe")
+      expect(result.output).not.toContain("Verified by observation")
+    }),
+  )
+
+  it.instance("reports verified only when a post-action observation confirms the effect", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = visualResponder({
+        windows: [VISUAL_WINDOW],
+        context: VISUAL_IMAGE_CONTEXT,
+        result: {
+          success: true,
+          provider: "ui-tars",
+          confidence: 0.9,
+          action: { type: "click", target: { x: 410, y: 312 } },
+        },
+        execution: {
+          outcome: { result: { success: true, message: "Clicked." }, verified: true },
+          verified: true,
+          confirmation: {
+            status: "verified",
+            method: "element-state-change",
+            observed: { ref: "atspi:3", states: ["focused"] },
+          },
+        },
+      })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execVisual({ operation: "click", target: "the Export button" }),
+      )
+      expect((result.metadata as { verified?: boolean }).verified).toBe(true)
+      expect((result.metadata as { verification?: string }).verification).toBe("verified")
+      expect(result.output).toContain("Verified by post-action observation (element-state-change)")
+      expect(result.output).toContain("ref atspi:3")
+    }),
+  )
+
+  it.instance("leaves a proposal unverified and still labels its aim as vision-ground", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = visualResponder({
+        windows: [VISUAL_WINDOW],
+        context: VISUAL_IMAGE_CONTEXT,
+        result: {
+          success: true,
+          provider: "ui-tars",
+          confidence: 0.62,
+          action: { type: "click", target: { x: 410, y: 312 } },
+        },
+      })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execVisual({ operation: "click", target: "the Export button", execute: false }),
+      )
+      expect(result.output).toContain("Proposal only")
+      expect((result.metadata as { verified?: boolean }).verified).toBe(false)
+      expect((result.metadata as { verificationMethod?: string }).verificationMethod).toBe("not_executed")
+      expect(result.metadata).toMatchObject({ aim: { x: 410, y: 312, strategy: "vision-ground" } })
+    }),
+  )
+
+  it.instance("says the title-strip check could not run when no window geometry is readable", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = (req) =>
+        req.url.endsWith("/observe")
+          ? Effect.die(new Error("observation unavailable"))
+          : visualResponder({
+              windows: [VISUAL_WINDOW],
+              context: VISUAL_IMAGE_CONTEXT,
+              result: {
+                success: true,
+                provider: "ui-tars",
+                confidence: 0.75,
+                action: { type: "click", target: { x: 1843, y: 45 } },
+              },
+            })(req)
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execVisual({ operation: "click", target: "the Close button", execute: false }),
+      )
+      expect((result.metadata as { refused?: boolean }).refused).toBeUndefined()
+      expect(result.output).toContain("title-strip check could not run")
+    }),
+  )
+})
+
+// The session holds one tree per computer, so an identity is only ever
+// addressable on the computer whose tree it was read from. This file cannot run
+// switch_computer (it has no session service), so the other computer's tree is
+// registered the way a switch registers what the session read off it.
+const FOREIGN_COMPUTER = "computer-b"
+const FOREIGN_OBSERVATION = "obs-computer-b"
+const FOREIGN_ELEMENTS = [
+  { id: "cua:window/kitty/OC | Quick hello/2/button/Close/1", role: "button", name: "Close" },
+  { id: "atspi:9001", role: "button", name: "Quit" },
+]
+
+function holdOtherComputerTree() {
+  recordObservation(FOREIGN_COMPUTER, FOREIGN_OBSERVATION, FOREIGN_ELEMENTS)
+}
+
+function errorCode(metadata: Record<string, unknown>): string | undefined {
+  return (metadata.error as { code?: string } | undefined)?.code
+}
+
+describe("computer cross-computer refusals", () => {
+  it.instance("refuses an act whose ref or observation came from another computer and names both", () =>
+    Effect.gen(function* () {
+      resetMock()
+      holdOtherComputerTree()
+      mock.handler = actResponder({ observationId: "obs-here" })
+      // The ref and the observation it names both come from the other computer,
+      // so acting on this one would act on that machine's control.
+      const named = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", target: "atspi:9001", observationId: FOREIGN_OBSERVATION }),
+      )
+      expect((named.metadata as { refused?: boolean }).refused).toBe(true)
+      expect(errorCode(named.metadata)).toBe("identity_not_for_this_computer")
+      expect(named.output).toContain(FOREIGN_OBSERVATION)
+      expect(named.output).toContain(`computer ${FOREIGN_COMPUTER}`)
+      expect(named.output).toContain("computer test-computer")
+      expect(mock.asked).toHaveLength(0)
+      expect(actionBodies()).toHaveLength(0)
+      // A bare ref only the other computer's tree carries is refused the same way.
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-here" })
+      const bare = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", target: "atspi:9001" }),
+      )
+      expect((bare.metadata as { refused?: boolean }).refused).toBe(true)
+      expect(bare.output).toContain(`computer ${FOREIGN_COMPUTER}`)
+      expect(bare.output).toContain("computer test-computer")
+      expect(mock.asked).toHaveLength(0)
+      expect(actionBodies()).toHaveLength(0)
+    }),
+  )
+
+  it.instance("still resolves a same-computer ref against the newest observation", () =>
+    Effect.gen(function* () {
+      resetMock()
+      holdOtherComputerTree()
+      mock.handler = actResponder({ observationId: "obs-newest" })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", target: "cua:window/kitty/Editor/3/button/Minimize/1" }),
+      )
+      expect(mock.asked).toHaveLength(1)
+      expect((result.metadata as { refused?: boolean }).refused).toBeUndefined()
+      expect(result.metadata.success).toBe(true)
+      expect(actionBodies()[0].target).toEqual({
+        elementId: "cua:window/kitty/Editor/3/button/Minimize/1",
+      })
+    }),
+  )
+
+  it.instance("refuses an observation a switch invalidated instead of rebinding it", () =>
+    Effect.gen(function* () {
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-before-switch" })
+      yield* withEnv({ computerId: "test-computer" }, () => execAct({ action: "click", target: "atspi:1" }))
+      expect(invalidateObservations("test-computer")).toBeGreaterThan(0)
+      // The same computer is entered again through a fresh tree, so the ref that
+      // died with the switch is refused rather than matched into the new one.
+      resetMock()
+      mock.handler = actResponder({ observationId: "obs-after-switch" })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execAct({ action: "click", target: "atspi:1", observationId: "obs-before-switch" }),
+      )
+      expect((result.metadata as { refused?: boolean }).refused).toBe(true)
+      expect(result.output).toContain("invalidates")
+      expect(result.output).toContain("computer test-computer")
+      expect(actionBodies()).toHaveLength(0)
+    }),
+  )
+
+  it.instance("refuses a read whose target came from another computer and names both", () =>
+    Effect.gen(function* () {
+      resetMock()
+      holdOtherComputerTree()
+      mock.handler = (req) =>
+        respond(req, { ok: true, result: { success: true, text: "Quarterly report", length: 16 } })
+      const result = yield* withEnv({ computerId: "test-computer" }, () =>
+        execRead({ target: "atspi:9001", observationId: FOREIGN_OBSERVATION }),
+      )
+      expect(result.metadata.success).toBe(false)
+      expect((result.metadata as { refused?: boolean }).refused).toBe(true)
+      expect(errorCode(result.metadata)).toBe("identity_not_for_this_computer")
+      expect(result.output).toContain(`computer ${FOREIGN_COMPUTER}`)
+      expect(result.output).toContain("computer test-computer")
+      expect(mock.asked).toHaveLength(0)
+      expect(mock.bodies).toHaveLength(0)
+    }),
+  )
+
+  it.instance("refuses a find answered with another computer's observation and names both", () =>
+    Effect.gen(function* () {
+      resetMock()
+      holdOtherComputerTree()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          result: {
+            observation: { id: FOREIGN_OBSERVATION },
+            matches: [
+              {
+                element: {
+                  id: "atspi:9001",
+                  role: "button",
+                  name: "Quit",
+                  actions: ["click"],
+                  bounds: { x: 4, y: 6, width: 20, height: 10 },
+                },
+                reference: { elementId: "atspi:9001", observationId: FOREIGN_OBSERVATION },
+                score: 0.91,
+              },
+            ],
+          },
+        })
+      const foreign = yield* withEnv({ computerId: "test-computer" }, () => execFind({ query: "Quit" }))
+      expect((foreign.metadata as { refused?: boolean }).refused).toBe(true)
+      expect(foreign.output).toContain(`computer ${FOREIGN_COMPUTER}`)
+      expect(foreign.output).toContain("computer test-computer")
+      // The other computer's ref is never handed out as a target to act on.
+      expect(foreign.output).not.toContain("atspi:9001")
+      // This computer's own tree is still found.
+      resetMock()
+      mock.handler = (req) =>
+        respond(req, {
+          ok: true,
+          result: {
+            observation: { id: "obs-own-computer-find" },
+            matches: [
+              {
+                element: {
+                  id: "el-export",
+                  role: "button",
+                  name: "Export",
+                  actions: ["click"],
+                  bounds: { x: 270, y: 100, width: 60, height: 24 },
+                },
+                reference: { elementId: "el-export", observationId: "obs-own-computer-find" },
+                score: 0.93,
+              },
+            ],
+          },
+        })
+      const own = yield* withEnv({ computerId: "test-computer" }, () => execFind({ query: "Export" }))
+      expect((own.metadata as { refused?: boolean }).refused).toBeUndefined()
+      expect(own.metadata.matches).toBe(1)
+      expect(own.output).toContain("el-export")
     }),
   )
 })

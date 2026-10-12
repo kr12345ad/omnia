@@ -2,14 +2,15 @@ Full detail for one control, so you never have to guess.
 
 Returns everything the runtime knows about a control: role, name, description,
 text, value, states (enabled, focused, checked, expanded), available actions,
-exact screen bounds and pixel center, the owning application, its ancestor
-chain (which dialog or panel it lives in), and its children.
+exact screen bounds, the point to aim at with the strategy that produced it,
+the owning application, the window that holds it (title and bounds), the
+ancestor chain it lives in (which dialog, panel, or tab), and its children.
 
 Use it when:
 
 - a find returns several similar candidates and you need to tell them apart,
 - you are unsure whether a control is enabled, checked, or already focused,
-- you need the exact pixel to click when no semantic action exists,
+- a surface exposes no semantic action and no aim point of its own,
 - you want to confirm what a dialog contains before typing into it,
 - a previous act failed and you need to see what actually changed.
 
@@ -18,13 +19,43 @@ computer_observe) or query (the control by meaning, for example "Export
 button"), optional role to disambiguate, and optional observationId binding
 the target to the observation it came from.
 
-Reading the result: the ancestor chain answers "where does this live" (which
-window, dialog, tab, or panel), the children answer "what does it contain"
-(a combo box's options, a toolbar's buttons), states answer "can I use it
-right now" (a disabled control reports disabled: do not click it, find what
-enables it first), and actions answer "how may I use it" (prefer a named
-action such as invoke or set-text over a raw click; prefer set-text over
-typing into a field you can set).
+Reading the result: the aim line is the point to act on, with its strategy.
+control-center, focus-point, role-inset, and provider-hint all resolve the
+point from the control's own metadata. A strategy of bounds-center is a guess
+— the control exposed no focus point, no provider hint, and no role-specific
+point, so the point is only the centre of its bounding box: do not trust this
+point, re-resolve. When that happens the result also carries a risk line
+spelling out what is missing and what to do instead (resolve a ref, supply a
+focus point or aim hint, or ground with a screenshot cropped around the
+control). The window line names the window and its bounds so a ref is never
+acted on in the wrong place; the parent ref names its immediate container; the
+ancestor chain answers "where does this live" (which window, dialog, tab, or
+panel), the children answer "what does it contain" (a combo box's options, a
+toolbar's buttons), states answer "can I use it right now" (a disabled control
+reports disabled: do not click it, find what enables it first), and actions
+answer "how may I use it" (prefer a named action such as invoke or set-text
+over a raw click; prefer set-text over typing into a field you can set).
+
+Rules:
+
+- Refs first. Bind target to its observationId. A ref is generation-scoped:
+  if the snapshot you are holding is older than the current generation,
+  re-observe and re-resolve — never reuse a stale ref.
+- Never re-derive coordinates. When the control carries an aim, target the
+  ref and let the server aim; do not compute pixel positions yourself. x/y is
+  for canvas and other unknown surfaces, never a substitute for a control you
+  can resolve.
+- A bounds-center aim is not a target. It says the box exists, not that the
+  point inside it is actionable: re-resolve the control by ref, look for a
+  control that does expose a focus point or hint, or ground with
+  computer_visual around it.
+- Never claim an action succeeded off an inspect. It only looks. The tool
+  result's verified field is the only authority: when it reports not_verified,
+  report plainly what was observed, then re-read, re-observe, or ask.
+- Miss beats wrong-click. When nothing matches with confidence, ask a
+  clarifying question or ground with computer_visual; never guess a control.
+  Re-resolve with computer_find or computer_read instead of clicking
+  coordinates.
 
 If the control is not in the current observation, re-observe first; inspect
 does not act, it only reports. An inspect that comes back empty or stale

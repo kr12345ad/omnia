@@ -72,3 +72,12 @@ export {
   type TaskContext,
   type TaskContextOptions,
 } from "./serialize"
+export {
+  computerDiffFallsBack,
+  diffComputerElements,
+  type ComputerDiffElement,
+  type ComputerDiffPayload,
+  type ComputerElementChange,
+  type ComputerElementDiff,
+  type ComputerElementDiffEntry,
+} from "./snapshot-diff"

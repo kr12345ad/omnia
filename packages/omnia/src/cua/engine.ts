@@ -10,14 +10,59 @@ import type {
   CuaElement,
   CuaFindQuery,
   CuaPlatform,
+  CuaRefBinding,
   CuaSnapshot,
   CuaSnapshotOptions,
   CuaStateDelta,
   CuaWaitCondition,
   CuaWaitResult,
+  CuaWindow,
 } from "./types"
+import { StaleRefError } from "./types"
 
 export const DEFAULT_SNAPSHOT_TTL_MS = 350
+
+// Refs are generation-scoped and the engine is the ref authority: it mints
+// `${base}${REF_SCOPE_SEPARATOR}${generation}` for every element and window it
+// accepts, so a ref string is only meaningful inside the observation that
+// minted it. Backend refs are content-addressed strings whose occurrence index
+// is authoritative, so a shifted index yields a different base ref — and
+// therefore a refusal — instead of a silent bind to a different widget.
+const REF_SCOPE_SEPARATOR = "@g"
+// How many observations stay addressable by id. Old observations are evicted
+// first; the current one is never evicted, because that is the one a caller is
+// most likely to be holding.
+const OBSERVATION_HISTORY = 32
+
+export function scopedRef(ref: string, generation: number): string {
+  return `${ref}${REF_SCOPE_SEPARATOR}${generation}`
+}
+
+// The generation-independent identity of a scoped ref: the string the backend
+// minted it from. Two observations of an unchanged desktop describe the same
+// element with the same identity and different scoped refs.
+export function refIdentity(ref: string): string {
+  const separator = ref.lastIndexOf(REF_SCOPE_SEPARATOR)
+  if (separator < 0) return ref
+  return /^\d+$/.test(ref.slice(separator + REF_SCOPE_SEPARATOR.length)) ? ref.slice(0, separator) : ref
+}
+
+export function windowAsElement(window: CuaWindow): CuaElement {
+  return {
+    ref: window.ref,
+    backendRef: window.backendRef,
+    role: "window",
+    name: window.title,
+    enabled: true,
+    focused: window.focused,
+    editable: false,
+    actions: [],
+    states: window.focused ? ["focused"] : [],
+    generation: window.generation,
+    application: window.app,
+    ...(window.bounds === undefined ? {} : { bounds: window.bounds }),
+  }
+}
 
 export function createBackend(platform: CuaPlatform): CuaBackend {
   if (platform === "darwin") return createDarwinBackend()
@@ -43,6 +88,10 @@ export class CuaEngine {
   private latestOptions: CuaSnapshotOptions = {}
   private snapshotPending: { options: CuaSnapshotOptions; promise: Promise<CuaSnapshot> } | undefined
   private actionQueue: Promise<unknown> = Promise.resolve()
+  // Observations stay addressable by id so a ref paired with an observation can
+  // be resolved against exactly that observation.
+  private observations = new Map<string, CuaSnapshot>()
+  private mintedObservations = 0
   private cache:
     | {
         readonly snapshot: CuaSnapshot
@@ -106,13 +155,36 @@ export class CuaEngine {
   }
 
   private acceptSnapshot(fresh: CuaSnapshot, options: CuaSnapshotOptions): CuaSnapshot {
+    // Every capture is a new observation, even when the desktop did not change:
+    // a generation tied to desktop state would let a ref from the previous
+    // observation still look current, and two observations must never be
+    // distinguishable only by refs.
     const generation = Math.max(this.generation + 1, fresh.generation)
     this.generation = generation
-    const snapshot = fresh.generation === generation ? fresh : { ...fresh, generation }
+    const snapshot = scopeSnapshot(fresh, generation, this.observationIdFor(fresh.id, generation))
     this.latest = snapshot
     this.latestOptions = { ...options }
     this.cache = { snapshot, at: this.now(), options: { ...options } }
+    this.remember(snapshot)
     return snapshot
+  }
+
+  // Observation ids identify an observation, not a walk. A backend that reuses
+  // an id for a second capture would let refs minted under the first bind to
+  // the second, so a repeated id gets a fresh one.
+  private observationIdFor(id: string, generation: number): string {
+    if (id.length > 0 && !this.observations.has(id)) return id
+    this.mintedObservations += 1
+    return `cua-obs-${generation}-${this.mintedObservations}`
+  }
+
+  private remember(snapshot: CuaSnapshot): void {
+    this.observations.set(snapshot.id, snapshot)
+    while (this.observations.size > OBSERVATION_HISTORY) {
+      const oldest = this.observations.keys().next()
+      if (oldest.done || oldest.value === this.latest?.id) break
+      this.observations.delete(oldest.value)
+    }
   }
 
   private defaultMaxElements(): number {
@@ -128,9 +200,27 @@ export class CuaEngine {
     return this.snapshot(options)
   }
 
-  async resolveRef(ref: string): Promise<CuaElement | undefined> {
-    const snapshot = await this.snapshot()
-    return elementByRef(snapshot, ref)
+  // Resolve a ref against the observation it belongs to. A ref is returned only
+  // when that observation contains it; an unknown observation, or a ref that
+  // observation does not contain, throws StaleRefError naming both ids. The
+  // engine never falls back to a newer observation whose element happens to
+  // share the ref string, because a shifted occurrence index can put a
+  // different widget at the same string.
+  resolveRef(observationId: string, ref: string): CuaElement {
+    const observation = this.observations.get(observationId)
+    if (observation === undefined) {
+      throw new StaleRefError({ observationId, ref, reason: "unknown_observation" })
+    }
+    const element = elementByRef(observation, ref) ?? windowElementByRef(observation, ref)
+    if (element === undefined) {
+      throw new StaleRefError({
+        observationId,
+        generation: observation.generation,
+        ref,
+        reason: "absent_ref",
+      })
+    }
+    return element
   }
 
   // Callers that need to search beyond the default observe budget (find must
@@ -180,6 +270,8 @@ export class CuaEngine {
         return undefined
       }))
     const beforeOptions = this.cache?.options ?? this.latestOptions
+    const generationMismatch = this.refuseGenerationMismatch(action, before)
+    if (generationMismatch !== undefined) return generationMismatch
     const outcome = await this.backend
       .execute(action, before)
       .catch((error: unknown) => failed(action, error, this.generation))
@@ -207,8 +299,14 @@ export class CuaEngine {
       after !== undefined
         ? computeStateDelta(verifyBefore, after)
         : (observed?.delta ?? computeStateDelta(before, after))
+    // Refs are generation-scoped, so a moved focus is a change of identity: the
+    // same focused node re-scoped to a later generation is not a move, and
+    // counting one would verify an action that changed nothing.
     const focusedMoved =
-      aligned && before !== undefined && after !== undefined && before.focusedRef !== after.focusedRef
+      aligned &&
+      before !== undefined &&
+      after !== undefined &&
+      refIdentity(before.focusedRef ?? "") !== refIdentity(after.focusedRef ?? "")
     // FAIL-CLOSED: without an aligned before/after pair, only refs present in
     // both snapshots count as change evidence; added/removed refs may be scope
     // artifacts. A backend delta must prove a newer generation.
@@ -232,6 +330,21 @@ export class CuaEngine {
     }
   }
 
+  // No action is answered against a generation its target did not come from.
+  // An action that names an observation or a generation must match the
+  // observation this action runs against; otherwise the caller is holding a ref
+  // the desktop has since replaced and has to re-observe. Actions without a
+  // binding still depend on their ref being present in that observation, which
+  // the backend enforces.
+  private refuseGenerationMismatch(action: CuaAction, before: CuaSnapshot | undefined): CuaActionResult | undefined {
+    const current = before ?? this.latest
+    if (current === undefined) return undefined
+    const binding = actionBinding(action)
+    if (binding === undefined || bindingMatches(current, binding)) return undefined
+    const message = staleBindingMessage(actionRef(action) ?? `${action.type} action`, binding, current)
+    return refusal(action, "stale_ref", message, current.generation)
+  }
+
   private async resolveAfter(
     action: CuaAction,
     before: CuaSnapshot | undefined,
@@ -253,7 +366,9 @@ export class CuaEngine {
     if (before === undefined) return undefined
     const scope = affectedScope(action, before)
     if (scope.windowRef !== undefined && this.backend.refreshWindow !== undefined) {
-      return this.backend.refreshWindow(scope.windowRef).catch(() => undefined)
+      // The backend re-walks its own tree, so it addresses the window by the
+      // identity the engine scoped away.
+      return this.backend.refreshWindow(refIdentity(scope.windowRef)).catch(() => undefined)
     }
     if (scope.app !== undefined && this.backend.refreshApplication !== undefined) {
       return this.backend.refreshApplication(scope.app).catch(() => undefined)
@@ -262,7 +377,12 @@ export class CuaEngine {
   }
 
   async waitFor(condition: CuaWaitCondition): Promise<CuaWaitResult> {
-    const result = await this.backend.waitFor(condition)
+    // The backend matches a wait ref against its own walk, which carries the
+    // unscoped backend refs, so the scope is dropped and only the identity is
+    // forwarded.
+    const forwarded =
+      condition.ref === undefined ? condition : { ...condition, ref: refIdentity(condition.ref) }
+    const result = await this.backend.waitFor(forwarded)
     this.invalidate()
     return result
   }
@@ -271,6 +391,7 @@ export class CuaEngine {
     this.cache = undefined
     this.latest = undefined
     this.latestOptions = {}
+    this.observations.clear()
     await this.backend.dispose()
   }
 
@@ -291,20 +412,106 @@ export function elementByRef(snapshot: CuaSnapshot | undefined, ref: string): Cu
   return (snapshot?.elements ?? []).find((element) => element.ref === ref)
 }
 
+export function windowElementByRef(snapshot: CuaSnapshot | undefined, ref: string): CuaElement | undefined {
+  const window = (snapshot?.windows ?? []).find((candidate) => candidate.ref === ref)
+  return window === undefined ? undefined : windowAsElement(window)
+}
+
+// Readbacks compare two observations of one action, so they match on the ref's
+// identity rather than its scoped string: the after-observation necessarily
+// minted new refs for the same elements.
+export function elementByIdentity(snapshot: CuaSnapshot | undefined, ref: string): CuaElement | undefined {
+  const identity = refIdentity(ref)
+  return (snapshot?.elements ?? []).find((element) => refIdentity(element.ref) === identity)
+}
+
+export function windowByIdentity(snapshot: CuaSnapshot | undefined, ref: string): CuaWindow | undefined {
+  const identity = refIdentity(ref)
+  return (snapshot?.windows ?? []).find((candidate) => refIdentity(candidate.ref) === identity)
+}
+
 export function computeStateDelta(before: CuaSnapshot | undefined, after: CuaSnapshot | undefined): CuaStateDelta {
-  const beforeByRef = new Map((before?.elements ?? []).map((element) => [element.ref, element]))
-  const afterByRef = new Map((after?.elements ?? []).map((element) => [element.ref, element]))
-  const addedRefs = [...afterByRef.keys()].filter((ref) => !beforeByRef.has(ref))
-  const removedRefs = [...beforeByRef.keys()].filter((ref) => !afterByRef.has(ref))
-  const changedRefs = [...afterByRef.entries()].flatMap(([ref, element]) => {
-    const prior = beforeByRef.get(ref)
-    return prior !== undefined && elementSignature(prior) !== elementSignature(element) ? [ref] : []
+  // Refs are scoped to their observation, so the delta is keyed by identity and
+  // each side reports the ref it minted: a removed ref is one the
+  // before-observation owned, an added or changed ref is one the
+  // after-observation owns.
+  const prior = new Map((before?.elements ?? []).map((element) => [refIdentity(element.ref), element]))
+  const current = new Map((after?.elements ?? []).map((element) => [refIdentity(element.ref), element]))
+  const addedRefs = [...current.entries()].flatMap(([identity, element]) => (prior.has(identity) ? [] : [element.ref]))
+  const removedRefs = [...prior.entries()].flatMap(([identity, element]) => (current.has(identity) ? [] : [element.ref]))
+  const changedRefs = [...current.values()].flatMap((element) => {
+    const beforeElement = prior.get(refIdentity(element.ref))
+    return beforeElement !== undefined && elementSignature(beforeElement) !== elementSignature(element)
+      ? [element.ref]
+      : []
   })
   return {
     ...(after?.focusedRef === undefined ? {} : { focusedRef: after.focusedRef }),
     ...(addedRefs.length === 0 ? {} : { addedRefs }),
     ...(removedRefs.length === 0 ? {} : { removedRefs }),
     ...(changedRefs.length === 0 ? {} : { changedRefs }),
+  }
+}
+
+// The observation/generation pair an action declares. The driver forwards it
+// on every action it bridges to a remote computer, pointer clicks included,
+// and the union does not expose it on the targetless variants (key, dismiss),
+// which still have to honour a pair they carry.
+function actionBinding(action: CuaAction): { observationId?: string; generation?: number } | undefined {
+  const scope: { readonly type: string } & CuaRefBinding = action
+  if (scope.observationId === undefined && scope.generation === undefined) return undefined
+  return {
+    ...(scope.observationId === undefined ? {} : { observationId: scope.observationId }),
+    ...(scope.generation === undefined ? {} : { generation: scope.generation }),
+  }
+}
+
+export function bindingMatches(
+  snapshot: CuaSnapshot,
+  binding: { observationId?: string; generation?: number },
+): boolean {
+  if (binding.observationId !== undefined && binding.observationId !== snapshot.id) return false
+  if (binding.generation !== undefined && binding.generation !== snapshot.generation) return false
+  return true
+}
+
+export function staleBindingMessage(
+  ref: string,
+  binding: { observationId?: string; generation?: number },
+  current: CuaSnapshot,
+): string {
+  const from =
+    binding.observationId === undefined
+      ? `generation ${binding.generation}`
+      : binding.generation === undefined
+        ? `observation ${binding.observationId}`
+        : `observation ${binding.observationId} (generation ${binding.generation})`
+  return `Target ${ref} is from ${from}, not the current ${current.id} (generation ${current.generation}); re-observe before acting.`
+}
+
+function scopeSnapshot(fresh: CuaSnapshot, generation: number, observationId: string): CuaSnapshot {
+  // Every record carries the observation's generation, not the backend's: the
+  // scoped ref, the reference pair an agent is handed, and the generation it is
+  // paired with must all name the same observation.
+  const windows = fresh.windows.map((window) => ({
+    ...window,
+    ref: scopedRef(window.ref, generation),
+    generation,
+  }))
+  const elements = fresh.elements.map((element) => ({
+    ...element,
+    ref: scopedRef(element.ref, generation),
+    generation,
+    ...(element.windowRef === undefined ? {} : { windowRef: scopedRef(element.windowRef, generation) }),
+    ...(element.parentRef === undefined ? {} : { parentRef: scopedRef(element.parentRef, generation) }),
+  }))
+  return {
+    ...fresh,
+    id: observationId,
+    generation,
+    windows,
+    elements,
+    ...(fresh.focusedRef === undefined ? {} : { focusedRef: scopedRef(fresh.focusedRef, generation) }),
   }
 }
 
@@ -345,11 +552,13 @@ function actionRef(action: CuaAction): string | undefined {
 
 // The window/app an action can be expected to change: its target element's
 // window, the target window itself, or the focused window for global input.
+// Refs are matched on identity so a caller's ref still resolves against the
+// observation the action runs against.
 function affectedScope(action: CuaAction, before: CuaSnapshot): { windowRef?: string; app?: string } {
   const ref = actionRef(action)
   if (ref !== undefined) {
-    const element = elementByRef(before, ref)
-    const window = before.windows.find((candidate) => candidate.ref === ref)
+    const element = elementByIdentity(before, ref)
+    const window = windowByIdentity(before, ref)
     const windowRef = element?.windowRef ?? window?.ref
     const app = element?.application ?? window?.app
     return {
@@ -357,7 +566,7 @@ function affectedScope(action: CuaAction, before: CuaSnapshot): { windowRef?: st
       ...(app === undefined ? {} : { app }),
     }
   }
-  const focusedElement = before.focusedRef === undefined ? undefined : elementByRef(before, before.focusedRef)
+  const focusedElement = before.focusedRef === undefined ? undefined : elementByIdentity(before, before.focusedRef)
   const windowRef = focusedElement?.windowRef ?? before.windows.find((candidate) => candidate.focused)?.ref
   if (windowRef === undefined) return {}
   const window = before.windows.find((candidate) => candidate.ref === windowRef)
@@ -401,7 +610,7 @@ function verdict(
       // desktop, so it never substitutes for the missing snapshot.
       return isFocused(after, action.ref)
     case "set_value":
-      return valueMatches(elementByRef(after, action.ref), action.value)
+      return valueMatches(elementByIdentity(after, action.ref), action.value)
     case "window":
       return windowVerified(action.action, action.ref, before, after)
     case "invoke":
@@ -428,7 +637,7 @@ function verdict(
       // ref's own value read back from an independent after-snapshot. A
       // backend delta (or any other element's change) that merely names the
       // ref proves nothing about which text landed in it.
-      if (action.ref !== undefined) return valueMatches(elementByRef(after, action.ref), action.text)
+      if (action.ref !== undefined) return valueMatches(elementByIdentity(after, action.ref), action.text)
       return observedChange
     default:
       // FAIL-CLOSED: never trust a backend's self-reported verified flag
@@ -439,8 +648,8 @@ function verdict(
 }
 
 function isFocused(snapshot: CuaSnapshot | undefined, ref: string): boolean {
-  if (snapshot?.focusedRef === ref) return true
-  return (snapshot?.elements ?? []).some((element) => element.ref === ref && element.focused)
+  if (snapshot?.focusedRef !== undefined && refIdentity(snapshot.focusedRef) === refIdentity(ref)) return true
+  return elementByIdentity(snapshot, ref)?.focused === true
 }
 
 function valueMatches(element: CuaElement | undefined, value: string): boolean {
@@ -455,8 +664,10 @@ function windowVerified(
   before: CuaSnapshot | undefined,
   after: CuaSnapshot | undefined,
 ): boolean {
-  const prior = (before?.windows ?? []).find((window) => window.ref === ref)
-  const current = (after?.windows ?? []).find((window) => window.ref === ref)
+  // Both sides are matched by identity: the after-observation necessarily
+  // minted new scoped refs for the same windows.
+  const prior = windowByIdentity(before, ref)
+  const current = windowByIdentity(after, ref)
   // FAIL-CLOSED: a missing after-snapshot is not evidence of disappearance.
   // Close verifies only when the before-state knew the window and a real
   // after-snapshot no longer contains it.

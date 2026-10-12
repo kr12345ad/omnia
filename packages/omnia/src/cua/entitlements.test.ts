@@ -2,8 +2,17 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { EntitlementGate, EntitlementRefusedError, isEntitlementRefusedError } from "./entitlements"
+import {
+  ALWAYS_ON_RELIABILITY,
+  EntitlementGate,
+  EntitlementRefusedError,
+  METERED_CAPABILITIES,
+  isEntitlementRefusedError,
+  isMeteredCapability,
+  isUnmeteredCapabilityError,
+} from "./entitlements"
 import type { EntitlementGateOptions } from "./entitlements"
+import { PLANS } from "../billing/plans"
 import type { Capability } from "../billing/plans"
 
 interface Recorded {
@@ -120,25 +129,30 @@ describe("entitlement gate failure policy", () => {
     expect(decision.metering).toBe("hard")
   })
 
-  test("a free capability fails open when the control plane is unreachable", async () => {
-    const harness = gate(() => {
-      throw new Error("ECONNREFUSED")
-    })
-    // subagents is soft on free (unlimited): an outage must not take away what
-    // the customer already has. Every finite free allowance is hard and refuses.
-    const decision = await harness.gate.check("subagents")
-    expect(decision.allowed).toBe(true)
-    expect(decision.origin).toBe("fail-open")
-    expect(decision.degraded).toBe(true)
-    expect(decision.reason).toContain("could not be reached")
-  })
-
   test("a 5xx is a failure, not a decision", async () => {
     const harness = gate(() => reply({ ok: false, error: "boom" }, 503))
     expect((await harness.gate.check("cloud_vision")).origin).toBe("fail-closed")
     // live_view is hard-metered on free, so a 5xx fails closed for it too; the
-    // fail-open side of the policy is pinned by the soft test above.
+    // fail-open side of the policy is pinned by the metered-set test below.
     expect((await harness.gate.check("live_view")).origin).toBe("fail-closed")
+  })
+
+  test("this gate has no fail-open capability, because it only meters paid capacity", async () => {
+    // The fail-open half of the failure policy is real and belongs to the
+    // client: a soft allowance keeps working through an outage so a Stripe
+    // incident cannot brick the app somebody is already using. It is pinned in
+    // ../billing/client.test.ts and ../billing/enforcement-contract.test.ts.
+    //
+    // What matters HERE is that the CUA gate has no such capability to begin
+    // with. cloud_vision is not on free at all and live_view is a hard
+    // allowance, so a billing outage refuses both rather than handing out
+    // capacity nobody paid for - and neither of them is a free user's safe path
+    // (see ALWAYS_ON_RELIABILITY), so refusing them costs nobody safety.
+    expect(METERED_CAPABILITIES).toEqual(["cloud_vision", "live_view"])
+    expect(PLANS.free.capabilities.cloud_vision.metering).toBe("hard")
+    expect(PLANS.free.capabilities.cloud_vision.limit).toBe(0)
+    expect(PLANS.free.capabilities.live_view.metering).toBe("hard")
+    expect(PLANS.free.capabilities.live_view.limit).toBe(500)
   })
 
   test("a refusal answered with 402 is a decision, not a failure", async () => {
@@ -334,5 +348,95 @@ describe("the profile a check is about", () => {
     expect((await harness.gate.check("cloud_vision")).origin).toBe("fail-closed")
     expect(harness.calls).toHaveLength(2)
     expect(harness.calls[1]?.profile).toBe("222")
+  })
+})
+
+// The rule that keeps the gate out of the safety path: it may meter paid
+// CAPACITY and nothing else, so a refund can never take away honest
+// verification, ref resolution, aim computation, a stale-ref refusal or the
+// bounds-centre warning.
+describe("what the gate may meter", () => {
+  /** A gate that would grant anything, and counts how often it is asked. */
+  function permissiveGate(): { gate: EntitlementGate; asked: () => number } {
+    let asked = 0
+    return {
+      asked: () => asked,
+      gate: new EntitlementGate({
+        env: { OMNIA_SERVER_URL: "http://control.test", OMNIA_SERVER_TOKEN: "token-1" },
+        authFile: "/nonexistent/auth.json",
+        http: (async () => {
+          asked += 1
+          return granted("cloud_vision")
+        }) as unknown as typeof fetch,
+      }),
+    }
+  }
+
+  test("the metered set is paid capacity and nothing else", () => {
+    expect(METERED_CAPABILITIES).toEqual(["cloud_vision", "live_view"])
+    for (const capability of METERED_CAPABILITIES) expect(isMeteredCapability(capability)).toBe(true)
+    for (const capability of ["clipboard", "input_freeze", "subagents", "remote_shell"] as const) {
+      expect(`${capability} -> ${isMeteredCapability(capability)}`).toBe(`${capability} -> false`)
+    }
+  })
+
+  test("the behaviours that must work on every tier are named, so the claim is checkable", () => {
+    expect(ALWAYS_ON_RELIABILITY).toEqual([
+      "honest-verification",
+      "ref-resolution",
+      "aim-computation",
+      "stale-ref-refusal",
+      "center-guess-warning",
+    ])
+    // None of them is a capability the gate could be asked about.
+    const metered = new Set<string>(METERED_CAPABILITIES)
+    for (const behaviour of ALWAYS_ON_RELIABILITY) expect(metered.has(behaviour)).toBe(false)
+  })
+
+  test("a capability outside the metered set is refused as a call-site bug, and never asked about", async () => {
+    const permissive = permissiveGate()
+    // Every capability the plan matrix knows about that is NOT metered capacity.
+    const unmetered = (Object.keys(PLANS.free.capabilities) as Capability[]).filter(
+      (capability) => !isMeteredCapability(capability),
+    )
+    expect(unmetered.length).toBeGreaterThan(0)
+    for (const capability of unmetered) {
+      const thrown = await permissive.gate.check(capability).catch((error: unknown) => error)
+      expect(isUnmeteredCapabilityError(thrown)).toBe(true)
+      expect((thrown as { capability: Capability }).capability).toBe(capability)
+      const authorized = await permissive.gate.authorize(capability).catch((error: unknown) => error)
+      expect(isUnmeteredCapabilityError(authorized)).toBe(true)
+    }
+    // Nothing was put to the control plane, so the outage cache is untouched too.
+    expect(permissive.asked()).toBe(0)
+  })
+
+  test("the safety and interoperability basics the free plan already grants cannot be metered", async () => {
+    // Input freeze, the clipboard, local and remote control and subagents are
+    // unlimited on free because charging for them made the free tier hostile.
+    // A future plan-matrix edit must not be able to turn any of them into a
+    // refusal here, which is what a metered-capability call site would do.
+    const basics = (Object.keys(PLANS.free.capabilities) as Capability[])
+      .filter(
+        (capability) =>
+          PLANS.free.capabilities[capability].metering === "soft" &&
+          PLANS.free.capabilities[capability].limit === Number.POSITIVE_INFINITY,
+      )
+      .sort()
+    expect(basics).toEqual(["clipboard", "input_freeze", "local_computer", "remote_computer", "subagents"])
+    for (const capability of basics) expect(`${capability} meterable -> ${isMeteredCapability(capability)}`).toBe(`${capability} meterable -> false`)
+  })
+
+  test("metered capacity still refuses on free, by name, with the paid path named", async () => {
+    // The other half of the same rule: what IS metered is still metered, so the
+    // gate is not simply inert. A free refusal is typed and specific.
+    const harness = gate((call) => refusal(call.capability as Capability))
+    const cloud = await harness.gate.check("cloud_vision")
+    expect(cloud.allowed).toBe(false)
+    expect(cloud.code).toBe("not_entitled")
+    expect(cloud.plan).toBe("free")
+    const error = await harness.gate.authorize("live_view").catch((error: unknown) => error)
+    expect(isEntitlementRefusedError(error)).toBe(true)
+    expect((error as EntitlementRefusedError).capability).toBe("live_view")
   })
 })

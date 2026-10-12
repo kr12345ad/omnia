@@ -23,6 +23,23 @@ Provide one of:
   This is the fastest way to capture a document, a terminal, or a log view
   without enumerating its controls first.
 
+A query read resolves the control the same way a click would: through the
+ranked matcher, behind the same 0.6 confidence floor, so the first line of a
+successful read names what it actually read:
+
+  read textfield "Command" ref=cua:window/kitty/OC/3/textfield/Command/1
+      parent=cua:window/kitty/OC/2/toolbar/1 aim=410,52
+      strategy=control-center confidence=0.93
+
+Read it as: the what, the handle (ref, which is what a later act targets), the
+parent ref it lives under (so two "Command" fields are never confused), the
+aim point with the strategy that produced it, and how sure the match was.
+strategy is one of control-center, focus-point, role-inset, provider-hint, or
+bounds-center. A bounds-center strategy means the surface offered no focus
+point, no hint, and no role-specific point, so its point is only the centre of
+its box: do not trust that point — re-resolve the surface by ref, or
+computer_inspect it, before acting on it.
+
 Parameters:
 
 - limit: maximum characters in this window (defaults to a large cap). Keep it
@@ -32,7 +49,32 @@ Parameters:
   that starts past the runtime's read cap cannot be fetched, so narrow target
   or query instead of raising offset past it.
 - observationId: bind a target to the observation it came from so a moved
-  interface is refused instead of misread.
+  interface is refused instead of misread. It also binds the target to a
+  computer: an observation or ref read off another computer, or invalidated
+  by a switch, is refused naming both computers instead of being read
+  against this computer's surface. Refs never travel between computers.
+
+Rules:
+
+- Give target with the observationId of the observation it came from. A ref
+  is generation-scoped: once the interface moves on, re-resolve from a fresh
+  observation instead of trusting the old one. A target or observation id
+  read off another computer, or invalidated by a switch, is refused naming
+  both computers: re-snapshot on this computer and read its refs instead.
+- Never derive coordinates to reach a surface. Read by ref, or by query the
+  runtime resolves live; x/y is for canvas and surfaces with no resolvable
+  control, never a stand-in for one.
+- Read to confirm, not to assume. After an action, read the value back
+  before calling it landed: the tool result's verified field is the only
+  authority, and when it reports not_verified, report plainly what the read
+  actually shows, then re-read or re-observe instead of claiming the change.
+- When nothing matches with confidence, miss rather than guess: narrow with
+  computer_find, ask a clarifying question, or ground with computer_visual.
+  A read whose query scored below the 0.6 floor is refused, and the tool says
+  how many candidates were rejected: a weak match is not a surface. A query
+  that matches two surfaces within a hair of each other is refused as
+  ambiguous too; pass the target element id of the one you want, or narrow
+  with role or window.
 
 Documents, entries, combo boxes, and labels expose their text when the
 application publishes accessibility text. Canvas-only surfaces report

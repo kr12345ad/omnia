@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFi
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { ROLES } from "../../protocol"
+import type { Bounds } from "../../protocol"
 import { DARWIN_AX_HELPER } from "./darwin-ax"
 import { limitSnapshot } from "./snapshot-limit"
 import type {
@@ -40,6 +41,7 @@ import {
   darwinTypeScript,
   darwinValueStepScript,
   darwinWindowScript,
+  darwinDisplayText,
   parseDarwinNode,
   parseDarwinResolvedPayload,
   parseDarwinResultPayload,
@@ -336,7 +338,117 @@ function normalizeBounds(bounds: { x: number; y: number; width: number; height: 
   return bounds
 }
 
-function buildAttributes(node: DarwinElementSnapshot): Record<string, string | number | boolean> {
+// Per-window element share of the observe budget. A single app window with a
+// thousand rows must not consume the whole budget and drop every other window
+// from the observation, so the build halves the budget across windows before
+// the priority limiter sees the tree.
+const MAX_ELEMENTS_PER_WINDOW_RATIO = 2
+// A per-window cap only protects against huge subtrees; a desktop with a
+// hundred windows still has to produce something, so the app list is bounded
+// separately.
+const MAX_WINDOWS_PER_APP = 64
+// Aim inset from an element's edge, as a share of its thickness. Long enough to
+// leave a provider-drawn, rounded edge without crossing into a neighbour.
+const AIM_INSET_RATIO = 0.12
+
+// Role-specific click points for the pointer fallback. The engine's aim layer
+// owns the same vocabulary; a backend-level fallback repeats the rule so a
+// foreground pointer click never defaults to the center of a bounding box.
+const TITLE_BAR_EDGE: Readonly<Record<string, "left" | "right">> = {
+  closebutton: "right",
+  close: "right",
+  minimizebutton: "left",
+  minimize: "left",
+  maximizebutton: "right",
+  maximize: "right",
+  restorebutton: "right",
+  restore: "right",
+}
+
+const SCROLLBAR_ROLES: ReadonlySet<string> = new Set(["scrollbar", "scrollbarbutton", "scrollbargrip"])
+
+const TOGGLE_ROLES: ReadonlySet<string> = new Set([
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "checkbox",
+  "checkbutton",
+  "radio",
+  "radiobutton",
+  "switch",
+  "togglebutton",
+])
+
+const CONTROL_ROLES: ReadonlySet<string> = new Set([
+  "button",
+  "link",
+  "textfield",
+  "searchbox",
+  "tab",
+  "treeitem",
+  "slider",
+  "spinbutton",
+  "combobox",
+  "listbox",
+  "listitem",
+  "option",
+  "gridcell",
+  "cell",
+  "menubutton",
+  "splitbutton",
+])
+
+// The point a pointer click aims at, chosen from element metadata rather than
+// the center of the bounding box. `focusPoint` is macOS's own caret geometry;
+// the role inset and control center follow. The returned strategy is recorded
+// so a bounds-center guess is never silent.
+export function aimPoint(
+  element: Pick<CuaElement, "role" | "bounds">,
+  focusPoint: { x: number; y: number } | undefined,
+): { x: number; y: number; strategy: string } | undefined {
+  const bounds = element.bounds
+  if (bounds === undefined) return undefined
+  const clamp = (x: number, y: number) => ({
+    x: Math.min(Math.max(Math.round(x), bounds.x), bounds.x + bounds.width),
+    y: Math.min(Math.max(Math.round(y), bounds.y), bounds.y + bounds.height),
+  })
+  if (focusPoint !== undefined) return { ...clamp(focusPoint.x, focusPoint.y), strategy: "focus-point" }
+  const edge = TITLE_BAR_EDGE[element.role]
+  if (edge !== undefined) {
+    const inset = Math.max(1, Math.round(bounds.width * AIM_INSET_RATIO))
+    return {
+      ...clamp(edge === "right" ? bounds.x + bounds.width - inset : bounds.x + inset, bounds.y + bounds.height / 2),
+      strategy: "role-inset",
+    }
+  }
+  if (SCROLLBAR_ROLES.has(element.role)) {
+    const vertical = bounds.height > bounds.width
+    const inset = Math.max(1, Math.round((vertical ? bounds.width : bounds.height) * AIM_INSET_RATIO))
+    return vertical
+      ? { ...clamp(bounds.x + bounds.width - inset, bounds.y + bounds.height / 2), strategy: "role-inset" }
+      : { ...clamp(bounds.x + bounds.width / 2, bounds.y + bounds.height - inset), strategy: "role-inset" }
+  }
+  if (TOGGLE_ROLES.has(element.role) || CONTROL_ROLES.has(element.role)) {
+    return { ...clamp(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2), strategy: "control-center" }
+  }
+  return { ...clamp(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2), strategy: "bounds-center" }
+}
+
+// The native caret point an element reports, if any. It is the only point
+// macOS itself says input lands at, so it is carried through the snapshot
+// attributes for the aim layer and used by the pointer fallback.
+function focusPointAttributes(node: DarwinElementSnapshot, bounds: Bounds | undefined): Record<string, number> | undefined {
+  const point = node.focusPoint
+  if (point === undefined || bounds === undefined) return undefined
+  if (point.x < bounds.x || point.y < bounds.y) return undefined
+  if (point.x > bounds.x + bounds.width || point.y > bounds.y + bounds.height) return undefined
+  return { focusPointX: point.x, focusPointY: point.y }
+}
+
+function buildAttributes(
+  node: DarwinElementSnapshot,
+  bounds: Bounds | undefined,
+): Record<string, string | number | boolean> {
   const attributes: Record<string, string | number | boolean> = { axRole: node.role }
   if (typeof node.subrole === "string" && node.subrole.length > 0) attributes.axSubrole = node.subrole
   if (node.actions.length > 0) attributes.axActions = node.actions.join(", ")
@@ -345,6 +457,11 @@ function buildAttributes(node: DarwinElementSnapshot): Record<string, string | n
   if (typeof node.maxValue === "number") attributes.max = node.maxValue
   if (typeof node.stepValue === "number") attributes.step = node.stepValue
   if (typeof node.placeholder === "string" && node.placeholder.length > 0) attributes.placeholder = node.placeholder
+  const focus = focusPointAttributes(node, bounds)
+  if (focus !== undefined) {
+    attributes.focusPointX = focus.focusPointX
+    attributes.focusPointY = focus.focusPointY
+  }
   return attributes
 }
 
@@ -368,9 +485,21 @@ interface ElementBuildInput {
   path: readonly number[]
   parentRef: string | undefined
   elementOccurrences: Map<string, number>
+  maxElements: number
+  windowCounts: Map<string, number>
+  windowTruncated: Set<string>
 }
 
 function addElement(elements: CuaElement[], input: ElementBuildInput): void {
+  if (input.windowTruncated.has(input.window.ref)) return
+  // Per-window cap: one window with a thousand rows must not consume the
+  // whole observe budget and drop every other window from the observation.
+  const kept = input.windowCounts.get(input.window.ref) ?? 0
+  if (kept >= perWindowBudget(input.maxElements)) {
+    input.windowTruncated.add(input.window.ref)
+    return
+  }
+  input.windowCounts.set(input.window.ref, kept + 1)
   const role = canonicalDarwinRole(input.node.role)
   const name = input.node.name ?? ""
   const key = `${input.window.ref}|${role}|${slugify(name)}`
@@ -378,6 +507,7 @@ function addElement(elements: CuaElement[], input: ElementBuildInput): void {
   input.elementOccurrences.set(key, occurrence + 1)
   const bounds = normalizeBounds(input.node.bounds)
   const editable = input.node.editable || input.node.states.includes("editable")
+  const text = input.node.text ?? darwinDisplayText(input.node.role, input.node.value, editable)
   const element: CuaElement = {
     ref: buildElementRef(input.window.ref, role, name, occurrence),
     backendRef: `mac:${input.pid}:${input.path.join(".")}`,
@@ -392,10 +522,12 @@ function addElement(elements: CuaElement[], input: ElementBuildInput): void {
       valuePresent: input.node.valuePresent,
     }),
     states: input.node.states,
-    attributes: buildAttributes(input.node),
+    attributes: buildAttributes(input.node, bounds),
     generation: input.generation,
     windowRef: input.window.ref,
+    application: input.window.app,
     ...(input.parentRef === undefined ? {} : { parentRef: input.parentRef }),
+    ...(text === undefined ? {} : { text }),
     ...(input.node.value === undefined || input.node.value.length === 0 ? {} : { value: input.node.value }),
     ...(input.node.description === undefined || input.node.description.length === 0
       ? {}
@@ -413,6 +545,10 @@ function addElement(elements: CuaElement[], input: ElementBuildInput): void {
   }
 }
 
+function perWindowBudget(maxElements: number): number {
+  return Math.max(1, Math.floor(maxElements / MAX_ELEMENTS_PER_WINDOW_RATIO))
+}
+
 // The observe script reports each application with its top-level windows as
 // direct children. Every window becomes a CuaWindow and also a CuaElement so
 // that window-scoped refs exist for every element and window actions have a ref.
@@ -420,8 +556,11 @@ export function buildDarwinSnapshot(input: DarwinSnapshotBuildInput): CuaSnapsho
   const windows: CuaWindow[] = []
   const elements: CuaElement[] = []
   const warnings = [...(input.warnings ?? [])]
+  let helperTruncated = input.helperTruncated === true
   const windowOccurrences = new Map<string, number>()
   const elementOccurrences = new Map<string, number>()
+  const windowCounts = new Map<string, number>()
+  const windowTruncated = new Set<string>()
   const appFilter = input.requestedApp?.toLowerCase()
 
   for (const application of input.applications) {
@@ -433,6 +572,12 @@ export function buildDarwinSnapshot(input: DarwinSnapshotBuildInput): CuaSnapsho
     if (appFilter !== undefined && !appName.toLowerCase().includes(appFilter)) continue
     const pid = application.pid ?? -1
     for (const node of application.nodes) {
+      // More windows than the cap can ever mean a walk that stopped early, so
+      // the tree is reported as truncated rather than silently dropped.
+      if (windows.length >= MAX_WINDOWS_PER_APP) {
+        helperTruncated = true
+        break
+      }
       const title = node.name ?? appName
       const occurrenceKey = `${appName}|${title}`
       const occurrence = windowOccurrences.get(occurrenceKey) ?? 0
@@ -457,12 +602,32 @@ export function buildDarwinSnapshot(input: DarwinSnapshotBuildInput): CuaSnapsho
         path: [node.index],
         parentRef: undefined,
         elementOccurrences,
+        maxElements: input.maxElements,
+        windowCounts,
+        windowTruncated,
       })
     }
   }
 
   if (input.requestedApp !== undefined && windows.length === 0) {
     warnings.push(`No application matched "${input.requestedApp}"; no elements are available for this snapshot.`)
+  }
+  // A window whose subtree hit the per-window cap is missing descendants, so the
+  // observation must say so instead of reporting a complete tree.
+  if (windowTruncated.size > 0) {
+    helperTruncated = true
+    for (const ref of windowTruncated) {
+      const window = windows.find((candidate) => candidate.ref === ref)
+      if (window === undefined) continue
+      warnings.push(
+        `The window "${window.title}" of ${window.app} was capped at ${perWindowBudget(input.maxElements)} elements; its subtree was truncated before the element budget was applied.`,
+      )
+    }
+  }
+  if (helperTruncated && !warnings.some((warning) => warning.includes("accessibility tree was truncated"))) {
+    warnings.push(
+      "The accessibility tree was truncated before the element budget was applied; some elements are missing.",
+    )
   }
   // A zero-element tree must never be indistinguishable from a healthy empty
   // desktop: if no other warning explains the emptiness, say so explicitly.
@@ -480,9 +645,11 @@ export function buildDarwinSnapshot(input: DarwinSnapshotBuildInput): CuaSnapsho
       windows,
       elements,
       ...(input.screen === undefined ? {} : { screen: input.screen }),
-      truncated: input.helperTruncated === true,
+      truncated: helperTruncated,
       warnings,
-      accessibility: input.accessibility ?? (windows.length === 0 || elements.length === 0 ? "degraded" : "available"),
+      accessibility:
+        input.accessibility ??
+        (windows.length === 0 || elements.length === 0 || helperTruncated ? "degraded" : "available"),
     },
     input.maxElements,
   )
@@ -581,13 +748,16 @@ export interface DarwinCuaBackendOptions {
   nativeTimeoutMs?: number
 }
 
+// Every action type carries the observation/generation pair the engine forwards
+// it with, including pointer clicks, so a click aimed from an older observation
+// is refused rather than delivered against whatever is on screen now. `key`,
+// `dismiss`, and the targetless variants carry no pair to check.
 function backendBindingOf(action: CuaAction): { observationId?: string; generation?: number } {
-  if (action.type === "click" || action.type === "drag" || action.type === "key" || action.type === "dismiss") {
-    return {}
-  }
+  if (action.type === "key" || action.type === "dismiss") return {}
+  const scope = action as CuaAction & { observationId?: string; generation?: number }
   return {
-    ...(action.observationId === undefined ? {} : { observationId: action.observationId }),
-    ...(action.generation === undefined ? {} : { generation: action.generation }),
+    ...(scope.observationId === undefined ? {} : { observationId: scope.observationId }),
+    ...(scope.generation === undefined ? {} : { generation: scope.generation }),
   }
 }
 
@@ -598,23 +768,24 @@ function bindingRefusal(
   binding: { observationId?: string; generation?: number },
   generation: number,
 ): CuaActionResult | undefined {
-  if (binding.observationId !== undefined && binding.observationId !== source.id) {
-    return refuse(
-      action,
-      "stale_ref",
-      `Target ${ref} is from observation ${binding.observationId}, not the current ${source.id}; re-observe before acting.`,
-      generation,
-    )
-  }
-  if (binding.generation !== undefined && binding.generation !== source.generation) {
-    return refuse(
-      action,
-      "stale_ref",
-      `Target ${ref} is from generation ${binding.generation}, not the current ${source.generation}; re-observe before acting.`,
-      generation,
-    )
-  }
-  return undefined
+  if (binding.observationId === undefined && binding.generation === undefined) return undefined
+  const observationMatches = binding.observationId === undefined || binding.observationId === source.id
+  const generationMatches = binding.generation === undefined || binding.generation === source.generation
+  if (observationMatches && generationMatches) return undefined
+  const from = (observed: string | undefined, value: number | undefined) =>
+    observed === undefined
+      ? value === undefined
+        ? "an unknown observation"
+        : `generation ${value}`
+      : value === undefined
+        ? `observation ${observed}`
+        : `observation ${observed} (generation ${value})`
+  return refuse(
+    action,
+    "stale_ref",
+    `Target ${ref} is from ${from(binding.observationId, binding.generation)}, not the current observation ${source.id} (generation ${source.generation}); re-observe before acting.`,
+    generation,
+  )
 }
 
 interface RefResolution {
@@ -1218,6 +1389,21 @@ class DarwinCuaBackend implements CuaBackend {
     if (captureId !== undefined) this.latestCaptureId = undefined
   }
 
+  private bindingStaleness(
+    action: CuaAction,
+    snapshot: CuaSnapshot | undefined,
+    generation: number,
+  ): CuaActionResult | undefined {
+    const binding = backendBindingOf(action)
+    if (binding.observationId === undefined && binding.generation === undefined) return undefined
+    const source = snapshot ?? this.latest
+    if (source === undefined) {
+      return refuse(action, "no_snapshot", "Take a snapshot before acting on an element ref.", generation)
+    }
+    const label = "ref" in action && typeof action.ref === "string" ? action.ref : `${action.type} action`
+    return bindingRefusal(action, label, source, binding, generation)
+  }
+
   private async expectElement(
     ref: string,
     action: CuaAction,
@@ -1369,12 +1555,26 @@ const raw = await this.performTarget(resolved.pid, resolved.path, rawAction)
         generation,
       )
     }
-    const point = { x: Math.round(bounds.x + bounds.width / 2), y: Math.round(bounds.y + bounds.height / 2) }
+    // Choose the point from element metadata, never the center of the bounding
+    // box by default: the caret geometry first, then the role-specific inset.
+    const aim = aimPoint({ ...resolved.element, bounds }, resolved.live.focusPoint)
+    if (aim === undefined) return refuse(action, "action_unavailable", `The element at ${action.ref} has no bounds to click.`, generation)
+    const point = { x: aim.x, y: aim.y }
     const output = parseDarwinResultPayload(
       await this.runScript(darwinClickScript(point, "left", 1), DARWIN_SCRIPT_TIMEOUT_MS),
     )
     if (output?.ok !== true) return refuse(action, "input_failed", "The pointer fallback failed.", generation, true)
-    return success(action, "pointer", `Clicked ${action.ref} at its center.`, generation, false)
+    if (aim.strategy === "bounds-center") {
+      return success(
+        action,
+        "pointer",
+        `Clicked ${action.ref} at the center of its bounds (${point.x},${point.y}); no better aim point was reported.`,
+        generation,
+        false,
+        ["aim: bounds-center"],
+      )
+    }
+    return success(action, "pointer", `Clicked ${action.ref} at its ${aim.strategy} (${point.x},${point.y}).`, generation, false)
   }
 
   private async executeValueStep(
@@ -1627,7 +1827,12 @@ const raw = await this.performTarget(resolved.pid, resolved.path, rawAction)
       if (bounds === undefined) {
         return refuse(action, "invalid_target", `The element at ${action.ref} has no bounds to scroll.`, generation)
       }
-      point = { x: Math.round(bounds.x + bounds.width / 2), y: Math.round(bounds.y + bounds.height / 2) }
+      const aim = aimPoint({ ...resolved.element, bounds }, resolved.live.focusPoint) ?? {
+        x: bounds.x + bounds.width / 2,
+        y: bounds.y + bounds.height / 2,
+        strategy: "bounds-center",
+      }
+      point = { x: aim.x, y: aim.y }
     }
     if (point !== undefined) {
       const bounds = this.latest?.screen
@@ -1765,6 +1970,11 @@ const raw = await this.performTarget(resolved.pid, resolved.path, rawAction)
     if (!probe.ok) {
       return refuse(action, "backend_unavailable", probe.error ?? "macOS accessibility access is not available.", generation)
     }
+    // Refuse the whole action before any delivery when the pair it carries
+    // names another observation — including pointer clicks, which are the ones
+    // a silently rebound ref would land on the wrong control.
+    const stale = this.bindingStaleness(action, snapshot, generation)
+    if (stale !== undefined) return stale
     switch (action.type) {
       case "invoke":
         return this.executeInvoke(action, snapshot, generation)

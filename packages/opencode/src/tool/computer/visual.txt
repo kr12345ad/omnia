@@ -2,12 +2,37 @@ Ground and act on controls that semantic observation cannot resolve, such as
 canvas content, image-only toolbars, poorly accessible legacy interfaces, and
 precise drag or resize operations.
 
-Use this after computer_observe or computer_find failed to identify a target
-with enough confidence. Describe the target the way a person would ("the orange
-Save icon in the top right"), not by coordinates. The runtime captures the
-relevant screen, resolves the target through Omnia's computer-use model layer,
-executes the resulting action through the normal permission-checked action
-resolver, and verifies the outcome by observation.
+This tool is the FALLBACK, not the primary way to act. Use it after
+computer_observe, computer_snapshot, and computer_find failed to identify a
+target with enough confidence. Exact text, accessibility, and DOM information
+always take priority over visual inference, and this tool says so when
+semantics already resolve the target. Describe the target the way a person
+would ("the orange Save icon in the top right"), not by coordinates. The
+runtime captures the relevant screen, resolves the target through Omnia's
+computer-use model layer, executes the resulting action through the normal
+permission-checked action resolver, and reports what happened.
+
+Its points are guesses by nature. The vision model reads a screenshot and
+answers in normalized-1000 coordinates; the runtime scales that into logical
+screen pixels and the result reports the coordinate space and the scale it
+applied (the coordinates line and the coordinate metadata). No part of that
+pipeline makes the pixel land on the control you meant, so a vision point is a
+hypothesis about where something is, not a fact. A vision result is never
+verified on the model's confidence: it stays not_verified until a post-action
+observation confirms the effect, and a landed vision click carries its aim as
+strategy "vision-ground" so the audit trail keeps it distinct from a control
+resolved by ref.
+
+The tool refuses to ground onto a window's title bar. Window controls sit a
+few pixels apart there (Minimize and Close are 9px apart on a 1080p screen) and
+vision jitter is larger than that, so a point in a window's top strip is
+refused with the window and strip that rejected it instead of being handed
+back as a target.
+
+After every visual action, re-observe and confirm. Call computer_observe,
+computer_snapshot, or computer_find, check that the state changed the way the
+task required, and only then continue. Never chain a second visual action off
+an unverified first one.
 
 Parameters:
 
@@ -23,14 +48,13 @@ Parameters:
   document to PDF". It scopes the grounding so the model resolves the right
   control for the job, not just a lookalike.
 - execute: set false to receive a proposal without acting. Defaults to true:
-  the action is performed and verified.
+  the action is performed and reported, still unverified until a post-action
+  observation confirms the effect.
 
 Set execute to false to receive a proposal without acting. Prefer semantic
-tools first: exact text, accessibility, and DOM information always take
-priority over visual inference, and this tool will say so when semantics
-already resolve the target. A visual proposal is a hypothesis, not a fact:
-verify it the same way as any act — re-observe, confirm the state delta,
-and never chain a second visual action off an unverified first one.
+tools first. A visual proposal is a hypothesis, not a fact: verify it the same
+way as any act — re-observe, confirm the state delta, and never chain a second
+visual action off an unverified first one.
 
 Inspect mode:
 
@@ -42,6 +66,6 @@ Inspect mode:
   you need the model to look at the screen for you.
 - Questions about state ("is the file saved?", "which checkbox is ticked?")
   are cheaper and safer than grounding a click: ask first, act once.
-- Coordinates that come back from a question are single-use and bound to
-  the screenshot they were read from. If the screen changed since, ask
+- Coordinates that come back from a question are single-use and bound to the
+  screenshot they were read from. If the screen changed since, ask
   again instead of reusing them.

@@ -2,7 +2,7 @@ import { Effect, Schema } from "effect"
 import { HttpClient } from "effect/unstable/http"
 import * as Tool from "../tool"
 import DESCRIPTION from "./do.txt"
-import { BatchEnvelope, configFromEnv, computerId, request } from "./client"
+import { BatchEnvelope, configFromEnv, computerId, observationById, request } from "./client"
 import { PLAN_ACTIONS } from "./actions"
 import { TILE_POSITIONS, alwaysPatternsForSteps, batchScopes, stepPermissionPatterns, validateAction } from "./policy"
 import { CAPS, clipLines, renderDetails } from "./output"
@@ -123,6 +123,9 @@ export const Parameters = Schema.Struct({
   resumeFrom: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({
     description: "Start executing at this step index; earlier steps are skipped.",
   }),
+  observationId: Schema.optional(Schema.String).annotate({
+    description: "The single computer_snapshot observation this plan's element refs came from.",
+  }),
 })
 
 type BatchStepResult = {
@@ -134,6 +137,8 @@ type BatchStepResult = {
   confidence?: number
   verification?: { status?: string; message?: string }
   stateDelta?: { summary?: string }
+  aim?: { x: number; y: number; strategy: string }
+  warnings?: string[]
   error?: { code?: string; message: string; details?: unknown }
 }
 
@@ -200,6 +205,8 @@ function applyFailClosed(steps: BatchStepResult[], expected: readonly PlanStep[]
 
 function formatStep(step: BatchStepResult): string {
   const label = `${step.index + 1}. ${step.action}`
+  const aim = step.aim === undefined ? undefined : `aim: ${step.aim.x},${step.aim.y} (${step.aim.strategy})`
+  const warnings = step.warnings?.length ? step.warnings.join("; ") : undefined
   if (step.success) {
     const status = step.verification?.status ?? "completed"
     const parts = [
@@ -208,12 +215,14 @@ function formatStep(step: BatchStepResult): string {
       step.resolvedBy === undefined
         ? undefined
         : `resolved by ${step.resolvedBy}${step.confidence === undefined ? "" : ` (${step.confidence.toFixed(2)})`}`,
+      aim,
+      warnings,
     ].filter((part): part is string => typeof part === "string" && part.length > 0)
     return `${label} — ${status}${parts.length === 0 ? "" : `; ${parts.join("; ")}`}`
   }
   const code = step.error?.code ?? "failed"
   const details = renderDetails(step.error?.details, CAPS.errorDetails)
-  return `${label} — ${code}: ${step.error?.message ?? step.message ?? "failed"}${details === undefined ? "" : ` (${details})`}`
+  return `${label} — ${code}: ${step.error?.message ?? step.message ?? "failed"}${details === undefined ? "" : ` (${details})`}${aim === undefined ? "" : `; ${aim}`}${warnings === undefined ? "" : `; ${warnings}`}`
 }
 
 export const ComputerDoTool = Tool.define<typeof Parameters, Record<string, unknown>, HttpClient.HttpClient>(
@@ -228,6 +237,34 @@ export const ComputerDoTool = Tool.define<typeof Parameters, Record<string, unkn
           if (params.steps.length === 0) throw new Error("The plan requires at least one step.")
           for (const step of params.steps) validateAction(step)
           const config = yield* configFromEnv()
+          const id = yield* computerId(http, config, ctx.sessionID)
+          const boundObservationIds = new Set(
+            params.steps.flatMap((step) => (step.observationId === undefined ? [] : [step.observationId])),
+          )
+          if (params.observationId !== undefined) boundObservationIds.add(params.observationId)
+          if (boundObservationIds.size > 1) {
+            throw new Error("A computer_do plan must use one observationId. Take a fresh computer_snapshot and rebuild the plan.")
+          }
+          const planObservationId = boundObservationIds.values().next().value as string | undefined
+          const refSteps = params.steps.filter((step) => step.target !== undefined && !step.action.startsWith("browser_"))
+          if (refSteps.length > 0 && planObservationId === undefined) {
+            throw new Error("Element refs in a computer_do plan need one observationId from computer_snapshot. Re-observe and rebuild the plan.")
+          }
+          if (planObservationId !== undefined) {
+            const observation = observationById(id, planObservationId)
+            if (observation === undefined) {
+              throw new Error(`The plan observation ${planObservationId} is not held for computer ${id}; take a fresh computer_snapshot.`)
+            }
+            const heldRefs = new Set(observation.elements.flatMap((element) => {
+              if (typeof element !== "object" || element === null) return []
+              const value = element as { id?: unknown; ref?: unknown }
+              return [value.id, value.ref].filter((ref): ref is string => typeof ref === "string")
+            }))
+            const missing = refSteps.find((step) => !heldRefs.has(step.target ?? ""))
+            if (missing !== undefined) {
+              throw new Error(`Target ref ${missing.target} is not in observation ${planObservationId} for computer ${id}; take a fresh snapshot and re-resolve the plan.`)
+            }
+          }
           yield* ctx.ask({
             permission: "computer",
             patterns: stepPermissionPatterns(params.steps),
@@ -235,10 +272,10 @@ export const ComputerDoTool = Tool.define<typeof Parameters, Record<string, unkn
             metadata: {
               operation: "do",
               plan: params.plan ?? "",
+              ...(planObservationId === undefined ? {} : { observationId: planObservationId }),
               actions: params.steps.map((step) => step.action).join(","),
             },
           })
-          const id = yield* computerId(http, config, ctx.sessionID)
           const response = yield* request<BatchResponse>(
             http,
             config,
@@ -248,6 +285,7 @@ export const ComputerDoTool = Tool.define<typeof Parameters, Record<string, unkn
               ...(params.plan === undefined ? {} : { plan: params.plan }),
               ...(params.stopOnError === undefined ? {} : { stopOnError: params.stopOnError }),
               ...(params.resumeFrom === undefined ? {} : { resumeFrom: params.resumeFrom }),
+              ...(planObservationId === undefined ? {} : { observationId: planObservationId }),
               steps: params.steps.map((step) => ({
                 action: step.action,
                 ...(step.query === undefined ? {} : { query: step.query }),
@@ -258,10 +296,17 @@ export const ComputerDoTool = Tool.define<typeof Parameters, Record<string, unkn
                   : {
                       target: {
                         elementId: step.target,
-                        ...(step.observationId === undefined ? {} : { observationId: step.observationId }),
+                        ...((step.observationId ?? planObservationId) === undefined
+                          ? {}
+                          : { observationId: step.observationId ?? planObservationId }),
+                        ...(planObservationId === undefined
+                          ? {}
+                          : { generation: observationById(id, planObservationId)?.generation }),
                       },
                     }),
-                ...(step.observationId === undefined ? {} : { observationId: step.observationId }),
+                ...((step.observationId ?? planObservationId) === undefined
+                  ? {}
+                  : { observationId: step.observationId ?? planObservationId }),
                 ...(step.text === undefined && step.position === undefined && step.point === undefined
                   ? {}
                   : { text: step.text ?? step.position ?? step.point }),
@@ -359,6 +404,9 @@ export const ComputerDoTool = Tool.define<typeof Parameters, Record<string, unkn
               total: result.total,
               failedAt,
               steps: steps.map((step) => `${step.action}:${step.success ? "ok" : "failed"}`),
+              ...(steps.some((step) => step.warnings?.length)
+                ? { warnings: steps.flatMap((step) => step.warnings ?? []) }
+                : {}),
             },
           }
         }),

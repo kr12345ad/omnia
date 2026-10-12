@@ -29,10 +29,15 @@ import {
   extractWindowTitleFragment,
   findKnownClosePoints,
   isCropPath,
+  isFocusIntent,
+  isMinimizeIntent,
+  isRestoreIntent,
+  isTitleBarPoint,
   isTitleBarTarget,
   isWindowFocusIntent,
   isWindowManagementIntent,
   resolveWindowTitleFragment,
+  titleBarThresholds,
   windowManagementFallback,
   windowManagementFallbackReason,
 } from "./window-safety"
@@ -57,6 +62,7 @@ import type {
   SemanticEnvironment,
 } from "./types"
 import { isComputerUseErrorCode } from "./types"
+import { MATCH_THRESHOLD } from "./match-score"
 
 export interface ComputerUseServiceOptions {
   readonly manager: ComputerManager
@@ -108,6 +114,29 @@ export interface ComputerUseAnalysis {
 export interface ComputerUseExecution {
   readonly outcome: ExecuteOutcome
   readonly verified: boolean
+  // Why the verdict is what it is: what the action had to show and what the
+  // post-action observation actually showed. An absent observation is
+  // `not_verified` with reason "no_post_observation"; it is never a pass.
+  readonly confirmation?: ActionConfirmation
+}
+
+export interface ActionConfirmation {
+  readonly status: "verified" | "not_verified"
+  readonly method: "active-window" | "element-state-change" | "execution-verification"
+  readonly expected?: {
+    readonly title?: string
+    readonly ref?: string
+    readonly windowId?: string
+    readonly states?: readonly string[]
+  }
+  readonly observed?: {
+    readonly title?: string
+    readonly ref?: string
+    readonly windowId?: string
+    readonly states?: readonly string[]
+    readonly value?: string
+  }
+  readonly reason?: string
 }
 
 export interface ComputerUsePerformResult {
@@ -547,8 +576,27 @@ export class ComputerUseService {
       ...(input.approvedBy === undefined ? {} : { approvedBy: input.approvedBy }),
       ...(input.approvedScopes === undefined ? {} : { approvedScopes: input.approvedScopes }),
     }
+    // A ref-based action can only be confirmed by reading the element it
+    // targeted before and after, so the pre-action read happens here. Vision
+    // points and keyboard actions verify through the execution record instead
+    // (see confirmExecution).
+    const beforeObservation =
+      request.target?.kind === "element" ? await this.observeForVerification(input.computerId) : undefined
     const outcome = await this.options.manager.execute(input.computerId, baseRequest)
-    let verified = isVerified(outcome.result.verification) || outcome.result.metadata?.verified === true
+    // Honest verification: a provider `verified` flag is a claim, not evidence.
+    // The verdict comes from a post-action observation, and anything that
+    // cannot be confirmed — including "no observation was taken" — is
+    // not_verified with what was expected and what was seen attached.
+    const confirm = (executed: ExecuteOutcome): Promise<ActionConfirmation> =>
+      this.confirmExecution({
+        computerId: input.computerId,
+        result: calibratedResult,
+        outcome: executed,
+        context: performContext,
+        ...(beforeObservation === undefined ? {} : { before: beforeObservation }),
+      })
+    let confirmation = await confirm(outcome)
+    let verified = confirmation.status === "verified"
     // Prefer the Cua wait_for primitive over sleep+re-observe when the engine
     // exposes it and the action did not verify on its own.
     const waited = verified ? undefined : await this.cuaWaitFor(input.computerId, calibratedResult)
@@ -567,8 +615,11 @@ export class ComputerUseService {
       retried = true
       const retryVerified = isVerified(retryOutcome.result.verification) || retryOutcome.result.metadata?.verified === true
       if (retryVerified) {
-        verified = true
         finalOutcome = retryOutcome
+        // The reported evidence has to describe the outcome that is reported, so
+        // the confirmation comes from the retry and never from the first attempt.
+        confirmation = await confirm(retryOutcome)
+        verified = confirmation.status === "verified"
       } else if (retryOutcome.result.success === true) {
         // Still unverified after the bounded retry: refuse rather than claim
         // success. The retry outcome becomes the execution for evidence.
@@ -587,6 +638,7 @@ export class ComputerUseService {
             ...(typeof metadata.delivery === "string" ? { delivery: metadata.delivery } : {}),
             ...(isRecord(metadata.stateDelta) ? { stateDelta: metadata.stateDelta } : {}),
             ...(waited === undefined ? {} : { waitedMs: waited.waitedMs }),
+            confirmation,
           },
         }
         this.options.events?.emit("computer_use.executed", {
@@ -599,7 +651,7 @@ export class ComputerUseService {
             ...(typeof metadata.delivery === "string" ? { delivery: metadata.delivery } : {}),
           },
         })
-        return { analysis: { ...analysis, result }, execution: { outcome: finalOutcome, verified: false } }
+        return { analysis: { ...analysis, result }, execution: { outcome: finalOutcome, verified: false, confirmation } }
       } else {
         // The retry itself failed at execution: fall through to the normal
         // failure path with the retry outcome.
@@ -633,6 +685,7 @@ export class ComputerUseService {
         ...(typeof metadata.delivery === "string" ? { delivery: metadata.delivery } : {}),
         ...(isRecord(metadata.stateDelta) ? { stateDelta: metadata.stateDelta } : {}),
         ...(waited === undefined ? {} : { waitedMs: waited.waitedMs }),
+        confirmation,
       },
     }
     this.options.events?.emit("computer_use.executed", {
@@ -645,7 +698,144 @@ export class ComputerUseService {
         ...(typeof metadata.delivery === "string" ? { delivery: metadata.delivery } : {}),
       },
     })
-    return { analysis: { ...analysis, result }, execution: { outcome: finalOutcome, verified } }
+    return { analysis: { ...analysis, result }, execution: { outcome: finalOutcome, verified, confirmation } }
+  }
+
+  // A post-action read of the controlled screen. Prefers the observation the
+  // execution itself returned and otherwise takes a fresh one; a failed or
+  // unavailable observe resolves to undefined, which the caller must treat as
+  // "nothing was observed", never as confirmation.
+  private async postActionObservation(computerId: string, outcome: ExecuteOutcome): Promise<Observation | undefined> {
+    const observed = outcome.result.observation
+    if (observed !== undefined) return observed
+    return await this.observeForVerification(computerId)
+  }
+
+  private async observeForVerification(computerId: string): Promise<Observation | undefined> {
+    const driver = this.options.manager.get(computerId)?.driver
+    if (typeof driver?.observe !== "function") return undefined
+    return await driver.observe().catch(() => undefined)
+  }
+
+  /**
+   * Honest verification: a result is `verified` only when a post-action
+   * observation confirms it.
+   *
+   *  - `focus_window` / `activate_app`: the post-action active window (or its
+   *    title, case-insensitive) must contain the requested title, or must be
+   *    the resolved target window id.
+   *  - An action on a resolved ref: the post-action observation must show a
+   *    state change attributable to that element (focused / value / states),
+   *    compared against the pre-action read.
+   *  - Anything else (vision points, keys) falls back to the execution's own
+   *    verification record, which the bounded re-observe/retry path above
+   *    already refuses when it cannot confirm.
+   *
+   * The absence of an observation is never a pass: it is `not_verified` with
+   * reason "no_post_observation" and whatever was expected attached.
+   */
+  private async confirmExecution(input: {
+    readonly computerId: string
+    readonly result: ComputerUseResult
+    readonly outcome: ExecuteOutcome
+    readonly context: ComputerUseContext
+    readonly before?: Observation
+  }): Promise<ActionConfirmation> {
+    const action = input.result.action
+    if (action !== undefined && (action.type === "focus_window" || action.type === "activate_app")) {
+      const named = action.window ?? action.text ?? action.target?.label
+      // The title the request actually named, not the window the chain resolved
+      // to: an over-matched fragment must never verify itself by renaming the
+      // expectation to whatever it happened to resolve.
+      const requested = typeof input.result.metadata?.focusRequested === "string" && input.result.metadata.focusRequested.length > 0
+        ? input.result.metadata.focusRequested
+        : named
+      return await this.confirmFocus(input, requested, named)
+    }
+    const ref = typeof input.result.metadata?.elementId === "string" && input.result.metadata.elementId.length > 0
+      ? input.result.metadata.elementId
+      : undefined
+    if (ref !== undefined) return await this.confirmRefChange(input, ref)
+    const claimed = isVerified(input.outcome.result.verification) || input.outcome.result.metadata?.verified === true
+    return { status: claimed ? "verified" : "not_verified", method: "execution-verification" }
+  }
+
+  /**
+   * A focus is confirmed only by the post-action active window, and only
+   * against the title the request named (`wanted`): the visible title (or the
+   * active-window hint) must contain it case-insensitively, or the window the
+   * requested title resolves to must be the active one (a renamed or truncated
+   * visible title). `resolved` — the window the action actually asked the
+   * server to focus — is reported so a mismatch is visible instead of hidden.
+   */
+  private async confirmFocus(
+    input: { readonly computerId: string; readonly outcome: ExecuteOutcome },
+    wanted: string | undefined,
+    resolved: string | undefined,
+  ): Promise<ActionConfirmation> {
+    const after = await this.postActionObservation(input.computerId, input.outcome)
+    const active = activeWindowFromObservation(after)
+    const title = wanted?.trim()
+    if (active === undefined) {
+      return {
+        status: "not_verified",
+        method: "active-window",
+        reason: "no_post_observation",
+        ...(title === undefined ? {} : { expected: { title } }),
+      }
+    }
+    // Authority for the verdict is the requested title; the action's own
+    // resolution is evidence of what was attempted, not proof it happened.
+    const targetId = windowIdForTitle(after, title)
+    const titled = title !== undefined && title.length > 0 && active.title?.toLowerCase().includes(title.toLowerCase()) === true
+    const identified = active.id !== undefined && targetId !== undefined && active.id === targetId
+    const actedId = windowIdForTitle(after, resolved?.trim())
+    return {
+      status: titled || identified ? "verified" : "not_verified",
+      method: "active-window",
+      expected: {
+        ...(title === undefined ? {} : { title }),
+        ...(actedId === undefined ? {} : { windowId: actedId }),
+      },
+      observed: {
+        ...(active.id === undefined ? {} : { windowId: active.id }),
+        ...(active.title === undefined ? {} : { title: active.title }),
+      },
+    }
+  }
+
+  private async confirmRefChange(
+    input: {
+      readonly computerId: string
+      readonly outcome: ExecuteOutcome
+      readonly before?: Observation
+    },
+    ref: string,
+  ): Promise<ActionConfirmation> {
+    const after = await this.postActionObservation(input.computerId, input.outcome)
+    const observed = elementStateById(after, ref)
+    if (observed === undefined) {
+      // No post-action observation at all (or the element is gone from it):
+      // absence is never proof that the click landed.
+      return { status: "not_verified", method: "element-state-change", expected: { ref }, reason: "no_post_observation" }
+    }
+    const before = elementStateById(input.before, ref)
+    const changed = before === undefined ? undefined : elementStateChange(before, observed)
+    if (changed === undefined) {
+      return {
+        status: "not_verified",
+        method: "element-state-change",
+        expected: { ref, ...(before === undefined ? {} : { states: before.states }) },
+        observed: { ref, states: observed.states, ...(observed.value === undefined ? {} : { value: observed.value }) },
+        reason: "no_state_change_for_ref",
+      }
+    }
+    return {
+      status: "verified",
+      method: "element-state-change",
+      expected: { ref, states: before?.states ?? [] },
+      observed: { ref, states: observed.states, ...(observed.value === undefined ? {} : { value: observed.value }) },
+    }
   }
 
   async loadModel(id: string): Promise<ComputerUseModelStatus> {
@@ -787,35 +977,18 @@ export class ComputerUseService {
       operation: input.operation,
       weights: { capabilityMatch: 0.3, quality: 0.25, hardwareFit: 0.2, latencyScore: 0.1, privacyScore: 0.1, costScore: 0.05 },
     }
-    // Titled window-focus intents bypass semantic center-click entirely and
-    // route to focus_window by live title. This fixes the (960,539) failure
-    // where "focus Kitty OC | Quick hello" over-matched (0.4) and clicked
-    // screen-center twice without focusing. Never semantic-click for focus.
-    if (isWindowFocusIntent(input.targetDescription, input.taskContext)) {
-      const fragment = extractWindowTitleFragment(input.targetDescription, input.taskContext)
-      if (fragment !== undefined) {
-        const candidates = (context.semanticContext?.elements ?? [])
-          .map((element) => element.name ?? element.text ?? "")
-          .filter((name) => name.length > 0)
-        if (context.semanticContext?.windowTitle !== undefined && context.semanticContext.windowTitle.length > 0) {
-          candidates.push(context.semanticContext.windowTitle)
-        }
-        const resolved = resolveWindowTitleFragment(fragment, candidates) ?? fragment
-        const result: ComputerUseResult = {
-          success: true,
-          provider: "semantic",
-          action: { type: "focus_window", window: resolved },
-          confidence: 0.9,
-          reasoning: `Titled window-focus intent routes to focus_window "${resolved}" instead of a semantic center-click (no center-click on named-window intents).`,
-          evidence: [`focus_window title: ${resolved}`, `extracted fragment: ${fragment}`],
-          latencyMs: 0,
-        }
-        this.record("semantic", result)
-        this.options.events?.emit("computer_use.analyzed", {
-          data: { provider: result.provider, operation: input.operation, confidence: result.confidence, latencyMs: 0, fallbacks: 0 },
-        })
-        return { decision, result, fallbacks: 0, context }
-      }
+    // Titled window-focus intents bypass semantic.analyze entirely: the
+    // (960,539) regression came from a 0.4 over-match feeding a blind
+    // bounds-center click, so a named-window intent never reaches a provider.
+    // A focus intent without a title still has to route (it lands on
+    // activate_app), so it takes the same chain. The steps below only ever
+    // emit a resolvable window action, a P0-safe grounding point on the window
+    // body, or a loud failure — never a screen-center click.
+    const focusIntent =
+      isWindowFocusIntent(input.targetDescription, input.taskContext) ||
+      isTitlelessFocusIntent(input.targetDescription, input.taskContext)
+    if (focusIntent) {
+      return await this.windowFocusRouting(input, context, decision)
     }
     const action = windowManagementFallback({
       targetDescription: input.targetDescription,
@@ -857,6 +1030,191 @@ export class ComputerUseService {
     }
     this.record("semantic", result)
     return { decision, result, fallbacks: 0, context }
+  }
+
+  /**
+   * Focus-intent routing. A focus intent never reaches semantic.analyze (its
+   * over-match is what produced the (960,539) center-click), so the whole
+   * decision is made here:
+   *
+   *   focus_window(full title) → focus_window(best fragment) → activate_app(app)
+   *   → vision-ground the window body (P0-safe, never the title strip)
+   *   → fail loudly.
+   *
+   * An intent that names no title has nothing to resolve, so it skips straight
+   * to the application it names. Every step either emits a real window action
+   * or stops the chain. A screen-center click is never emitted, and no step
+   * claims the window is focused: the post-action observation decides that
+   * (see confirmFocus).
+   */
+  private async windowFocusRouting(
+    input: AnalyzeInput,
+    context: ComputerUseContext,
+    decision: RoutingDecision,
+  ): Promise<ComputerUseAnalysis> {
+    const titles = await focusTitleCandidates(input.targetDescription, input.taskContext)
+    const live = windowTitlesFrom(context)
+    // The title the request actually names. An intent that names none ("focus
+    // the kitty terminal") has no window to resolve, so it skips the whole
+    // title chain and its first step is the application it names. Everything
+    // below only ever emits a resolvable window action, a P0-safe grounding
+    // point on the window body, or a loud failure — never a screen-center
+    // click, and never a claim that the window is focused.
+    const requested = extractWindowTitleFragment(input.targetDescription, input.taskContext)
+    // Only an intent that names a title runs the title chain; without one there
+    // is no window to resolve and the chain starts at the application.
+    if (requested !== undefined) {
+      const full = titles[0]
+      if (full !== undefined) {
+        const resolved = resolveWindowTitleFragment(full, live)
+        // An unresolved full title still wins when there is no window list to
+        // check it against: the server resolves it (or answers window_not_found)
+        // authoritatively, and refusing here would refuse every titled intent on
+        // a computer with no accessibility tree.
+        if (resolved !== undefined || live.length === 0) {
+          return this.focusWindowAnalysis(input, decision, context, resolved ?? full, full, requested)
+        }
+      }
+      for (const fragment of titles.slice(1)) {
+        const resolved = resolveWindowTitleFragment(fragment, live)
+        if (resolved !== undefined) return this.focusWindowAnalysis(input, decision, context, resolved, fragment, requested)
+      }
+    }
+    const app = focusApplication(input.targetDescription, input.taskContext)
+    if (app !== undefined) {
+      const result: ComputerUseResult = {
+        success: true,
+        provider: "semantic",
+        action: { type: "activate_app", window: app },
+        confidence: 0.8,
+        reasoning: `Window-focus intent has no resolvable title, so it activates application "${app}" instead of guessing a window.`,
+        evidence: [`activate_app: ${app}`, "no title candidate resolved to an open window"],
+        metadata: { app, focusIntent: true },
+        latencyMs: 0,
+      }
+      this.record("semantic", result)
+      return { decision, result, fallbacks: 0, context }
+    }
+    const grounded = await this.groundWindowBody(input, context, requested)
+    if (grounded !== undefined) {
+      const { point, window } = grounded
+      const result: ComputerUseResult = {
+        success: true,
+        provider: "semantic",
+        action: { type: "click", target: { x: point.x, y: point.y, label: window.name } },
+        confidence: 0.4,
+        reasoning: `Window-focus intent could not be resolved by title or application, so it grounds the body of window "${window.name ?? "the target window"}" below the title strip. This is a last resort and is not evidence that the window is focused.`,
+        evidence: [
+          `aim: bounds-center of the window body (${point.x},${point.y}), never the title strip`,
+          "no title candidate or application name resolved to an open window",
+        ],
+        metadata: { aim: "bounds-center", focusIntent: true, ...(window.elementId === undefined ? {} : { groundedElement: window.elementId }), window: window.name },
+        latencyMs: 0,
+      }
+      this.record("semantic", result)
+      return { decision, result, fallbacks: 0, context }
+    }
+    // Fail loudly: no title, no application, no safe window body to ground.
+    // Claiming anything here would be the bug this whole path exists to stop.
+    const detail = `${input.targetDescription ?? input.taskContext ?? "focus"}`
+    return {
+      decision: {
+        ...decision,
+        provider: "none",
+        reason: [
+          ...decision.reason,
+          "window-focus intent has no resolvable title, application, or safe window body to ground",
+        ],
+      },
+      fallbacks: 0,
+      errorCode: "window_not_found",
+      context,
+      result: {
+        success: false,
+        provider: "none",
+        confidence: 0.15,
+        errorCode: "window_not_found",
+        reasoning: `The window-focus intent "${detail}" cannot be resolved: no open window matches the named title and no application or safe window body could be derived from it. Observe the screen with computer_observe and name the window by its title, or activate the application directly.`,
+        evidence: ["no center-click and no blind window click was attempted for this intent"],
+        latencyMs: 0,
+      },
+    }
+  }
+
+  private focusWindowAnalysis(
+    input: AnalyzeInput,
+    decision: RoutingDecision,
+    context: ComputerUseContext,
+    window: string,
+    tried: string,
+    requested: string,
+  ): ComputerUseAnalysis {
+    const result: ComputerUseResult = {
+      success: true,
+      provider: "semantic",
+      action: { type: "focus_window", window },
+      confidence: 0.9,
+      reasoning: `Window-focus intent routes to focus_window "${window}" instead of a semantic center-click (named-window intents never click).`,
+      evidence: [
+        `focus_window title: ${window}`,
+        `requested title: ${requested}`,
+        ...(tried === requested ? [] : [`resolved from candidate: ${tried}`]),
+      ],
+      // The title the request named is what post-action verification compares
+      // the active window against, so an over-matched candidate cannot verify
+      // itself by renaming the expectation.
+      metadata: { focusWindow: window, focusRequested: requested, focusIntent: true },
+      latencyMs: 0,
+    }
+    this.record("semantic", result)
+    this.options.events?.emit("computer_use.analyzed", {
+      data: { provider: result.provider, operation: input.operation, confidence: result.confidence, latencyMs: 0, fallbacks: 0 },
+    })
+    return { decision, result, fallbacks: 0, context }
+  }
+
+  /**
+   * Last-resort grounding for a focus intent: a point inside the target
+   * window's body, never in the title strip, never the screen center. A
+   * window that covers the whole screen has no body to ground (its center is
+   * the screen center, which is the wrong-element path this replaces), so it
+   * resolves to undefined and the chain fails loudly instead.
+   */
+  private async groundWindowBody(
+    input: AnalyzeInput,
+    context: ComputerUseContext,
+    requested: string | undefined,
+  ): Promise<{ point: { x: number; y: number }; window: SemanticElement } | undefined> {
+    const image = context.image
+    const logicalScreen = (await this.logicalScreenFor(input.computerId)) ?? image
+    if (logicalScreen === undefined) return undefined
+    const windows = (context.semanticContext?.elements ?? []).filter((element) => WINDOW_ROLES.has((element.role ?? "").toLowerCase()))
+    if (windows.length === 0) return undefined
+    const candidates = await titleMatchedWindows(windows, requested)
+    if (candidates.length === 0) return undefined
+    const closePoints = findKnownClosePoints(context.semanticContext?.elements, image, context.platform)
+    const allowed = candidates.flatMap((element) => {
+      const point = windowBodyPoint(element, image, context.platform)
+      if (point === undefined) return []
+      // A window that fills the screen has no usable body: its center is the
+      // screen center the (960,539) regression clicked.
+      const bounds = element.bounds
+      if (
+        bounds !== undefined &&
+        image !== undefined &&
+        bounds.x <= 0 &&
+        bounds.y <= 0 &&
+        bounds.width >= image.width &&
+        bounds.height >= image.height
+      ) {
+        return []
+      }
+      const screenCenter = { x: logicalScreen.width / 2, y: logicalScreen.height / 2 }
+      if (Math.abs(point.x - screenCenter.x) <= 25 && Math.abs(point.y - screenCenter.y) <= 25) return []
+      const guard = checkCloseGuard(point, closePoints)
+      return guard.safe ? [{ point, window: element }] : []
+    })
+    return allowed[0]
   }
 
   // Central P0 validation for any grounded action before it is returned or
@@ -1555,6 +1913,261 @@ function isVisionPointAction(result: ComputerUseResult): boolean {
   const y = action.target?.y
   if (typeof x === "number" && typeof y === "number") return true
   return action.path !== undefined && action.path.length > 0
+}
+
+const WINDOW_ROLES = new Set(["window", "frame", "dialog", "application"])
+const TITLE_FRAGMENT_SPLIT = /[|\u2014\u2013]+/
+const FOCUS_VERB_PATTERN = /\b(?:focus|activate|raise|switch\s+to|select|bring[\s\S]*?front)\b[:\s]*(.+)/i
+const TITLE_INTRO_PATTERN = /\b(?:titled|named|called|with\s+title|title)\b/i
+// A quoted span names a window title, not an application: dropping it whole
+// stops `focus the "Zz | Missing" window` from activating an app called "Zz".
+const QUOTED_SPAN_PATTERN = /"[^"]*"|'[^']*'|\u201c[^\u201d]*\u201d/g
+// Nouns that describe the container rather than an application: "focus the
+// terminal" must not become activate_app("terminal").
+const FOCUS_APP_STOPWORDS = new Set([
+  "window",
+  "terminal",
+  "app",
+  "dialog",
+  "application",
+  "desktop",
+  "screen",
+  "monitor",
+  "workspace",
+  "workspaces",
+  "the",
+  "a",
+  "an",
+  "to",
+  "in",
+  "on",
+  "it",
+  "this",
+  "that",
+  "back",
+  "front",
+  "up",
+  "and",
+  "or",
+  "please",
+  "now",
+  "my",
+  "me",
+])
+
+// ./title-extract.ts holds the shared pure helpers for focus titles. The
+// specifier is indirect on purpose so this file stays self-sufficient while
+// that module is still landing: the local implementations below carry the
+// behaviour, and the external list is only used when it actually yields
+// candidates. Both sides are typed readonly string[].
+const TITLE_EXTRACT_MODULE = "./title-extract.js"
+
+interface TitleExtractModule {
+  readonly extractTitleCandidates?: (target?: string, task?: string) => readonly string[]
+  readonly titleOverlap?: (query: string, title: string) => number
+}
+
+async function focusTitleCandidates(target: string | undefined, task: string | undefined): Promise<readonly string[]> {
+  const external = (await import(TITLE_EXTRACT_MODULE).catch(() => undefined)) as TitleExtractModule | undefined
+  const extract = external?.extractTitleCandidates
+  // A module that has not landed yet, or that turns out to take different
+  // arguments, degrades to the local list instead of failing the action.
+  const claimed =
+    typeof extract === "function"
+      ? await Promise.resolve()
+          .then(() => extract(target, task))
+          .catch(() => [] as readonly string[])
+      : []
+  // The quoted/titled fragment is the most specific request, so it leads; the
+  // title-extract views and the pipe/dash fragments follow behind it.
+  const local = localTitleCandidates(target, task)
+  const candidates = local.length === 0 ? claimed : [local[0], ...claimed, ...local.slice(1)]
+  return [
+    ...new Set(
+      candidates.flatMap((candidate) => (typeof candidate === "string" && candidate.trim().length > 0 ? [candidate.trim()] : [])),
+    ),
+  ]
+}
+
+// Ordered title candidates for a focus intent: the full title first (the most
+// specific request), then its pipe/dash-separated fragments, longest first.
+// `OC | Quick hello` yields `OC | Quick hello`, `Quick hello`, `OC`.
+function localTitleCandidates(target?: string, task?: string): readonly string[] {
+  const full = extractWindowTitleFragment(target, task)
+  if (full === undefined) return []
+  const fragments = full
+    .split(TITLE_FRAGMENT_SPLIT)
+    .map((fragment) => fragment.trim())
+    .filter((fragment) => fragment.length >= 2)
+    .sort((left, right) => right.length - left.length)
+  return [full, ...fragments.filter((fragment) => fragment.toLowerCase() !== full.toLowerCase())]
+}
+
+// Live window titles to resolve a fragment against: windows first, then other
+// element names, then the observed window title. No candidates means the caller
+// must not guess — it asks the server, which answers authoritatively.
+function windowTitlesFrom(context: ComputerUseContext): readonly string[] {
+  const elements = context.semanticContext?.elements ?? []
+  const names = elements.flatMap((element) => {
+    const role = (element.role ?? "").toLowerCase()
+    return WINDOW_ROLES.has(role) ? [element.name ?? element.text ?? ""] : []
+  })
+  const rest = elements
+    .filter((element) => !WINDOW_ROLES.has((element.role ?? "").toLowerCase()))
+    .flatMap((element) => [element.name ?? "", element.text ?? ""])
+  const all = [...names, ...rest, context.semanticContext?.windowTitle ?? ""]
+  return [...new Set(all.map((value) => value.trim()).filter((value) => value.length > 0))]
+}
+
+// The application a title-less focus intent names: the first non-container word
+// of the object phrase. "focus the kitty terminal" -> "kitty".
+function focusApplication(target?: string, task?: string): string | undefined {
+  for (const source of [target ?? "", task ?? ""]) {
+    if (source.trim().length === 0) continue
+    const verb = source.match(FOCUS_VERB_PATTERN)?.[1]
+    if (verb === undefined) continue
+    const intro = verb.search(TITLE_INTRO_PATTERN)
+    const phrase = intro >= 0 ? verb.slice(0, intro) : verb
+    const token = phrase
+      .toLowerCase()
+      .replace(QUOTED_SPAN_PATTERN, " ")
+      .replace(/["'\u201c\u201d]/g, " ")
+      .split(/[^a-z0-9+._-]+/)
+      .find((candidate) => candidate.length >= 2 && !FOCUS_APP_STOPWORDS.has(candidate))
+    if (token !== undefined) return token
+  }
+  return undefined
+}
+
+// The windows a named title honestly refers to, scored with the same overlap
+// the title extractor uses and gated by the shared match threshold. A bare
+// `title.includes(fragment)` is the over-match that produced the (960,539)
+// click, so a window that does not clear the threshold is not a window to
+// click: grounding finds nothing and the chain fails loudly instead.
+async function titleMatchedWindows(
+  windows: readonly SemanticElement[],
+  requested: string | undefined,
+): Promise<readonly SemanticElement[]> {
+  const wanted = requested?.trim()
+  if (wanted === undefined || wanted.length === 0) return windows
+  const module = (await import(TITLE_EXTRACT_MODULE).catch(() => undefined)) as TitleExtractModule | undefined
+  const overlap = module?.titleOverlap
+  if (overlap === undefined) return []
+  return windows.filter((element) => overlap(wanted, element.name ?? "") >= MATCH_THRESHOLD)
+}
+
+// A point inside the window body: the horizontal center, and vertically the
+// body center clamped below the title strip so no focus intent can ever ground
+// a window control. Points that stay inside the title strip are rejected.
+function windowBodyPoint(
+  element: SemanticElement,
+  image: ImageReference | undefined,
+  platform: ComputerUsePlatform | undefined,
+): { x: number; y: number } | undefined {
+  const bounds = element.bounds
+  if (bounds === undefined || !Number.isFinite(bounds.x) || !Number.isFinite(bounds.y)) return undefined
+  if (bounds.width <= 0 || bounds.height <= 0) return undefined
+  const { yThreshold } = titleBarThresholds(image, platform)
+  const x = Math.round(bounds.x + bounds.width / 2)
+  const y = Math.round(Math.max(bounds.y + bounds.height / 2, bounds.y + yThreshold + 8))
+  const point = { x: Math.max(0, x), y: Math.max(0, y) }
+  return isTitleBarPoint(point, image, platform) ? undefined : point
+}
+
+interface ActiveWindow {
+  readonly id?: string
+  readonly title?: string
+}
+
+// A focus intent that names no title ("focus the kitty terminal") still needs
+// routing: without it the generic Alt+Tab keyboard fallback would fire. Only
+// window-management focus verbs qualify, so minimize/restore/show-desktop and
+// in-window clicks keep their existing paths.
+function isTitlelessFocusIntent(targetDescription?: string, taskContext?: string): boolean {
+  if (isWindowFocusIntent(targetDescription, taskContext)) return false
+  if (!isWindowManagementIntent(targetDescription, taskContext)) return false
+  if (isMinimizeIntent(targetDescription, taskContext) || isRestoreIntent(targetDescription, taskContext)) return false
+  return isFocusIntent(targetDescription, taskContext)
+}
+
+// The active window as observed after an action: the focused window element
+// when the tree names one, otherwise the observation's active-window hint
+// (metadata.activeWindow may be a title or an object with id/title).
+function activeWindowFromObservation(observation: Observation | undefined): ActiveWindow | undefined {
+  if (observation === undefined) return undefined
+  const elements = observation.elements ?? []
+  const focused = elements.find(
+    (element) => WINDOW_ROLES.has((element.role ?? "").toLowerCase()) && (element.states ?? []).includes("focused"),
+  )
+  if (focused !== undefined) {
+    return {
+      ...(focused.id === undefined ? {} : { id: focused.id }),
+      ...(focused.name === undefined ? {} : { title: focused.name }),
+    }
+  }
+  const hinted = metadataActiveWindow(observation.metadata)
+  if (hinted !== undefined) return hinted
+  const title = metadataString(observation.metadata, ["activeWindow", "activeWindowTitle", "windowTitle"])
+  return title === undefined ? undefined : { title }
+}
+
+function metadataActiveWindow(metadata: Observation["metadata"]): ActiveWindow | undefined {
+  const value = isRecord(metadata) ? metadata.activeWindow : undefined
+  if (typeof value === "string") return value.trim().length === 0 ? undefined : { title: value.trim() }
+  if (!isRecord(value)) return undefined
+  const id = typeof value.id === "string" && value.id.length > 0 ? value.id : undefined
+  const title = [value.title, value.name].find((entry): entry is string => typeof entry === "string" && entry.length > 0)
+  return { ...(id === undefined ? {} : { id }), ...(title === undefined ? {} : { title }) }
+}
+
+// The window id a requested title resolves to in this observation. Used so a
+// focus is confirmed by the resolved id even when the visible title differs
+// (for example a renamed or truncated window title).
+function windowIdForTitle(observation: Observation | undefined, title: string | undefined): string | undefined {
+  const wanted = title?.trim().toLowerCase()
+  if (observation === undefined || wanted === undefined || wanted.length === 0) return undefined
+  const matched = (observation.elements ?? []).find(
+    (element) => WINDOW_ROLES.has((element.role ?? "").toLowerCase()) && (element.name ?? "").toLowerCase().includes(wanted),
+  )
+  return matched?.id
+}
+
+function metadataString(metadata: Observation["metadata"], keys: readonly string[]): string | undefined {
+  if (!isRecord(metadata)) return undefined
+  for (const key of keys) {
+    const value = metadata[key]
+    if (typeof value === "string" && value.trim().length > 0) return value.trim()
+  }
+  return undefined
+}
+
+interface ElementState {
+  readonly states: readonly string[]
+  readonly value?: string
+}
+
+function elementStateById(observation: Observation | undefined, ref: string): ElementState | undefined {
+  const element = (observation?.elements ?? []).find(
+    (candidate) => candidate.id === ref || candidate.reference?.elementId === ref,
+  )
+  if (element === undefined) return undefined
+  const value =
+    typeof element.value === "string"
+      ? element.value
+      : element.value === undefined
+        ? undefined
+        : JSON.stringify(element.value)
+  return { states: element.states ?? [], ...(value === undefined ? {} : { value }) }
+}
+
+// The only proof a ref click landed is a change this element can own: the
+// focused state, its value, or its state set. Identical before/after is not
+// evidence, and neither is an element the pre-action read never saw.
+function elementStateChange(before: ElementState, after: ElementState): { field: string } | undefined {
+  const sameStates = before.states.length === after.states.length && before.states.every((state, index) => state === after.states[index])
+  if (!sameStates) return { field: after.states.includes("focused") && !before.states.includes("focused") ? "focused" : "states" }
+  if (before.value !== after.value) return { field: "value" }
+  return undefined
 }
 
 export function defaultComputerUseSettingsFile(): string {

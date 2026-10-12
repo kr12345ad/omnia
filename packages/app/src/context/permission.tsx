@@ -2,6 +2,11 @@ import { createEffect, createMemo, createRoot, getOwner, onCleanup } from "solid
 import { createStore, produce } from "solid-js/store"
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import type { PermissionRequest } from "@opencode-ai/sdk/v2/client"
+import {
+  parseComputerUseApproval,
+  parseComputerUseOutcome,
+  type ComputerUseOutcome,
+} from "@/computer-use"
 import { Persist, persisted } from "@/utils/persist"
 import type { ServerSDK } from "@/context/server-sdk"
 import type { ServerSync } from "./server-sync"
@@ -158,6 +163,9 @@ export const { use: usePermission, provider: PermissionProvider } = createSimple
       autoResponds(permission: PermissionRequest, directory?: string) {
         return selected().autoResponds(permission, directory)
       },
+      computerUseOutcome(sessionID: string) {
+        return selected().computerUseOutcome(sessionID)
+      },
       isAutoAccepting(sessionID: string, directory?: string) {
         return selected().isAutoAccepting(sessionID, directory)
       },
@@ -230,6 +238,44 @@ function createServerPermissionState(input: { sdk: ServerSDK; sync: ServerSync }
   const responded = new Map<string, number>()
   const enableVersion = new Map<string, number>()
   const meta = { disposed: false }
+
+  // The dock reports what the last computer-use action in a session actually
+  // did, so a human approving the next one sees whether the previous action was
+  // verified. The watch is keyed by tool call id and bounded: an approval the
+  // model abandoned in flight still leaves the part store to scan.
+  const MAX_WATCHED_ASKS = 64
+  const [outcomes, setOutcomes] = createStore({} as Record<string, ComputerUseOutcome | undefined>)
+  const [watched, setWatched] = createStore({} as Record<string, string>)
+
+  createEffect(() => {
+    const pending = Object.keys(watched)
+    if (pending.length === 0) return
+    const wanted = new Set(pending)
+    const settled = new Set<string>()
+    for (const parts of Object.values(input.sync.session.data.part)) {
+      if (parts === undefined) continue
+      for (const part of parts) {
+        if (part.type !== "tool") continue
+        if (!wanted.has(part.callID)) continue
+        // A running part has no result yet, and a verdict read from one would
+        // be invented rather than observed.
+        if (part.state.status !== "completed" && part.state.status !== "error") continue
+        const outcome = parseComputerUseOutcome(part)
+        if (outcome === undefined) continue
+        const sessionID = watched[part.callID]
+        wanted.delete(part.callID)
+        settled.add(part.callID)
+        if (meta.disposed || sessionID === undefined) continue
+        setOutcomes(sessionID, outcome)
+      }
+    }
+    if (settled.size === 0) return
+    setWatched(
+      produce((draft) => {
+        for (const callID of settled) delete draft[callID]
+      }),
+    )
+  })
 
   function pruneResponded(now: number) {
     for (const [id, ts] of responded) {
@@ -334,7 +380,24 @@ function createServerPermissionState(input: { sdk: ServerSDK; sync: ServerSync }
   const handlePermission = (e: PermissionEvent) => {
     const event = e.details
     if (event?.type !== "permission.asked") return
+    recordComputerUseAsk(event.properties)
     void respondPending(event.properties, e.name)
+  }
+
+  function recordComputerUseAsk(permission: PermissionRequest) {
+    const callID = permission.tool?.callID
+    if (callID === undefined) return
+    if (parseComputerUseApproval({ permission: permission.permission, metadata: permission.metadata }) === undefined) return
+    if (meta.disposed) return
+    setWatched(
+      produce((draft) => {
+        const keys = Object.keys(draft)
+        if (keys.length >= MAX_WATCHED_ASKS) {
+          for (const key of keys.slice(0, keys.length - MAX_WATCHED_ASKS + 1)) delete draft[key]
+        }
+        draft[callID] = permission.sessionID
+      }),
+    )
   }
 
   const unsubscribe = input.sdk.event.listen((event) => {
@@ -467,6 +530,10 @@ function createServerPermissionState(input: { sdk: ServerSDK; sync: ServerSync }
       if (meta.disposed) return false
       const [childStore] = input.sync.child(directory)
       return childStore.config.permission === "allow"
+    },
+    computerUseOutcome(sessionID: string) {
+      if (meta.disposed) return undefined
+      return outcomes[sessionID]
     },
   }
 

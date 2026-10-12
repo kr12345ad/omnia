@@ -1,4 +1,4 @@
-import type { ComputerUseCapabilities, ComputerUseModel } from "./types"
+import type { ComputerUseCapabilities, ComputerUseModel, ComputerUseRuntime } from "./types"
 
 const GB = 1e9
 const OVERHEAD_BYTES = 0.35 * GB
@@ -245,4 +245,135 @@ export function findModel(catalog: readonly ComputerUseModel[], id: string): Com
 
 export function recommendedModel(catalog: readonly ComputerUseModel[]): ComputerUseModel | undefined {
   return catalog.find((model) => model.recommended) ?? catalog.find((model) => model.provider === "ui-tars") ?? catalog.find((model) => model.provider === "moondream")
+}
+
+// ---- session pinning -------------------------------------------------------
+//
+// A session grounds a sequence of actions with ONE model. Re-resolving the
+// model per action is where that breaks: `selectModel` in providers.ts picks
+// `preferred ?? recommended ?? compatible[0]`, and the smallest-under-a-memory-
+// cap sort for ShowUI, so an install or uninstall between two actions of the
+// same session quietly moves grounding onto a different model. Nothing in the
+// transcript looks wrong — the ids are both plausible, the confidences are both
+// high — and the click lands wherever the second model thinks the target is.
+//
+// The failure that matters is narrower than "a different model". It is a model
+// with different AIM SEMANTICS: `coordinateSpace` is what a raw number from the
+// model MEANS. UI-TARS answers in normalized-1000, Moondream in normalized-1,
+// ShowUI in absolute pixels. Two models that disagree on that cannot be swapped
+// mid-session, because (500, 500) is a pixel in one space and the exact centre
+// of the screen in another. A pin binds the model id, its provider and its
+// coordinate space together, and resolving it refuses to hand back anything
+// that disagrees.
+
+/**
+ * What a grounded point from a model is denominated in.
+ *
+ * Mirrors `ComputerUseModel["coordinateSpace"]`, which is otherwise an inline
+ * union. `absolute` is the default when a model does not declare one, because
+ * that is what parse.ts assumes for an unlabelled output.
+ */
+export type CoordinateSpace = "normalized-1" | "normalized-1000" | "absolute"
+
+/** A model a session is pinned to, together with the aim semantics it used. */
+export interface ModelPin {
+  readonly modelId: string
+  readonly provider: string
+  readonly coordinateSpace: CoordinateSpace
+}
+
+/**
+ * What a pinned model resolves to against the catalog a later action would use.
+ *
+ * `resolved` is the only outcome a session may continue on. `removed` means the
+ * model is gone, or its id is now served by somebody else. `reinterpreted`
+ * means a model with the same id is offered with DIFFERENT aim semantics, which
+ * is the swap that moves clicks without anything looking wrong — the caller has
+ * to re-pin deliberately, never inherit it.
+ */
+export type ModelPinMatch =
+  | { readonly status: "resolved"; readonly model: ComputerUseModel }
+  | { readonly status: "removed"; readonly reason: string }
+  | { readonly status: "reinterpreted"; readonly reason: string }
+
+export function pinModel(model: ComputerUseModel): ModelPin {
+  return {
+    modelId: model.id,
+    provider: model.provider,
+    coordinateSpace: model.coordinateSpace ?? "absolute",
+  }
+}
+
+export function resolvePinnedModel(pin: ModelPin, catalog: readonly ComputerUseModel[]): ModelPinMatch {
+  const entry = catalog.find((candidate) => candidate.id === pin.modelId)
+  if (entry === undefined) {
+    return {
+      status: "removed",
+      reason: `Model ${pin.modelId} is no longer in the catalog, so it cannot ground this session. Re-observe and pin a model that is installed.`,
+    }
+  }
+  // The hosted catalog derives its id from OMNIA_COMPUTER_USE_HOSTED_NAME, so a
+  // rebuilt catalog can hand the same id to a different endpoint. That is a
+  // different model, not the same one under a new name.
+  if (entry.provider !== pin.provider) {
+    return {
+      status: "removed",
+      reason: `Model ${pin.modelId} is now served by ${entry.provider}, not the ${pin.provider} this session pinned.`,
+    }
+  }
+  const space = entry.coordinateSpace ?? "absolute"
+  if (space !== pin.coordinateSpace) {
+    return {
+      status: "reinterpreted",
+      reason: `Model ${pin.modelId} now grounds in ${space}, not ${pin.coordinateSpace}. The same output number is a different pixel, so this session must re-pin before acting again.`,
+    }
+  }
+  return { status: "resolved", model: entry }
+}
+
+/** A runtime a session is pinned to, with the exact bytes it was installed from. */
+export interface RuntimePin {
+  readonly runtimeId: string
+  readonly backend: string
+  /** Every archive sha256 the runtime is installed from, sorted. */
+  readonly archives: readonly string[]
+}
+
+export type RuntimePinMatch =
+  | { readonly status: "resolved"; readonly runtime: ComputerUseRuntime }
+  | { readonly status: "removed"; readonly reason: string }
+  | { readonly status: "reinterpreted"; readonly reason: string }
+
+export function pinRuntime(runtime: ComputerUseRuntime): RuntimePin {
+  return {
+    runtimeId: runtime.id,
+    backend: runtime.backend,
+    archives: runtime.archives.map((archive) => archive.sha256).sort(),
+  }
+}
+
+export function resolvePinnedRuntime(pin: RuntimePin, runtimes: readonly ComputerUseRuntime[]): RuntimePinMatch {
+  const entry = runtimes.find((candidate) => candidate.id === pin.runtimeId)
+  if (entry === undefined) {
+    return {
+      status: "removed",
+      reason: `Runtime ${pin.runtimeId} is no longer in the catalog, so it cannot load weights for this session.`,
+    }
+  }
+  if (entry.backend !== pin.backend) {
+    return {
+      status: "reinterpreted",
+      reason: `Runtime ${pin.runtimeId} now reports backend ${entry.backend}, not ${pin.backend}. A different llama.cpp build can decode the same weights differently.`,
+    }
+  }
+  const archives = entry.archives.map((archive) => archive.sha256).sort()
+  // The sha256 pins are the authoritative identity of the bytes. A runtime that
+  // resolves to the same id over different bytes is a different runtime.
+  if (archives.join(",") !== pin.archives.join(",")) {
+    return {
+      status: "reinterpreted",
+      reason: `Runtime ${pin.runtimeId} is now installed from different archive pins than the ones this session started on.`,
+    }
+  }
+  return { status: "resolved", runtime: entry }
 }

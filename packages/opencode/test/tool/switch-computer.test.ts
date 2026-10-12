@@ -9,9 +9,10 @@ import { MessageID } from "@/session/schema"
 import { Agent } from "@/agent/agent"
 import { Truncate } from "@/tool/truncate"
 import { Tool } from "@/tool/tool"
-import { SwitchComputerTool } from "@/tool/computer/switch"
+import { SwitchComputerTool, observationRefusal } from "@/tool/computer/switch"
 import { ComputerActTool } from "@/tool/computer/act"
 import { ComputerObserveTool } from "@/tool/computer/observe"
+import { ComputerSnapshotTool } from "@/tool/computer/snapshot"
 import {
   COMPUTER_SELECTION_METADATA_KEY,
   computerId,
@@ -28,17 +29,54 @@ const devices: Computer[] = [
   { id: "remote-offline", name: "Office PC", platform: "win32", connected: false },
 ]
 let computers: Computer[] = devices
+
+// Each computer answers with its own tree, and the mac repeats one ref string
+// the local machine also exposes: a ref is only ever identified by the computer
+// whose tree it was read from, never by its shape.
+const LOCAL_ELEMENTS = [
+  { id: "atspi:1", role: "button", name: "Minimize" },
+  { id: "atspi:2", role: "textfield", name: "Command" },
+]
+const MAC_ELEMENTS = [
+  { id: "atspi:1", role: "button", name: "Close" },
+  { id: "atspi:3", role: "button", name: "Safari" },
+]
+const trees: Record<string, { observationId: string; elements: unknown[]; accessibility: string }> = {
+  local: { observationId: "obs-local", elements: LOCAL_ELEMENTS, accessibility: "available" },
+  "remote-mac": { observationId: "obs-mac", elements: MAC_ELEMENTS, accessibility: "degraded" },
+}
+let unreadable: string[] = []
+/** When set, a computer answers with another computer's observation id. */
+let answeringAs: string | undefined
+
+function observationBody(id: string): unknown {
+  const tree = trees[answeringAs ?? id]
+  if (tree === undefined || unreadable.includes(id)) return { ok: false, error: `Computer ${id} did not answer.` }
+  return { ok: true, observation: { id: tree.observationId, elements: tree.elements, warnings: [] } }
+}
+
 const requests: Array<{ url: string; body?: string }> = []
 const http = HttpClient.make((request) => {
   const value = request.body.toJSON()
   const body = typeof value === "object" && value !== null && "body" in value && typeof value.body === "string"
     ? value.body : undefined
   requests.push({ url: request.url, body })
-  const response = request.url.endsWith("/v1/computers")
-    ? { ok: true, computers }
-    : request.url.endsWith("/observe")
-      ? { ok: true, observation: { id: "fresh-observation", elements: [] } }
-      : { ok: true, result: { success: true, status: "success", message: "Launched.", verification: { status: "verified" } } }
+  const path = new URL(request.url).pathname
+  const summary = /^\/v1\/computers\/([^/]+)$/.exec(path)
+  const observed = /^\/v1\/computers\/([^/]+)\/observe$/.exec(path)
+  const response = summary !== null
+    ? {
+        ok: true,
+        computer: {
+          id: summary[1]!,
+          capabilities: [{ capability: "accessibility", status: trees[summary[1]!]?.accessibility ?? "unknown" }],
+        },
+      }
+    : observed !== null
+      ? observationBody(observed[1]!)
+      : path === "/v1/computers"
+        ? { ok: true, computers }
+        : { ok: true, result: { success: true, status: "success", message: "Launched.", verification: { status: "verified" } } }
   return Effect.succeed(HttpClientResponse.fromWeb(request, new Response(JSON.stringify(response), {
     headers: { "content-type": "application/json" },
   })))
@@ -57,6 +95,8 @@ function withEnv<A, E, R>(run: () => Effect.Effect<A, E, R>) {
       process.env.OMNIA_SERVER_TOKEN = "switch-test-token"
       process.env.OMNIA_COMPUTER_ID = "local"
       computers = devices
+      unreadable = []
+      answeringAs = undefined
       requests.length = 0
       return previous
     }),
@@ -67,6 +107,8 @@ function withEnv<A, E, R>(run: () => Effect.Effect<A, E, R>) {
         else process.env[key] = previous[index]
       }
       computers = devices
+      unreadable = []
+      answeringAs = undefined
     }),
   )
 }
@@ -190,6 +232,151 @@ describe("switch_computer", () => {
       const config = yield* configFromEnv()
       expect(yield* computerId(http, config, session.id)).toBe("remote-mac")
       expect(yield* failure(computerId(http, { ...config, url: "http://different.example" }, session.id))).toContain("different control plane")
+    }),
+  ))
+
+  it.instance("reports the new computer, its accessibility state and whether a fresh observation is required", () => withEnv(() =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create()
+      const tool = yield* Tool.init(yield* SwitchComputerTool)
+      const mac = JSON.parse((yield* tool.execute({ computerId: "remote-mac" }, context(session.id))).output)
+      expect(mac.switched).toBe(true)
+      expect(mac.previousComputerId).toBe("local")
+      expect(mac.computerId).toBe("remote-mac")
+      expect(mac.accessibility).toBe("degraded")
+      expect(mac.freshObservationRequired).toBe(true)
+      expect(mac.observationId).toBe("obs-mac")
+      expect(mac.generation).toBeGreaterThan(0)
+      expect(mac.warning).toContain("degraded")
+      expect(mac.next).toContain("fresh computer_snapshot")
+      // A computer left behind loses the observations the session read off it.
+      const back = JSON.parse((yield* tool.execute({ computerId: "local" }, context(session.id))).output)
+      expect(back.computerId).toBe("local")
+      expect(back.previousComputerId).toBe("remote-mac")
+      expect(back.invalidatedObservations).toBeGreaterThan(0)
+      // A readable accessibility tree leaves a live observation behind, so the
+      // next read pages it instead of observing again.
+      expect(back.accessibility).toBe("available")
+      expect(back.freshObservationRequired).toBe(false)
+      // An unreadable computer reports what it could not read; it never guesses.
+      unreadable = ["remote-mac"]
+      const blind = JSON.parse((yield* tool.execute({ computerId: "remote-mac" }, context(session.id))).output)
+      expect(blind.accessibility).toBe("degraded")
+      expect(blind.freshObservationRequired).toBe(true)
+      expect(blind.warning).toContain("could not be read")
+      expect(blind.observationId).toBeUndefined()
+    }),
+  ))
+
+  it.instance("refuses a ref or observation read from another computer and names both computers", () => withEnv(() =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create()
+      const snapshot = yield* Tool.init(yield* ComputerSnapshotTool)
+      const switcher = yield* Tool.init(yield* SwitchComputerTool)
+      const before = yield* snapshot.execute({}, context(session.id))
+      expect(before.metadata.observationId).toBe("obs-local")
+      yield* switcher.execute({ computerId: "remote-mac" }, context(session.id))
+
+      const named = observationRefusal("remote-mac", { observationId: "obs-local", ref: "atspi:2" })
+      expect(named).toBeDefined()
+      expect(named).toContain("computer local")
+      expect(named).toContain("computer remote-mac")
+      expect(named).toContain("observation obs-local")
+      // A bare ref only the previous computer exposed is refused the same way.
+      const bare = observationRefusal("remote-mac", { ref: "atspi:2" })
+      expect(bare).toBeDefined()
+      expect(bare).toContain("computer local")
+      expect(bare).toContain("computer remote-mac")
+      // The new computer's own tree carries atspi:1, so its ref is not refused.
+      expect(observationRefusal("remote-mac", { ref: "atspi:1" })).toBeUndefined()
+      // An identity this session never read off a computer is left to resolve.
+      expect(observationRefusal("remote-mac", { observationId: "obs-never-seen" })).toBeUndefined()
+      // The old observation is dead on the computer it came from, not reusable.
+      const stale = observationRefusal("local", { observationId: "obs-local" })
+      expect(stale).toContain("computer local")
+      expect(stale).toContain("invalidates")
+
+      // The refusal is what the caller is left with: acting with the previous
+      // computer's ref on the new one performs nothing.
+      const act = yield* Tool.init(yield* ComputerActTool)
+      const refused = yield* act.execute(
+        { action: "click", target: "atspi:2", observationId: "obs-local" },
+        context(session.id),
+      )
+      expect(refused.metadata.refused).toBe(true)
+      expect(refused.output).toContain("obs-local")
+      expect(requests.some((request) => request.url.endsWith("/v1/computers/remote-mac/actions"))).toBe(false)
+      // The new computer's own ref still resolves there.
+      const clicked = yield* act.execute({ action: "click", target: "atspi:1" }, context(session.id))
+      expect(clicked.metadata.success).toBe(true)
+      const click = requests.find((request) => request.url.endsWith("/v1/computers/remote-mac/actions"))
+      expect(JSON.parse(click!.body!)).toMatchObject({ target: { elementId: "atspi:1" } })
+    }),
+  ))
+
+  it.instance("refuses a switch when the new computer answers with another computer's observation", () => withEnv(() =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create()
+      const snapshot = yield* Tool.init(yield* ComputerSnapshotTool)
+      const tool = yield* Tool.init(yield* SwitchComputerTool)
+      yield* snapshot.execute({}, context(session.id))
+      yield* tool.execute({ computerId: "remote-mac" }, context(session.id))
+      yield* tool.execute({ computerId: "local" }, context(session.id))
+      // The control plane answers for the mac with the tree read off the local
+      // computer, so binding the session to the mac would hand it a foreign tree.
+      answeringAs = "local"
+      const refused = yield* failure(tool.execute({ computerId: "remote-mac" }, context(session.id)))
+      expect(refused).toContain("Computer remote-mac")
+      expect(refused).toContain("computer local")
+      expect(selectionFromMetadata((yield* sessions.get(session.id)).metadata, yield* configFromEnv())).toBe("local")
+      answeringAs = undefined
+    }),
+  ))
+
+  it.instance("invalidates the previous computer's observations so the next read is a fresh snapshot", () => withEnv(() =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create()
+      const snapshot = yield* Tool.init(yield* ComputerSnapshotTool)
+      const switcher = yield* Tool.init(yield* SwitchComputerTool)
+      const first = yield* snapshot.execute({}, context(session.id))
+      expect(first.metadata.observationId).toBe("obs-local")
+      const second = yield* snapshot.execute({}, context(session.id))
+      const heldForLocal = second.metadata.generation as number
+      expect(heldForLocal).toBeGreaterThan(first.metadata.generation as number)
+      // A re-read of a held generation is served from this computer's own cache.
+      expect((yield* snapshot.execute({ sinceGeneration: heldForLocal }, context(session.id))).metadata.source)
+        .toBe("cache")
+
+      const switched = JSON.parse((yield* switcher.execute({ computerId: "remote-mac" }, context(session.id))).output)
+      expect(switched.invalidatedObservations).toBeGreaterThan(0)
+      const afterSwitch = requests.length
+      // Naming the previous computer's generation never serves that computer's tree.
+      const foreign = yield* snapshot.execute({ sinceGeneration: heldForLocal }, context(session.id))
+      expect(foreign.metadata.observationId).toBe("obs-mac")
+      expect(foreign.output).not.toContain("atspi:2")
+      // The tree the switch read is the one this computer now pages from.
+      const switchedTree = yield* snapshot.execute({ sinceGeneration: switched.generation }, context(session.id))
+      expect(switchedTree.metadata.source).toBe("cache")
+      expect(switchedTree.metadata.observationId).toBe("obs-mac")
+      // A generation this computer does not hold forces a fresh observation.
+      const neverHeld = heldForLocal + 1000
+      const missing = yield* snapshot.execute({ mode: "diff", sinceGeneration: neverHeld }, context(session.id))
+      expect(missing.output).toContain(`generation ${neverHeld} is not held for this scope`)
+      expect(missing.metadata.source).toBe("observation")
+      expect(missing.metadata.observationId).toBe("obs-mac")
+      // And the next read on the new computer observes it, not the one left behind.
+      const observes = requests.filter((request) => request.url.endsWith("/v1/computers/remote-mac/observe")).length
+      const fresh = yield* snapshot.execute({}, context(session.id))
+      expect(fresh.metadata.source).toBe("observation")
+      expect(fresh.metadata.observationId).toBe("obs-mac")
+      expect(requests.filter((request) => request.url.endsWith("/v1/computers/remote-mac/observe")).length)
+        .toBe(observes + 1)
+      // Everything after the switch stays on the new computer.
+      expect(requests.slice(afterSwitch).some((request) => request.url.includes("/v1/computers/local/"))).toBe(false)
     }),
   ))
 })

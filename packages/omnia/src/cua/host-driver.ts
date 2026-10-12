@@ -27,7 +27,16 @@ import type { HostDriver, HostRevalidation } from "../daemon/host-driver"
 import { withInputPermission } from "../daemon/host-driver"
 import type { InputGrabEvent, InputGrabReleasedBy } from "../daemon/linux"
 import { LinuxHostDriver } from "../daemon/linux"
-import { CuaEngine, elementByRef } from "./engine"
+import {
+  bindingMatches,
+  CuaEngine,
+  elementByIdentity,
+  elementByRef,
+  refIdentity,
+  staleBindingMessage,
+  windowAsElement,
+  windowByIdentity,
+} from "./engine"
 import { CuaLiveView, type LiveViewOptions } from "./live-view"
 import type {
   CuaAction,
@@ -47,6 +56,14 @@ import type {
 // matches the Linux helper's 20000-node walk ceiling (the helper is asked for
 // maxElements * 2 nodes) and stays bounded on every platform.
 const FIND_SNAPSHOT_ELEMENTS = 10_000
+
+// The observation a resolved ref came from. Every engine action the driver
+// issues carries it, so the remote computer can refuse a pair that no longer
+// matches instead of rebinding to whatever now shares the ref string.
+interface ResolvedCuaTarget {
+  readonly element: CuaElement
+  readonly snapshot: CuaSnapshot
+}
 
 // Platform fallbacks the engine cannot express: pointer/keyboard synthesis,
 // clipboard, screenshots, process launch, and input freeze. Linux passes the
@@ -352,18 +369,25 @@ export class CuaHostDriver implements HostDriver {
     if (snapshot === undefined) {
       return { valid: false, reason: `Element ${id} could not be checked because no snapshot is available.` }
     }
-    const window = snapshot.windows.find((candidate) => candidate.ref === id)
-    const element = elementByRef(snapshot, id) ?? (window === undefined ? undefined : windowAsElement(window))
+    // A ref is scoped to the observation that minted it, so the historical
+    // string is matched on its identity: the fresh observation minted new
+    // scoped refs for the same elements, and the reference returned below is
+    // the one that works now.
+    const window = windowByIdentity(snapshot, id)
+    const element = elementByIdentity(snapshot, id) ?? (window === undefined ? undefined : windowAsElement(window))
     if (element === undefined)
-      return { valid: false, reason: `Element ${id} is not present in the current observation.` }
+      return { valid: false, reason: `Element ${refIdentity(id)} is not present in the current observation.` }
     if (reference.role !== undefined && element.role !== reference.role) {
-      return { valid: false, reason: `Element ${id} is now ${element.role}, not ${reference.role}.` }
+      return {
+        valid: false,
+        reason: `Element ${refIdentity(id)} is now ${element.role}, not ${reference.role}.`,
+      }
     }
     return {
       valid: true,
       reference: {
         kind: "element",
-        elementId: id,
+        elementId: element.ref,
         observationId: snapshot.id,
         generation: snapshot.generation,
         ...(element.role.length === 0 ? {} : { role: element.role }),
@@ -456,7 +480,15 @@ export class CuaHostDriver implements HostDriver {
     return this.legacyDriver
   }
 
-  private async resolveElement(ref: string): Promise<{ element: CuaElement; snapshot: CuaSnapshot } | undefined> {
+  private async resolveElement(ref: string): Promise<ResolvedCuaTarget | undefined> {
+    // Act must resolve the ref against the observation that minted it, so the
+    // default-budget observation is tried first: a ref taken from an observe is
+    // still bound to it. Only a ref that budget truncated away pays for the
+    // find-sized walk, and that walk reuses the same observation rather than
+    // re-reading the desktop under a different generation.
+    const cached = await this.engine.snapshot().catch(() => undefined)
+    const resolved = this.targetIn(ref, cached)
+    if (resolved !== undefined) return resolved
     // Act and find share one snapshot budget so a ref returned by find is
     // still present when the act path resolves it. A smaller act budget would
     // truncate the valid ref away and refuse it as stale.
@@ -468,15 +500,47 @@ export class CuaHostDriver implements HostDriver {
     return window === undefined ? undefined : { element: windowAsElement(window), snapshot }
   }
 
+  private targetIn(ref: string, snapshot: CuaSnapshot | undefined): ResolvedCuaTarget | undefined {
+    if (snapshot === undefined) return undefined
+    const element = elementByRef(snapshot, ref)
+    if (element !== undefined) return { element, snapshot }
+    const window = snapshot.windows.find((candidate) => candidate.ref === ref)
+    return window === undefined ? undefined : { element: windowAsElement(window), snapshot }
+  }
+
+  private targetByIdentityIn(ref: string, snapshot: CuaSnapshot | undefined): ResolvedCuaTarget | undefined {
+    if (snapshot === undefined) return undefined
+    const element = elementByIdentity(snapshot, ref)
+    if (element !== undefined) return { element, snapshot }
+    const window = windowByIdentity(snapshot, ref)
+    return window === undefined ? undefined : { element: windowAsElement(window), snapshot }
+  }
+
   private async resolveBoundElement(
     action: ComputerAction,
     ref: string,
-  ): Promise<{ element: CuaElement; snapshot: CuaSnapshot } | { stale: ActionResult }> {
+  ): Promise<ResolvedCuaTarget | { stale: ActionResult }> {
     const current = await this.resolveElement(ref)
     if (current === undefined) return { stale: stale(`Target ${ref} is not present in the current observation.`) }
     const mismatch = bindingMismatch(action, current.snapshot)
     if (mismatch !== undefined) return { stale: staleBinding(ref, mismatch, current.snapshot) }
     return current
+  }
+
+  // Re-resolving a ref the driver already holds: an engine action's own
+  // post-action read makes the previous observation stale, so the next step in
+  // the same protocol action retargets the same element — by identity, because
+  // the new observation minted new scoped refs — and binds to that observation.
+  private async retargetElement(ref: string): Promise<ResolvedCuaTarget | { stale: ActionResult }> {
+    const cached = await this.engine.snapshot().catch(() => undefined)
+    const found = this.targetByIdentityIn(ref, cached)
+    if (found !== undefined) return found
+    // Act and find share one snapshot budget, so a ref the default budget
+    // truncated away is still reachable through the find-sized walk.
+    const snapshot = await this.engine.snapshot({ maxElements: FIND_SNAPSHOT_ELEMENTS }).catch(() => undefined)
+    const widened = this.targetByIdentityIn(ref, snapshot)
+    if (widened !== undefined) return widened
+    return { stale: stale(`Target ${refIdentity(ref)} is not present in the current observation.`) }
   }
 
   // undefined means "no element target": the caller may fall back to the global
@@ -526,19 +590,24 @@ export class CuaHostDriver implements HostDriver {
     if (action.type === "type") {
       // NO silent type→set_value: typing is keyboard input after focus. An
       // explicit setvalue action uses the background set_value path.
-      const focused = await this.runCua({ type: "focus", ref }, current.element)
+      const focused = await this.runCua({ type: "focus", ref }, current)
       if (!focused.success) return focused
-      return this.runCua({ type: "type", text: action.text }, current.element)
+      // Focus is one action and its post-action read is a new observation, so
+      // the text goes to the ref that observation minted rather than the one
+      // focus consumed.
+      const retargeted = await this.retargetElement(ref)
+      if ("stale" in retargeted) return retargeted.stale
+      return this.runCua({ type: "type", text: action.text }, retargeted)
     }
 
     if (action.type === "setvalue") {
-      return this.runCua({ type: "set_value", ref, value: jsonText(action.value) }, current.element)
+      return this.runCua({ type: "set_value", ref, value: jsonText(action.value) }, current)
     }
 
     if (action.type === "focus") {
       const isWindow =
         current.element.role === "window" || current.snapshot.windows.some((window) => window.ref === ref)
-      return this.runCua(isWindow ? { type: "window", action: "focus", ref } : { type: "focus", ref }, current.element)
+      return this.runCua(isWindow ? { type: "window", action: "focus", ref } : { type: "focus", ref }, current)
     }
 
     if (action.type === "click" || action.type === "doubleclick" || action.type === "rightclick") {
@@ -546,7 +615,7 @@ export class CuaHostDriver implements HostDriver {
       // action may become an invoke. An unmatched click is pointer input.
       const candidate = matchBackendAction(current.element.actions, action.type)
       if (candidate !== undefined) {
-        const invoked = await this.runCua({ type: "invoke", ref, action: candidate }, current.element)
+        const invoked = await this.runCua({ type: "invoke", ref, action: candidate }, current)
         if (invoked.success) return invoked
       }
       const point = aimPoint(current.element)
@@ -556,7 +625,7 @@ export class CuaHostDriver implements HostDriver {
       const button =
         action.type === "rightclick" ? "right" : action.type === "click" ? (action.button ?? "left") : "left"
       const count = action.type === "doubleclick" ? 2 : action.type === "click" ? (action.count ?? 1) : 1
-      return this.pointerClick(point, button, count, current.snapshot.id, current.element)
+      return this.pointerClick(point, button, count, current.snapshot.id, current)
     }
 
     if (action.type === "toggle") {
@@ -565,41 +634,41 @@ export class CuaHostDriver implements HostDriver {
       )
       const invoked = await this.runCua(
         { type: "invoke", ref, ...(candidate === undefined ? {} : { action: candidate }) },
-        current.element,
+        current,
       )
       if (invoked.success) return invoked
       const point = aimPoint(current.element)
       if (point === undefined) {
         return unavailable(`Element ${ref} exposes no invokable action and has no bounds.`)
       }
-      return this.pointerClick(point, "left", 1, current.snapshot.id, current.element)
+      return this.pointerClick(point, "left", 1, current.snapshot.id, current)
     }
 
     if (action.type === "select") {
       if (action.value !== undefined) {
-        return this.runCua({ type: "set_value", ref, value: jsonText(action.value) }, current.element)
+        return this.runCua({ type: "set_value", ref, value: jsonText(action.value) }, current)
       }
-      return this.runCua({ type: "select", ref }, current.element)
+      return this.runCua({ type: "select", ref }, current)
     }
 
     if (action.type === "expand") {
-      return this.runCua({ type: "expand", ref }, current.element)
+      return this.runCua({ type: "expand", ref }, current)
     }
 
     if (action.type === "collapse") {
-      return this.runCua({ type: "collapse", ref }, current.element)
+      return this.runCua({ type: "collapse", ref }, current)
     }
 
     if (action.type === "scroll_into_view") {
-      return this.runCua({ type: "scroll_into_view", ref }, current.element)
+      return this.runCua({ type: "scroll_into_view", ref }, current)
     }
 
     if (action.type === "increment") {
-      return this.runCua({ type: "increment", ref }, current.element)
+      return this.runCua({ type: "increment", ref }, current)
     }
 
     if (action.type === "decrement") {
-      return this.runCua({ type: "decrement", ref }, current.element)
+      return this.runCua({ type: "decrement", ref }, current)
     }
 
     return unavailable(`Action ${action.type} is not supported for element targets by this driver.`)
@@ -612,7 +681,7 @@ export class CuaHostDriver implements HostDriver {
     if (ref !== undefined) {
       const bound = await this.resolveBoundElement(action, ref)
       if ("stale" in bound) return bound.stale
-      return this.runCua({ type: "scroll", direction, amount, ref }, bound.element)
+      return this.runCua({ type: "scroll", direction, amount, ref }, bound)
     }
     const resolved = await this.pointerTargetFor(action)
     if (resolved !== undefined && "stale" in resolved) return resolved.stale
@@ -673,7 +742,7 @@ export class CuaHostDriver implements HostDriver {
         current !== undefined &&
         (current.element.role === "window" || current.snapshot.windows.some((window) => window.ref === ref))
       if (isWindow) {
-        return this.runCua({ type: "window", action: "close", ref }, current.element)
+        return this.runCua({ type: "window", action: "close", ref }, current)
       }
     }
     const windowId = ref === undefined ? undefined : x11WindowIdOf(ref)
@@ -693,10 +762,11 @@ export class CuaHostDriver implements HostDriver {
     // Window records survive element capping, so the default budget finds the
     // window without paying for a find-sized element walk.
     const snapshot = await this.engine.snapshot().catch(() => undefined)
-    const window = (snapshot?.windows ?? []).find(
-      (candidate) => candidate.ref === windowId || candidate.backendRef === windowId,
-    )
-    if (window === undefined) {
+    const window =
+      snapshot === undefined
+        ? undefined
+        : snapshot.windows.find((candidate) => candidate.ref === windowId || candidate.backendRef === windowId)
+    if (window === undefined || snapshot === undefined) {
       const legacy =
         action === "minimize"
           ? await this.legacy().minimizeWindowId(windowId)
@@ -707,7 +777,7 @@ export class CuaHostDriver implements HostDriver {
         `The window was ${action === "minimize" ? "minimized" : "restored"} through the raw X11 path; only a post-action read can confirm the window's state changed.`,
       )
     }
-    return this.runCua({ type: "window", action, ref: window.ref })
+    return this.runCua({ type: "window", action, ref: window.ref }, { element: windowAsElement(window), snapshot })
   }
 
   private async readAction(
@@ -782,9 +852,20 @@ export class CuaHostDriver implements HostDriver {
     return `The active window is ${active}, not the requested window ${expected}; input may go to the wrong window.`
   }
 
-  private async runCua(action: CuaAction, target?: CuaElement): Promise<ActionResult> {
-    const result = await this.engine.execute(action)
-    const mapped = toActionResult(result, target)
+  private async runCua(action: CuaAction, target?: ResolvedCuaTarget): Promise<ActionResult> {
+    // The observation pair travels with the action: the remote computer refuses
+    // a ref that no longer belongs to the observation it was minted in, instead
+    // of rebinding to whatever now occupies the same string.
+    const bound =
+      target === undefined
+        ? action
+        : {
+            ...action,
+            observationId: target.snapshot.id,
+            generation: target.snapshot.generation,
+          }
+    const result = await this.engine.execute(bound)
+    const mapped = toActionResult(result, target?.element)
     if (!mapped.success) return mapped
     return this.withObservation(mapped)
   }
@@ -794,7 +875,7 @@ export class CuaHostDriver implements HostDriver {
     button: "left" | "right" | "middle",
     count: number,
     captureId?: string,
-    target?: CuaElement,
+    target?: ResolvedCuaTarget,
   ): Promise<ActionResult> {
     return this.runCua(
       { type: "click", point, button, count, ...(captureId === undefined ? {} : { captureId }) },
@@ -1061,23 +1142,6 @@ function windowSubtreeText(snapshot: CuaSnapshot, window: CuaWindow): string {
     .join("\n")
 }
 
-function windowAsElement(window: CuaWindow): CuaElement {
-  return {
-    ref: window.ref,
-    backendRef: window.backendRef,
-    role: "window",
-    name: window.title,
-    enabled: true,
-    focused: window.focused,
-    editable: false,
-    actions: [],
-    states: window.focused ? ["focused"] : [],
-    generation: window.generation,
-    application: window.app,
-    ...(window.bounds === undefined ? {} : { bounds: window.bounds }),
-  }
-}
-
 function invalidAction(): ActionResult {
   return {
     success: false,
@@ -1176,7 +1240,7 @@ function targetReferenceOf(action: { target?: string | ComputerTarget }): Elemen
 
 // Generation-scoped refs: when the caller binds its target to the observation
 // it saw (reference.observationId/generation), acting against any other
-// generation must refuse as target_stale instead of silently rebinding to
+// observation must refuse as target_stale instead of silently rebinding to
 // whatever now shares the same ref string.
 function bindingMismatch(
   action: { target?: string | ComputerTarget },
@@ -1184,17 +1248,12 @@ function bindingMismatch(
 ): { observationId?: string; generation?: number } | undefined {
   const reference = targetReferenceOf(action)
   if (reference === undefined) return undefined
-  if (reference.observationId !== undefined && reference.observationId !== snapshot.id) {
-    return {
-      observationId: reference.observationId,
+  if (reference.observationId !== undefined || reference.generation !== undefined) {
+    const binding = {
+      ...(reference.observationId === undefined ? {} : { observationId: reference.observationId }),
       ...(reference.generation === undefined ? {} : { generation: reference.generation }),
     }
-  }
-  if (reference.generation !== undefined && reference.generation !== snapshot.generation) {
-    return {
-      ...(reference.observationId === undefined ? {} : { observationId: reference.observationId }),
-      generation: reference.generation,
-    }
+    if (!bindingMatches(snapshot, binding)) return binding
   }
   return undefined
 }
@@ -1204,13 +1263,7 @@ function staleBinding(
   expected: { observationId?: string; generation?: number },
   actual: CuaSnapshot,
 ): ActionResult {
-  const from =
-    expected.observationId === undefined
-      ? `generation ${expected.generation}`
-      : expected.generation === undefined
-        ? `observation ${expected.observationId}`
-        : `observation ${expected.observationId} (generation ${expected.generation})`
-  const message = `Target ${ref} is from ${from}, not the current ${actual.id} (generation ${actual.generation}); re-observe before acting.`
+  const message = staleBindingMessage(ref, expected, actual)
   return {
     success: false,
     status: "rejected",

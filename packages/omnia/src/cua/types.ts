@@ -48,7 +48,13 @@ export interface CuaWindow {
 }
 
 export interface CuaSnapshot {
+  // The observation id: the identity a ref is scoped to. Two observations of
+  // an unchanged desktop share no id and never share a generation, so a ref
+  // string only ever means one element of one observation.
   id: string
+  // Monotonically increasing per capture. A new observation always gets a new
+  // generation even when the desktop did not change, so a stale ref can never
+  // appear current.
   generation: number
   takenAt: number
   platform: CuaPlatform
@@ -64,13 +70,48 @@ export interface CuaSnapshot {
 }
 
 export interface CuaRefBinding {
-  // Generation-scoped identity: when present, the backend must refuse refs
-  // from any other observation/generation instead of rebinding by name.
+  // Generation-scoped identity: backends refuse refs from any other
+  // observation/generation instead of rebinding by name. The engine enforces
+  // the same rule before it dispatches an action, so a click can never be
+  // answered against a generation its target did not come from.
   readonly observationId?: string
   readonly generation?: number
   // Explicit opt-in to same-name re-resolution when an occurrence index
   // shifted. Without this flag, loose slug matching must refuse.
   readonly allowRebind?: boolean
+}
+
+// Typed refusal for a ref that cannot bind in the observation it was paired
+// with: either the observation is unknown to the engine, or the ref is absent
+// from it. Both ids are named so a caller can re-observe instead of guessing.
+export class StaleRefError extends Error {
+  readonly code = "stale_ref"
+  readonly observationId: string
+  readonly generation: number | undefined
+  readonly ref: string
+  readonly reason: "unknown_observation" | "absent_ref"
+
+  constructor(input: {
+    observationId: string
+    ref: string
+    generation?: number
+    reason: "unknown_observation" | "absent_ref"
+  }) {
+    const scope =
+      input.generation === undefined
+        ? input.observationId
+        : `${input.observationId} (generation ${input.generation})`
+    super(
+      input.reason === "unknown_observation"
+        ? `Ref ${input.ref} cannot be resolved: observation ${scope} is not known to this engine; re-observe before acting.`
+        : `Ref ${input.ref} is not present in observation ${scope}; re-observe before acting.`,
+    )
+    this.name = "StaleRefError"
+    this.observationId = input.observationId
+    this.generation = input.generation
+    this.ref = input.ref
+    this.reason = input.reason
+  }
 }
 
 export type CuaAction =
@@ -91,11 +132,11 @@ export type CuaAction =
       button?: "left" | "right" | "middle"
       count?: number
       captureId?: string
-    }
+    } & CuaRefBinding
   | ({ type: "type"; text: string; ref?: string; allowClipboardPaste?: boolean } & CuaRefBinding)
   | { type: "key"; keys: string[] }
   | ({ type: "scroll"; direction: "up" | "down" | "left" | "right"; amount?: number; ref?: string } & CuaRefBinding)
-  | { type: "drag"; from: { x: number; y: number }; to: { x: number; y: number }; captureId?: string }
+  | { type: "drag"; from: { x: number; y: number }; to: { x: number; y: number }; captureId?: string } & CuaRefBinding
   | ({
       type: "window"
       action: "focus" | "minimize" | "restore" | "close" | "maximize" | "unmaximize" | "tile" | "move"

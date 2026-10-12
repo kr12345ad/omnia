@@ -14,6 +14,38 @@ function jsString(value: unknown): string {
   return (JSON.stringify(value) ?? "null").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029")
 }
 
+// macOS AX roles whose AXValue is text the element displays rather than a value
+// it holds. Mirrored by the native helper in darwin-ax.ts so both paths agree
+// on which roles report `text` and which report `value`.
+export const DARWIN_TEXT_ROLES: ReadonlySet<string> = new Set([
+  "axstatictext",
+  "axtext",
+  "axheading",
+  "axtitle",
+  "axtextfield",
+  "axtextarea",
+  "axsearchfield",
+  "axcombobox",
+  "axmenuitem",
+])
+
+// The display text AX reports for one element. An editable control's AXValue is
+// both its text and its readback value; a slider's AXValue is only a value, so
+// it never reaches `text`.
+export function darwinDisplayText(
+  role: string | undefined,
+  value: string | undefined,
+  editable = false,
+): string | undefined {
+  const compact = role?.trim().toLowerCase().replaceAll("_", "") ?? ""
+  if (!DARWIN_TEXT_ROLES.has(compact)) return undefined
+  if (value === undefined || value.length === 0) return undefined
+  return value
+}
+
+// JXA mirror of darwinDisplayText, generated from the same role vocabulary.
+const DARWIN_TEXT_ROLES_JS = [...DARWIN_TEXT_ROLES].map((role) => jsString(role)).join(", ")
+
 // Shared JXA helpers embedded into every generated script. Element access is
 // wrapped because System Events throws for unsupported attributes on most
 // element roles; a missing attribute must degrade to null, not abort the walk.
@@ -109,11 +141,17 @@ function omniaElementInfo(element) {
   var editable = omniaAttr(element, 'AXEditable') === true
   var lowerRole = role.toLowerCase()
   if (lowerRole === 'axtextfield' || lowerRole === 'axtextarea' || lowerRole === 'axsearchfield' || lowerRole === 'axcombobox') editable = true
+  var text = null
+  try {
+    var compact = lowerRole.replace(/_/g, '')
+    if ([${DARWIN_TEXT_ROLES_JS}].indexOf(compact) >= 0 && value !== null && value.length > 0) text = value
+  } catch (error) { text = null }
   return {
     role: role,
     subrole: subrole,
     name: name,
     description: description,
+    text: text,
     value: value,
     placeholder: omniaText(omniaAttr(element, 'AXPlaceholderValue')),
     minValue: minValue,
@@ -212,11 +250,12 @@ function omniaTrusted() {
   try { return $.AXIsProcessTrusted() === true } catch (error) { return true }
 }
 function omniaWalk(element, index, depth, budget) {
-  if (budget.count >= budget.maxElements || depth > budget.maxDepth) {
+  if (budget.count >= budget.maxElements || budget.windowElements >= budget.maxElementsPerWindow || depth > budget.maxDepth) {
     budget.truncated = true
     return null
   }
   budget.count += 1
+  budget.windowElements += 1
   var info = omniaElementInfo(element)
   var node = {
     index: index,
@@ -224,6 +263,7 @@ function omniaWalk(element, index, depth, budget) {
     subrole: info.subrole,
     name: info.name,
     description: info.description,
+    text: info.text,
     value: info.value,
     placeholder: info.placeholder,
     minValue: info.minValue,
@@ -247,7 +287,7 @@ function omniaWalk(element, index, depth, budget) {
 function main() {
   var config = ${jsString(config)}
   var filter = config.app === null ? null : String(config.app).toLowerCase()
-  var budget = { count: 0, truncated: false, maxElements: config.maxElements, maxDepth: config.maxDepth }
+  var budget = { count: 0, truncated: false, maxElements: config.maxElements, maxDepth: config.maxDepth, maxElementsPerWindow: Math.max(1, Math.floor(config.maxElements / 2)), windowElements: 0 }
   if (typeof config.timeBudgetMs !== 'number') config.timeBudgetMs = 20000
   var screen = null
   try {
@@ -311,6 +351,11 @@ function main() {
     var windows = []
     try { windows = process.windows() } catch (error) { windows = [] }
     for (var w = 0; w < windows.length; w++) {
+      if (w >= 64) {
+        budget.truncated = true
+        break
+      }
+      budget.windowElements = 0
       var node = omniaWalk(windows[w], w, 0, budget)
       if (node !== null) nodes.push(node)
     }
@@ -743,7 +788,17 @@ export interface DarwinElementSnapshot {
   subrole?: string
   name?: string
   description?: string
+  // Display text AX reports for the element. Distinct from `value`, which is the
+  // settable value a control reads back: a label's text is its AXValue, a text
+  // field's text is its content, a slider's value is its AXValue.
+  text?: string
   value?: string
+  // The caret rectangle native AX reports for a focused editable element,
+  // resolved through AXSelectedTextRange + AXBoundsForRange. It is the only
+  // point macOS itself reports where input lands; absent on every role that
+  // has no text caret and on the JXA fallback, which cannot address
+  // parameterized AX attributes.
+  focusPoint?: Point
   placeholder?: string
   minValue?: number
   maxValue?: number
@@ -784,6 +839,7 @@ export interface DarwinResolvedPayload {
   states: string[]
   actions: string[]
   bounds?: Bounds
+  focusPoint?: Point
 }
 
 export interface DarwinResultPayload {
@@ -816,6 +872,16 @@ export function parseDarwinBounds(value: unknown): Bounds | undefined {
   return { x, y, width, height }
 }
 
+// A point the platform itself reports; a non-finite or half-built object is
+// treated as absent so a malformed helper never invents a click target.
+export function parseDarwinPoint(value: unknown): Point | undefined {
+  if (!isRecord(value)) return undefined
+  const x = finiteNumber(value.x)
+  const y = finiteNumber(value.y)
+  if (x === undefined || y === undefined) return undefined
+  return { x, y }
+}
+
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined
 }
@@ -842,7 +908,9 @@ export function parseDarwinNode(value: unknown): DarwinElementSnapshot | undefin
   const subrole = optionalString(value.subrole)
   const name = optionalString(value.name)
   const description = optionalString(value.description)
+  const text = optionalValue(value.text)
   const elementValue = optionalValue(value.value)
+  const focusPoint = parseDarwinPoint(value.focusPoint)
   const placeholder = optionalString(value.placeholder)
   const minValue = optionalNumber(value.minValue)
   const maxValue = optionalNumber(value.maxValue)
@@ -853,7 +921,9 @@ export function parseDarwinNode(value: unknown): DarwinElementSnapshot | undefin
     ...(subrole === undefined || subrole.length === 0 ? {} : { subrole }),
     ...(name === undefined ? {} : { name }),
     ...(description === undefined ? {} : { description }),
+    ...(text === undefined || text.length === 0 ? {} : { text }),
     ...(elementValue === undefined ? {} : { value: elementValue }),
+    ...(focusPoint === undefined ? {} : { focusPoint }),
     ...(placeholder === undefined ? {} : { placeholder }),
     ...(minValue === undefined ? {} : { minValue }),
     ...(maxValue === undefined ? {} : { maxValue }),
@@ -922,7 +992,9 @@ export function parseDarwinResolvedPayload(value: unknown): DarwinResolvedPayloa
   const subrole = optionalString(value.subrole)
   const name = optionalString(value.name)
   const description = optionalString(value.description)
+  const text = optionalValue(value.text)
   const elementValue = optionalValue(value.value)
+  const focusPoint = parseDarwinPoint(value.focusPoint)
   const placeholder = optionalString(value.placeholder)
   const minValue = optionalNumber(value.minValue)
   const maxValue = optionalNumber(value.maxValue)
@@ -932,7 +1004,9 @@ export function parseDarwinResolvedPayload(value: unknown): DarwinResolvedPayloa
     ...(subrole === undefined || subrole.length === 0 ? {} : { subrole }),
     ...(name === undefined ? {} : { name }),
     ...(description === undefined ? {} : { description }),
+    ...(text === undefined || text.length === 0 ? {} : { text }),
     ...(elementValue === undefined ? {} : { value: elementValue }),
+    ...(focusPoint === undefined ? {} : { focusPoint }),
     ...(placeholder === undefined ? {} : { placeholder }),
     ...(minValue === undefined ? {} : { minValue }),
     ...(maxValue === undefined ? {} : { maxValue }),

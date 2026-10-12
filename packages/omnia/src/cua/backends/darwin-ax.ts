@@ -77,6 +77,7 @@ let infoAttributes: [String] = [
     kAXSizeAttribute as String,
     kAXMinimizedAttribute as String,
     kAXChildrenAttribute as String,
+    kAXSelectedTextRangeAttribute as String,
 ]
 
 let ROLE = 0
@@ -97,6 +98,42 @@ let POSITION = 14
 let SIZE = 15
 let MINIMIZED = 16
 let CHILDREN = 17
+let TEXT_RANGE = 18
+
+// Roles whose AXValue is displayed text rather than a settable value. Keep this
+// list identical to DARWIN_TEXT_ROLES in darwin-script.ts.
+func axIsTextRole(_ role: String) -> Bool {
+    let compact = role.lowercased().replacingOccurrences(of: "_", with: "")
+    return ["axstatictext", "axtext", "axheading", "axtitle", "axtextfield", "axtextarea",
+            "axsearchfield", "axcombobox", "axmenuitem"].contains(compact)
+}
+
+// The caret rectangle of a focused editable element: AXSelectedTextRange gives
+// the text selection, AXBoundsForRange maps that range back to screen geometry.
+// This is the only point macOS reports where input actually lands, so a click
+// on a text field aims at the caret instead of guessing a control center.
+// AXBoundsForRange is a parameterized attribute, so it is fetched on its own and
+// never batched.
+func axFocusPoint(_ element: AXUIElement, _ values: [CFTypeRef?]) -> [String: Int]? {
+    guard axBool(values[FOCUSED]) ?? false else { return nil }
+    guard let rangeRef = values[TEXT_RANGE] else { return nil }
+    let rangeValue = unsafeBitCast(rangeRef, to: AXValue.self)
+    var range = CFRange(location: 0, length: 0)
+    guard AXValueGetValue(rangeValue, .cfRange, &range) else { return nil }
+    var rectRef: CFTypeRef?
+    guard AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeAttribute as CFString, rangeRef, &rectRef) == .success,
+          let rectRef else { return nil }
+    var rect = CGRect.zero
+    guard AXValueGetValue(unsafeBitCast(rectRef, to: AXValue.self), .cgRect, &rect) else { return nil }
+    // A caret has zero width and non-zero height; a fully collapsed rect is not
+    // a usable point.
+    if rect.height <= 0 { return nil }
+    if rect.origin.x.isFinite == false || rect.origin.y.isFinite == false { return nil }
+    return [
+        "x": Int(rect.origin.x.rounded()),
+        "y": Int((rect.origin.y + rect.height / 2).rounded()),
+    ]
+}
 
 // One accessibility round trip per element instead of one per attribute;
 // attributes the element does not support come back as NSNull and stay nil.
@@ -163,12 +200,16 @@ func axInfo(_ element: AXUIElement, _ values: [CFTypeRef?]) -> [String: Any] {
         "actions": axActions(element),
     ]
     if hidden { info["hidden"] = true }
-    if let value { info["value"] = value }
+    if let value {
+        info["value"] = value
+        if axIsTextRole(role), !value.isEmpty { info["text"] = value }
+    }
     if let placeholder { info["placeholder"] = placeholder }
     if let minValue { info["minValue"] = minValue }
     if let maxValue { info["maxValue"] = maxValue }
     if let stepValue { info["stepValue"] = stepValue }
     if let bounds = axBounds(values[POSITION], values[SIZE]) { info["bounds"] = bounds }
+    if let focus = axFocusPoint(element, values) { info["focusPoint"] = focus }
     return info
 }
 
@@ -212,26 +253,49 @@ func unavailableLeaf(_ info: [String: Any], children: [AXUIElement]) -> Bool {
 
 final class Budget {
     var count = 0
+    var windows = 0
+    var windowElements = 0
     let maxElements: Int
+    let maxElementsPerWindow: Int
+    let maxWindows: Int
     let maxDepth: Int
     let deadline: Date
     var truncated = false
 
-    init(maxElements: Int, maxDepth: Int, timeBudgetMs: Int) {
+    init(maxElements: Int, maxElementsPerWindow: Int, maxWindows: Int, maxDepth: Int, timeBudgetMs: Int) {
         self.maxElements = maxElements
+        self.maxElementsPerWindow = maxElementsPerWindow
+        self.maxWindows = maxWindows
         self.maxDepth = maxDepth
         self.deadline = Date().addingTimeInterval(Double(timeBudgetMs) / 1000)
     }
 
     var expired: Bool { Date() > deadline }
+
+    // Every walk keeps a whole-app element budget, a per-window budget, and a
+    // window count so one dialog with a thousand rows (or a hundred hidden
+    // windows) can never consume the walk and leave the focused window empty.
+    // The per-window counter resets at each window boundary.
+    func beginWindow() -> Bool {
+        if windows >= maxWindows {
+            truncated = true
+            return false
+        }
+        windows += 1
+        windowElements = 0
+        return true
+    }
+
+    var windowFull: Bool { windowElements >= maxElementsPerWindow }
 }
 
 func walk(_ element: AXUIElement, index: Int, depth: Int, budget: Budget) -> [String: Any]? {
-    if budget.count >= budget.maxElements || depth > budget.maxDepth || budget.expired {
+    if budget.count >= budget.maxElements || budget.windowFull || depth > budget.maxDepth || budget.expired {
         budget.truncated = true
         return nil
     }
     budget.count += 1
+    budget.windowElements += 1
     let values = axBatch(element, infoAttributes)
     var node = axInfo(element, values)
     if node["hidden"] as? Bool == true { return nil }
@@ -290,7 +354,13 @@ func commandSnapshot(_ params: [String: Any]) -> [String: Any] {
     let maxElements = (params["maxElements"] as? NSNumber)?.intValue ?? 400
     let maxDepth = (params["maxDepth"] as? NSNumber)?.intValue ?? 5
     let timeBudgetMs = (params["timeBudgetMs"] as? NSNumber)?.intValue ?? 15000
-    let budget = Budget(maxElements: maxElements, maxDepth: maxDepth, timeBudgetMs: timeBudgetMs)
+    let budget = Budget(
+        maxElements: maxElements,
+        maxElementsPerWindow: perWindowElements(maxElements),
+        maxWindows: maxWindows,
+        maxDepth: maxDepth,
+        timeBudgetMs: timeBudgetMs
+    )
     var applications: [[String: Any]] = []
     for entry in applicationEntries(filter: requestedFilter(params)) {
         if budget.count >= budget.maxElements || budget.expired {
@@ -302,6 +372,7 @@ func commandSnapshot(_ params: [String: Any]) -> [String: Any] {
         let windows = (axAttr(element, kAXWindowsAttribute as String) as? [AXUIElement]) ?? []
         var nodes: [[String: Any]] = []
         for (windowIndex, window) in windows.enumerated() {
+            guard budget.beginWindow() else { break }
             if let node = walk(window, index: windowIndex, depth: 0, budget: budget) {
                 nodes.append(node)
             }
@@ -312,6 +383,15 @@ func commandSnapshot(_ params: [String: Any]) -> [String: Any] {
     if let screen = screenSize() { result["screen"] = screen }
     return result
 }
+
+// A per-window share of the whole-app budget: at most half of it, so a second
+// window always keeps room. One window never needs more than its own share
+// because the observe budget itself is what the caller asked for.
+func perWindowElements(_ maxElements: Int) -> Int {
+    return max(1, maxElements / 2)
+}
+
+let maxWindows = 64
 
 // Cheap window-generation check for the backend's tree cache: window count,
 // titles, minimize and focus flags change for every event the cache must
@@ -377,7 +457,7 @@ func commandWindow(_ params: [String: Any]) -> [String: Any] {
     let maxElements = (params["maxElements"] as? NSNumber)?.intValue ?? 1000
     let maxDepth = (params["maxDepth"] as? NSNumber)?.intValue ?? 12
     let timeBudgetMs = (params["timeBudgetMs"] as? NSNumber)?.intValue ?? 5000
-    let budget = Budget(maxElements: maxElements, maxDepth: maxDepth, timeBudgetMs: timeBudgetMs)
+    let budget = Budget(maxElements: maxElements, maxElementsPerWindow: maxElements, maxWindows: maxWindows, maxDepth: maxDepth, timeBudgetMs: timeBudgetMs)
     guard let node = walk(windows[index], index: index, depth: 0, budget: budget) else {
         return ["ok": false, "error": "target_unreachable"]
     }

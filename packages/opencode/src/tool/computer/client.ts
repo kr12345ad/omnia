@@ -32,7 +32,9 @@ export function selectionFromMetadata(
     throw new Error("The session's saved computer target is invalid; use switch_computer to choose it again.")
   }
   if (value.server !== controlPlaneKey(config)) {
-    throw new Error("The session's target belongs to a different control plane; use switch_computer before controlling a computer.")
+    throw new Error(
+      "The session's target belongs to a different control plane; use switch_computer before controlling a computer.",
+    )
   }
   return value.id
 }
@@ -212,6 +214,63 @@ function describeError(error: unknown): string | undefined {
 
 const COMPUTER_CACHE_TTL_MS = 30_000
 const computerCache = new Map<string, { id: string; expiresAt: number }>()
+
+/**
+ * One observed tree, cached by computerId + generation. Diff snapshots read
+ * their baseline out of here, and a full read that names a generation the
+ * caller already holds is served from here instead of observing again — paging
+ * through one tree must never mix pages from two observations.
+ */
+export interface ObservationRecord {
+  readonly computerId: string
+  readonly generation: number
+  readonly observationId: string
+  readonly scope: string
+  readonly warnings: readonly string[]
+  readonly elements: readonly unknown[]
+}
+
+const OBSERVATION_LIMIT = 8
+const observationCache = new Map<string, ObservationRecord>()
+const observationGenerations = new Map<string, number>()
+
+export function rememberObservation(
+  computer: string,
+  scope: string,
+  observationId: string,
+  warnings: readonly string[],
+  elements: readonly unknown[],
+): ObservationRecord {
+  const generation = (observationGenerations.get(computer) ?? 0) + 1
+  observationGenerations.set(computer, generation)
+  const record: ObservationRecord = { computerId: computer, generation, observationId, scope, warnings, elements }
+  observationCache.set(`${computer}\n${generation}`, record)
+  const oldest = observationCache.keys().next()
+  if (observationCache.size > OBSERVATION_LIMIT && !oldest.done) observationCache.delete(oldest.value)
+  return record
+}
+
+export function observationFor(computer: string, generation: number): ObservationRecord | undefined {
+  return observationCache.get(`${computer}\n${generation}`)
+}
+
+/** Find a tree only when this session actually cached that exact observation. */
+export function observationById(computer: string, observationId: string): ObservationRecord | undefined {
+  for (const record of observationCache.values()) {
+    if (record.computerId === computer && record.observationId === observationId) return record
+  }
+  return undefined
+}
+
+/** The newest generation this session still holds for one computer and scope. */
+export function latestObservation(computer: string, scope: string): ObservationRecord | undefined {
+  let newest: ObservationRecord | undefined
+  for (const record of observationCache.values()) {
+    if (record.computerId !== computer || record.scope !== scope) continue
+    if (newest === undefined || record.generation > newest.generation) newest = record
+  }
+  return newest
+}
 
 const ComputersResponse = Schema.Struct({
   ok: Schema.Boolean,

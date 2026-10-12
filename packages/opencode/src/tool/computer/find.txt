@@ -1,19 +1,53 @@
 Locate a control by meaning and return ranked candidates with everything
 needed to act on them.
 
-Each candidate includes its role, accessible name, stable element id, exact
-screen pixel center, current value, states (enabled, disabled, focused,
+Each candidate includes its role, accessible name, stable element id, the
+point to aim at, current value, states (enabled, disabled, focused,
 checked), the actions it supports, and a confidence score. When several
 controls share a name, the ranked list and the ancestor context tell you which
 one is real; use computer_inspect if you need more detail.
 
 One line looks like this:
 
-  1. button "Export" id=atspi:7.2 at 1310,44 value="" [enabled] actions=click confidence=0.93 observation=obs-12
+  1. button "Export" id=atspi:7.2 aim=1310,44 strategy=control-center value="" [enabled] actions=click confidence=0.93 observation=obs-12
+  2. label "Export status" id=atspi:7.9 aim=200,60 strategy=bounds-center (guess) confidence=0.62 observation=obs-12
 
-Read it as: the what (role + name), the handle (id), the where (pixel,
-fallback only), the state (enabled/disabled/checked/focused), what you may
-do with it (actions), and how sure the runtime is (confidence).
+Read it as: the what (role + name), the handle (id), the where (the aim point
+with the strategy that produced it), the state (enabled/disabled/checked/
+focused), what you may do with it (actions), and how sure the runtime is
+(confidence).
+
+The aim point and its strategy:
+
+- control-center: the centre of a control the role identifies as actionable.
+- focus-point: the control's own focus point, as the runtime reports it.
+- role-inset: a role-specific point, inset from the edge a neighbouring
+  control shares (a title-bar Close sits at the group's right edge, Minimize
+  at its left edge).
+- provider-hint: a preferred point the platform provided.
+- bounds-center: a guess. The control exposed no focus point, no hint and no
+  role-specific point, so the point is only the centre of its bounding box.
+  A bounds-center candidate is printed with "(guess)": do not trust that
+  point — re-resolve the control by ref, or computer_inspect it to find a
+  better target. Treat it as a report of where the box is, nothing more.
+
+Refs are the primary targeting mode. Pass the candidate's id as the target of
+computer_act together with the observation id printed on its line; a ref is
+generation-scoped, so an id from an older generation needs a fresh find, never
+a retry, and a stale id is refused with target_stale. Refs belong to the
+computer whose tree they were read from: a tree answered for another computer
+is refused naming both computers and returns no candidates, so re-snapshot on
+the computer you are acting on. Never compute pixel positions yourself: x/y is
+for canvas and other surfaces with no resolvable control, never a substitute
+for one you can resolve.
+
+The confidence floor is 0.6, the same floor the runtime aims and acts with. A
+candidate below it is not returned: the output says how many candidates were
+rejected for scoring below the floor, because a weak match is not a target.
+When the tool finds nothing, that is a miss, not a failure to find the right
+words: observe again, narrow with role or window, computer_inspect a
+near-miss, or ground with computer_visual with a plain-language description.
+Never click the top hit of a weak list and hope.
 
 Parameters:
 
@@ -32,16 +66,26 @@ Parameters:
 
 Rules:
 
-- Pick the best candidate by id and act on it, or click its exact pixel when
-  no semantic action exists. If nothing matches, observe again: the interface
-  may have changed. Never invent an id and never reuse an id from an older
-  observation without its observationId: stale ids are refused with
-  target_stale, which means re-find, not retry.
-- Act on a candidate with the observation id the find returned
-  (observationId), so the runtime can prove the target is still the same
-  control. A confidence far below the rest, or candidates spread across
-  unrelated windows, means the query is ambiguous: narrow it with role or
-  window instead of clicking the top hit and hoping.
-- If no semantic candidate matches with confidence, do not guess a pixel:
-  switch to computer_visual with a plain-language description, or
-  computer_inspect a near-miss to learn the real structure.
+- Refs first. Act on the best candidate by id, with the observation id
+  printed with it (observationId). Never invent an id and never reuse an id
+  from an older observation without its observationId: stale ids are refused
+  with target_stale, which means re-find, not retry.
+- Let the server aim. When a candidate carries an aim, target the ref and the
+  runtime aims from the control's own metadata; the strategy printed on the
+  line tells you how much to trust the point. Never compute pixel positions
+  yourself: x/y is for canvas and other surfaces with no resolvable control,
+  never a substitute for one you can resolve.
+- A bounds-center strategy means "do not trust this point — re-resolve". The
+  control offered nothing to aim at, so the point is the centre of its box:
+  act on it by ref with a read-back, inspect it for a focus point or hint, or
+  pick a better-supported control instead.
+- Act with the observation id the find returned (observationId), so the
+  runtime can prove the target is still the same control. A confidence far
+  below the rest, or candidates spread across unrelated windows, means the
+  query is ambiguous: narrow it with role or window instead of clicking the
+  top hit and hoping.
+- Miss beats wrong-click. If no semantic candidate matches with confidence,
+  do not guess a pixel and do not guess a nearby control: ask a clarifying
+  question, or switch to computer_visual with a plain-language description.
+  computer_inspect a near-miss to learn the real structure, and re-resolve
+  with computer_find or computer_read instead of clicking coordinates.

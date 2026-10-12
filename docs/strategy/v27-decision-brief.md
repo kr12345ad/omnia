@@ -481,3 +481,72 @@ Verified sources for §2 (IDs as cited). Every absence claim above is "none foun
 ---
 
 *End of brief. Companion artifacts: builder M1 RFC (gate/leases/journal interfaces + failing-test list), researcher M4.5 latency-harness spec, critic week-1 capture contract + security checklist. Decision and triggers above are the strategist's synthesis of the room's manager decision; do not reopen the discussion — execute against §5 and §6.*
+
+---
+
+## 12. Computer-use reliability (appended 2026-10-11)
+
+Appended, not rewritten. Everything above was decided on 2026-09-27 before the computer-use reliability
+program ran; this section records what that program actually shipped and what it did not, so the brief and
+the code stay reconcilable.
+
+**Why it exists.** The P0 was a semantic over-match (0.4 `query.includes(name)`) that resolved a
+full-screen root element, fed a blind bounds-center click at (960,539), hit Close instead of Minimize 9px
+away, and then reported `Verified`. The failure is recorded in
+`packages/omnia/src/computer-use/FOCUS_ROLLOUT.strategist.md`; the contract it must never regress against is
+`docs/computer-use-reliability.md`.
+
+**Where the detail lives.** `packages/omnia/src/computer-use/RELIABILITY.md` is the canonical short doc
+(failure modes with file:line, the ref/generation model, the aim strategies, the verification rule, harness
+instructions, the measured numbers, the open gaps). `packages/opencode/src/tool/computer/AGENTS.md` records
+the tool layer's boundaries, which are narrower than they look: it imports the threshold and the aim
+implementation rather than owning them.
+
+**What is now fixed, per failure mode.**
+
+| Failure mode | Fix | Anchor |
+|---|---|---|
+| 0.4 over-match | one shared scorer, `name.includes(query)` floors at 0.6, below-threshold returns 0; router and provider use the same constant | `packages/omnia/src/computer-use/match-score.ts:8,23,26,28`, `router.ts:547`, `providers.ts:1219,1306` |
+| blind bounds-center click | `computeAim` resolves from metadata in a fixed order and labels the last resort a guess; the safety layer rates it `high` on a titled control; a named-window focus intent never reaches a provider | `aim.ts:144,158,161`, `window-safety.ts:362,468`, `service.ts:980,1108`, `act.ts:746` |
+| false-Verified | the verdict comes from a post-action observation only; no observation is `not_verified` + `no_post_observation`; the engine compares focus by identity, not by scoped ref string | `service.ts:721,737,771,807,783,820`, `engine.ts:305` |
+
+**The model.** A ref is `<base>@g<generation>`, minted per observation by the engine
+(`cua/engine.ts:31,37,492`). It is stable within a generation and never across one, because every capture is
+a new observation with a new generation even when the desktop did not change (`cua/engine.ts:162`). A ref
+from another observation is refused, naming both ids (`cua/engine.ts:209,339,478`;
+`cua/types.ts:87,92`; `host-driver.ts:1245,1261`). Reported, not fixed: `actionForOperation`
+(`providers.ts:1310-1315`) still derives a pixel from bounds for the semantic provider, which is the
+sanctioned pixel path but is also the same arithmetic the P0 came from.
+
+**Verification rule.** `verified` only on a confirming post-action observation; otherwise `not_verified`
+with the observed state attached (`service.ts:721`).
+
+**How to run it.** `cd packages/omnia && bun run test:computer-use`
+(`packages/omnia/package.json:17`). The real-desktop run needs both an arm and a display:
+`OMNIA_LIVE_HARNESS=1 DISPLAY=:0 bun ./src/computer-use/live-harness/run.ts`
+(`live-harness/desktop-gate.ts:21`, `live-harness/run.ts:56`). Unarmed, no driver is constructed at all and
+no pointer can move; displayless, it prints a skip and exits 0 rather than synthesising input.
+
+**Measured on this host** (Rocky Linux 9.8, x86_64, 20 cores, 22 GB RAM, KDE/X11 1920×1080 — the P0's
+repro environment):
+
+| Measure | Result |
+|---|---|
+| diff payload, 200 controls, 3 changes | 147,436 → 141 chars (1046× smaller), p50 0.21 ms |
+| deterministic step, 50 → 1000 controls | 1.63 → 4.88 → 12.5 → 23.44 ms |
+| live AT-SPI observe | p50 35.9 ms recorded; a re-measure on the same host today gave 29.5–50.8 ms across four runs |
+
+Re-measured 2026-10-11 with `bun test src/computer-use/latency-budget.test.ts`. The live number is host- and
+session-dependent; treat it as a band, not a constant. With real input injection added, a full step is
+42–64 ms across 50–1000 controls, so the capture and the input channel own the budget, not our code — which
+is the opposite of what §4 of `specs/v27/latency-harness.md` assumed when it sized the problem around
+inference.
+
+**What did not get done.** Platform coverage is still Linux-only and the two other backends are
+code-reviewed only: the macOS Swift AX helper (`cua/backends/darwin-ax.ts:1`, compiled at runtime at
+`cua/backends/darwin.ts:1221-1230`) has never run on macOS hardware, and the Windows UIAutomation scripts
+(`cua/backends/windows-script.ts:35` onward) have never run on Windows. Linux AT-SPI only exposes
+applications that registered on the accessibility bus (`cua/backends/linux.ts:1490`), so a non-atspi desktop
+is an empty tree. Two of fifteen tests in `reliability-e2e.test.ts` fail on purpose-stale assertions left
+behind by the engine fix, not on a contract regression — see §7 of `RELIABILITY.md` before assuming the
+program is red.

@@ -2,9 +2,9 @@ Read the computer as formatted JSON instead of looking at pixels.
 
 Returns the full structured snapshot for one scope as parseable JSON: every
 window and control with its stable ref, role, name, text, value, states,
-supported actions, bounds, and owning application, plus the observation id
-that scopes every ref in the payload. No screenshot is taken and no vision
-model is involved at any step.
+supported actions, bounds, precomputed aim point, and owning application,
+plus the observation id that scopes every ref in the payload. No screenshot is
+taken and no vision model is involved at any step.
 
 Parameters:
 
@@ -17,12 +17,23 @@ Parameters:
   it is trimmed from the end and truncated is set to true.
 - offset: skip the first N controls. Page with offset=limit, 2*limit, and so
   on; each page carries totalElements so you always know how much is left.
+- mode: "full" (default) or "diff". diff returns only the controls that
+  changed since sinceGeneration, which is the cheap read for a long task.
+- sinceGeneration: the `generation` an earlier snapshot reported to you. In
+  diff mode it is the baseline the change set is measured against; in full
+  mode it re-reads the generation you already hold (paging, re-reading)
+  instead of observing the screen again.
 
 Output shape (JSON):
 
   {
     "observationId": "obs-9",
     "application": "soffice",
+    "generation": 7,
+    "mode": "full",
+    "source": "observation",
+    "sinceGeneration": 3,
+    "unchangedCount": 197,
     "totalElements": 412,
     "returnedElements": 200,
     "offset": 0,
@@ -31,16 +42,92 @@ Output shape (JSON):
     "focusedRef": "atspi:2",
     "windows": [ { "ref", "name", "application", "focused", "bounds", "states" } ],
     "elements": [ { "ref", "role", "name", "text", "value", "description",
-                    "states", "actions", "bounds", "application" } ],
-    "warnings": [ "accessibility tree was truncated; narrow the scope" ]
+                    "states", "actions", "bounds", "application",
+                    "aim": { "x", "y", "strategy" } } ],
+    "warnings": [ "accessibility tree was truncated; narrow the scope",
+                  { "elementRef": "atspi:7", "reason": "center-guess" } ]
   }
+
+`generation` numbers the tree this payload came from and is held for this
+session only. `source` is "observation" for a fresh read and "cache" when a
+generation you named was served back without observing the screen again.
+`sinceGeneration` and `unchangedCount` appear in diff responses, and
+`totalElements` counts controls in both modes.
+
+Diff mode (mode: "diff", sinceGeneration: the generation you hold):
+
+  {
+    "generation": 8,
+    "sinceGeneration": 7,
+    "unchangedCount": 197,
+    "totalElements": 200,
+    "returnedElements": 3,
+    "truncated": false,
+    "windows": [ { "change": "added", "ref", "name", "application",
+                   "focused", "bounds", "states" } ],
+    "elements": [ { "change": "state-changed", "ref", "role", "name", "text",
+                    "value", "states", "bounds", "aim": { "x", "y", "strategy" } } ]
+  }
+
+`elements` carries only changed controls, each with a "change": "added",
+"removed", "moved" (bounds differ), or "state-changed" (anything else differs:
+name, text, value, description, states, actions, application). A removed
+control is projected from the baseline, so you can see what vanished.
+`unchangedCount` counts the controls identical to the baseline across the whole
+tree rather than the page you asked for, so paging never changes it:
+totalElements minus unchangedCount is the number of changed controls. Changed
+windows are listed in "windows" with the same labels and are not counted.
+
+Caps are never waived: the control limit (200 by default), the 120000-character
+payload cap, and the 5 MiB screenshot cap all still apply in diff mode. A diff
+larger than the char cap, or larger than the full snapshot of the same tree,
+comes back as a full snapshot instead, with "the diff was larger than a full
+snapshot" in "warnings" and "mode" set to "full". Nothing is ever silently
+dropped: "truncated" and "warnings" still report what was withheld.
+
+A diff baseline must be a generation this session still holds for the same
+scope. A missing one (a restarted session, a different app or window, a number
+you never saw) gets a full snapshot plus a "warnings" entry, never a diff
+against an unrelated tree. Omitting sinceGeneration diffs against the newest
+generation this session holds, and falls back to a full snapshot when it holds
+none.
+
+The cheap multi-step loop: one full snapshot, then a diff after each action,
+passing the previous response's `generation` as `sinceGeneration`. Refs from a
+diff stay usable for computer_act, computer_inspect, and computer_read with the
+observationId they came from; a diff reports the changed tree's own
+observationId and generation.
+
+"aim" is precomputed for every element that lists at least one action, and it
+is absent on non-actionable elements. It carries x, y, and the strategy used to
+pick the point (control-center, focus-point, role-inset, provider-hint, or
+bounds-center).
+
+Target by `ref`. `aim` is precomputed: pass the element's `ref` and let the
+server aim at the point it already resolved. Never recompute, round, or nudge
+pixels yourself — a recomputed point is exactly how a click lands on the wrong
+control. Raw x/y are for canvas or image surfaces that expose no ref, and even
+there only the exact values snapshot, find, or inspect report may be used.
+
+Window controls (Close, Minimize, Maximize, Restore) arrive as plain buttons, and
+their aim point is the edge of the control that faces the window content rather
+than the middle of the box, so a click on one tiny title-bar button cannot
+straddle into the button beside it.
+
+A "reason" of "center-guess" inside "warnings" means that element offered no
+focus point, no role-specific inset, and no provider hint, so its point is the
+center of its bounds and is a recorded guess, not a known actionable spot:
+target it by `ref` and verify the result, or find a better-supported control.
+"warnings" is capped at 20 entries; when that cap is reached, `truncated`
+turns true and the remaining warnings are withheld.
 
 Every element id in "elements" is directly usable as the target of
 computer_act (click, type, focus, read, select, invoke, drag endpoints) and
 computer_inspect, together with "observationId" as observationId so the
 runtime can detect staleness. A ref from any other observation is refused
-with target_stale: never mix ids across snapshots, and re-snapshot after
-every state-changing action instead of reusing an old tree.
+with target_stale: never mix ids across snapshots, and re-read the tree after
+every state-changing action (a diff is that re-read) instead of reusing an old
+one.
 
 The JSON-first loop for any application:
 
@@ -49,6 +136,7 @@ The JSON-first loop for any application:
    closest alternative instead of pretending.
 2. computer_snapshot, narrowed with app or window, to get the formatted JSON
    of the interface. Start wide, then narrow; never screenshot to orient.
+   After that first full read, use mode "diff" to re-read cheaply.
 3. computer_find or computer_inspect to pin one control when the snapshot is
    truncated or several candidates look alike.
 4. computer_act with the control's ref (or a query) plus the observationId

@@ -1,5 +1,6 @@
 import type { CuaCapabilities } from "../cua/types"
 import type { LocalModelManager } from "./local"
+import { MATCH_THRESHOLD, normalizeQuery, scoreMatch } from "./match-score"
 import { SemanticProvider, type CuaCapabilityProbe } from "./providers"
 import { effectiveAllowTitleBarClicks, isCropPath, isTitleBarTarget, isWindowManagementIntent } from "./window-safety"
 import type {
@@ -379,13 +380,14 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
     // from a prior observation, so no fuzzy threshold applies.
     if (hasElementRef(environment.elements, target)) return true
     const match = bestScore(environment.elements, target)
-    // Aligned with providers.ts SEMANTIC_MATCH_THRESHOLD (0.6). The old 0.5
-    // let the 0.4 query.includes(name) over-match through as "sufficient"
-    // while the provider also returned 0.4, producing false-Verified clicks.
+    // router.ts now shares one scoring rule with providers.ts via
+    // ./match-score.ts, so semanticSufficient can never accept a score the
+    // provider would reject (the old 0.5-vs-0.4 mismatch that fell through
+    // to vision/semantic unpredictably).
     if (context.requestedOperation === "drag" || context.requestedOperation === "resize") {
-      return environment.coverage >= 0.7 && match !== undefined && match >= 0.6
+      return environment.coverage >= DRAG_RESIZE_COVERAGE_THRESHOLD && match !== undefined && match >= SEMANTIC_SUFFICIENT_THRESHOLD
     }
-    return match !== undefined && match >= 0.6
+    return match !== undefined && match >= SEMANTIC_SUFFICIENT_THRESHOLD
   }
 
   private async cuaFor(context: ComputerUseContext): Promise<CuaCapabilities | undefined> {
@@ -542,7 +544,11 @@ export class DefaultComputerUseRouter implements ComputerUseRouter {
   }
 }
 
-export const SEMANTIC_SUFFICIENT_THRESHOLD = 0.6
+export const SEMANTIC_SUFFICIENT_THRESHOLD = MATCH_THRESHOLD
+
+// Pointer-heavy operations additionally need broad element coverage to be
+// trusted: a dense screen with one hit is not enough to justify a drag.
+const DRAG_RESIZE_COVERAGE_THRESHOLD = 0.7
 
 export function hasElementRef(elements: readonly { elementId?: string }[], query: string): boolean {
   return elements.some((element) => element.elementId !== undefined && element.elementId.toLowerCase() === query)
@@ -552,19 +558,12 @@ export function bestScore(
   elements: readonly { name?: string; text?: string; role?: string; elementId?: string }[],
   query: string,
 ): number | undefined {
+  const q = normalizeQuery(query)
   let best: number | undefined
   for (const element of elements) {
     // An exact ref match is definitive and skips fuzzy scoring entirely.
-    if (element.elementId !== undefined && element.elementId.toLowerCase() === query) return 1
-    const name = (element.name ?? "").toLowerCase()
-    const text = (element.text ?? "").toLowerCase()
-    const role = (element.role ?? "").toLowerCase()
-    // Aligned with providers.ts: element name must contain the query (0.6).
-    // Removed the query.includes(name) 0.4 over-match that routed
-    // "focus Kitty OC | Quick hello" to a screen-center click.
-    const exact = name === query || text === query
-    const nameScore = name.length > 0 && name.includes(query) ? 0.6 : 0
-    const score = Math.min(1, nameScore + (text.includes(query) ? 0.25 : 0) + (role.includes(query) ? 0.15 : 0) + (exact ? 0.25 : 0))
+    if (element.elementId !== undefined && element.elementId.toLowerCase() === q) return 1
+    const score = scoreMatch(q, element)
     if (score > 0 && (best === undefined || score > best)) best = score
   }
   return best

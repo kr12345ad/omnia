@@ -38,6 +38,7 @@ import { CdpError } from "../browser/cdp"
 import { browserFailure } from "../browser/errors"
 import { imageDownloadsDir } from "../browser/image-file"
 import { cuaDriverFor } from "../computer-use/service"
+import { computeAim, isCenterGuess, type Aim } from "../computer-use/aim"
 import type { CalibrationManager, CalibrationProfile } from "../computer-use/calibration"
 import type { CuaWindow } from "../cua/types"
 import {
@@ -267,6 +268,11 @@ export interface BrowserController {
 export interface Revalidation {
   readonly valid: boolean
   readonly reason?: string
+  // The reference the same element now carries in the fresh observation the
+  // driver captured to validate it. Presence plus role stability is the
+  // validity test; this is what the caller must act on, because the
+  // observation the reference came from is no longer resolvable.
+  readonly reference?: ElementReference
 }
 
 export type InputGrabReleasedBy = "escape" | "signal" | "request"
@@ -501,6 +507,8 @@ export interface BatchStepResult {
   readonly resolvedBy?: string
   readonly confidence?: number
   readonly verification?: Verification
+  readonly aim?: Aim
+  readonly warnings?: readonly string[]
   readonly stateDelta?: StateDelta
   readonly error?: ActionResult["error"]
 }
@@ -544,6 +552,10 @@ export function sliceTypeText(text: string, start?: string, stop?: string): Type
 
 function truncateMarker(value: string): string {
   return value.length > 40 ? `${value.slice(0, 37)}…` : value
+}
+
+function baseElementRef(value: string): string {
+  return value.replace(/@g\d+$/u, "")
 }
 
 // Redaction needles include the truncation lengths used by state snapshots
@@ -1768,7 +1780,10 @@ export class ComputerManager {
     if ("error" in resolved) {
       return { httpStatus: resolved.status, result: resolved.error }
     }
-    const effective = resolved.request
+    // Revalidation can replace the target with the reference the same element
+    // now carries, so the request is rebound rather than copied: every later
+    // read, dispatch and verification must name the element that was acted on.
+    let effective = resolved.request
     const effectiveType = effective.action
     const stopSeq = computer.stopSeq
     // computerStopped aborts an in-flight driver call; shouldStop additionally
@@ -2289,7 +2304,7 @@ export class ComputerManager {
       return { httpStatus: released.success ? 200 : 500, result: released }
     }
 
-    const action = toComputerAction(actionRequest)
+    let action = toComputerAction(actionRequest)
     if (!action) {
       return {
         httpStatus: 400,
@@ -2341,6 +2356,8 @@ export class ComputerManager {
       typeof action.target === "object" &&
       action.target.kind === "element"
     ) {
+      const stale = this.staleTargetOutcome(id, computer, effective, effectiveType)
+      if (stale !== undefined) return stale
       const revalidation = await computer.driver.revalidateTarget({
         kind: "element",
         elementId: action.target.elementId,
@@ -2358,6 +2375,25 @@ export class ComputerManager {
           data: { action: effectiveType, reason: result.message },
         })
         return { httpStatus: 409, result }
+      }
+      // Revalidation read the desktop again to answer, so the observation the
+      // caller resolved its ref against has already been replaced. The action
+      // is dispatched against the reference that read returned for the same
+      // element — retargeted by identity, because the new observation minted
+      // new scoped refs — otherwise the ref it names is unresolvable and a
+      // perfectly current action is refused with nothing delivered.
+      const fresh = revalidation.reference
+      const freshElementId = fresh?.elementId ?? fresh?.id
+      if (fresh !== undefined && freshElementId !== undefined) {
+        const target: ElementReference = {
+          kind: "element",
+          elementId: freshElementId,
+          ...(fresh.observationId === undefined ? {} : { observationId: fresh.observationId }),
+          ...(fresh.generation === undefined ? {} : { generation: fresh.generation }),
+          ...(fresh.role === undefined ? {} : { role: fresh.role }),
+        }
+        effective = { ...effective, target }
+        action = retargeted(action, target)
       }
     }
 
@@ -2426,6 +2462,20 @@ export class ComputerManager {
               })
             : verifyOutcome(executed, delta, effectiveType, targetId))
     const failureContext = executed.success ? undefined : await this.failureContext(computer)
+    const aimElement = targetId === undefined
+      ? undefined
+      : before?.elements?.find((element) => {
+          const identity = element.id ?? element.reference?.elementId
+          return identity !== undefined && baseElementRef(identity) === baseElementRef(targetId)
+        })
+    const aim = aimElement?.bounds === undefined
+      ? undefined
+      : computeAim({
+          bounds: aimElement.bounds,
+          role: aimElement.role,
+          focusPoint: aimElement.attributes?.focusPoint as { x: number; y: number } | undefined,
+          aimHint: aimElement.metadata?.aimHint as { x: number; y: number } | undefined,
+        })
     const result: ActionResult = {
       ...executed,
       verification,
@@ -2446,6 +2496,12 @@ export class ComputerManager {
           ? { resolvedBy: byQuery.resolution.resolvedBy, confidence: byQuery.resolution.confidence }
           : {}),
         ...(failureContext === undefined ? {} : { context: failureContext }),
+        ...(aim === undefined
+          ? {}
+          : {
+              aim: { x: aim.x, y: aim.y, strategy: aim.strategy },
+              ...(isCenterGuess(aim) ? { warnings: ["aim strategy bounds-center is a guess"] } : {}),
+            }),
         stateDelta: {
           added: delta.added.map((item) => ({ ...item })),
           removed: delta.removed.map((item) => ({ ...item })),
@@ -3406,6 +3462,55 @@ export class ComputerManager {
       ...(element.role === undefined ? {} : { role: element.role }),
       ...(element.name === undefined ? {} : { name: element.name }),
     })
+  }
+
+  // A ref is only meaningful inside the observation that minted it. When the
+  // caller binds its target to an observation that is no longer the one the
+  // server holds, the desktop it resolved against has been replaced, so the
+  // action is refused naming both observations instead of being rebound to
+  // whatever now carries the ref string. Only a binding that still matches the
+  // current observation may be translated forward onto the reference the
+  // driver's revalidation returned for the same element.
+  private staleTargetOutcome(
+    id: string,
+    computer: ManagedComputer,
+    request: ServerActionRequest,
+    actionType: string,
+  ): ExecuteOutcome | undefined {
+    const binding = request.target
+    if (binding === undefined) return undefined
+    const observationId = binding.observationId
+    const generation = binding.generation
+    if (observationId === undefined && generation === undefined) return undefined
+    const current = computer.lastObservation
+    if (current === undefined) return undefined
+    const currentGeneration = current.metadata?.generation
+    const observationMismatch = observationId !== undefined && observationId !== current.id
+    const generationMismatch =
+      generation !== undefined && typeof currentGeneration === "number" && generation !== currentGeneration
+    if (!observationMismatch && !generationMismatch) return undefined
+    const from =
+      observationId === undefined
+        ? `generation ${generation}`
+        : generation === undefined
+          ? `observation ${observationId}`
+          : `observation ${observationId} (generation ${generation})`
+    const elementId = binding.elementId ?? binding.id ?? ""
+    const message = `Target ${elementId} is from ${from}, not the current ${current.id} (generation ${currentGeneration ?? "unknown"}); re-observe before acting.`
+    this.events.emit("action.failed", {
+      computerId: id,
+      ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+      data: { action: actionType, reason: message },
+    })
+    return {
+      httpStatus: 409,
+      result: {
+        success: false,
+        status: "rejected",
+        message,
+        error: { code: "target_stale", message, retryable: true },
+      },
+    }
   }
 
   private async checkIdentity(
@@ -5967,6 +6072,12 @@ export class ComputerManager {
         ...(result.message === undefined ? {} : { message: result.message }),
         ...(typeof metadata.resolvedBy === "string" ? { resolvedBy: metadata.resolvedBy } : {}),
         ...(typeof metadata.confidence === "number" ? { confidence: metadata.confidence } : {}),
+        ...(typeof metadata.aim === "object" && metadata.aim !== null
+          ? { aim: metadata.aim as BatchStepResult["aim"] }
+          : {}),
+        ...(Array.isArray(metadata.warnings)
+          ? { warnings: metadata.warnings.filter((warning): warning is string => typeof warning === "string") }
+          : {}),
         ...(verification === undefined ? {} : { verification }),
         ...(metadata.stateDelta === undefined ? {} : { stateDelta: metadata.stateDelta as StateDelta }),
         ...(result.error === undefined ? {} : { error: result.error }),
@@ -6224,6 +6335,13 @@ export class ComputerManager {
       },
     }
   }
+}
+
+// Replacing only the target keeps the action's own type: ComputerAction is a
+// union whose variants do not all accept an element target, so a plain spread
+// of the union does not typecheck.
+function retargeted<T extends ComputerAction>(action: T, reference: ElementReference): T {
+  return { ...action, target: { kind: "element", elementId: reference.elementId ?? "", reference } }
 }
 
 function toComputerAction(request: ServerActionRequest): ComputerAction | undefined {

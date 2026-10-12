@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process"
 import { ROLES } from "../../protocol"
+import type { Bounds, Point } from "../../protocol"
 import type {
   CuaAction,
   CuaActionResult,
@@ -17,7 +18,9 @@ import type {
 } from "../types"
 import {
   WINDOWS_MAX_DEPTH,
+  WINDOWS_MAX_WINDOWS,
   WINDOWS_OBSERVE_SCRIPT,
+  WINDOWS_TIME_BUDGET_MS,
   WINDOWS_PROBE_SCRIPT,
   parseWindowsResolvedPayload,
   parseWindowsResultPayload,
@@ -34,6 +37,7 @@ import {
   windowsScrollScript,
   windowsTypeScript,
   windowsWindowScript,
+  windowsDisplayText,
   type WindowsElementSnapshot,
   type WindowsPattern,
   type WindowsResolvedPayload,
@@ -46,6 +50,10 @@ import { limitSnapshot } from "./snapshot-limit"
 
 export const WINDOWS_OBSERVE_TIMEOUT_MS = 30000
 export const WINDOWS_SCRIPT_TIMEOUT_MS = 15000
+// The observe script stops itself at this deadline; the execFile timeout is
+// the hard ceiling above it, so a walk that runs out of budget reports a
+// truncated tree instead of being killed mid-payload.
+export const WINDOWS_OBSERVE_BUDGET_MS = WINDOWS_TIME_BUDGET_MS
 const DEFAULT_MAX_ELEMENTS = 1000
 const DEFAULT_WAIT_TIMEOUT_MS = 5000
 const DEFAULT_WAIT_POLL_MS = 200
@@ -62,6 +70,109 @@ export type WindowsRunner = (
   args: readonly string[],
   timeoutMs: number,
 ) => Promise<CuaRunResult>
+
+// A per-window share of the desktop element budget. One window with a thousand
+// rows must not consume the whole walk and drop every other window from the
+// observation, so the build halves the budget across windows before the
+// priority limiter sees the tree.
+const MAX_ELEMENTS_PER_WINDOW_RATIO = 2
+// More windows than the cap can ever mean a walk that stopped early, so the
+// tree is reported as truncated rather than silently dropped. The helper script
+// stops at the same count, so both layers agree on the bound.
+const MAX_WINDOWS = WINDOWS_MAX_WINDOWS
+// Aim inset from an element's edge, as a share of its thickness. Long enough to
+// leave a provider-drawn, rounded edge without crossing into a neighbour.
+const AIM_INSET_RATIO = 0.12
+
+// Role-specific click points for the pointer fallback. The engine's aim layer
+// owns the same vocabulary; a backend-level fallback repeats the rule so a
+// foreground pointer click never defaults to the center of a bounding box.
+const TITLE_BAR_EDGE: Readonly<Record<string, "left" | "right">> = {
+  closebutton: "right",
+  close: "right",
+  minimizebutton: "left",
+  minimize: "left",
+  maximizebutton: "right",
+  maximize: "right",
+  restorebutton: "right",
+  restore: "right",
+}
+
+const SCROLLBAR_ROLES: ReadonlySet<string> = new Set(["scrollbar", "scrollbarbutton", "scrollbargrip"])
+
+const TOGGLE_ROLES: ReadonlySet<string> = new Set([
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "checkbox",
+  "checkbutton",
+  "radio",
+  "radiobutton",
+  "switch",
+  "togglebutton",
+])
+
+const CONTROL_ROLES: ReadonlySet<string> = new Set([
+  "button",
+  "link",
+  "textfield",
+  "searchbox",
+  "tab",
+  "treeitem",
+  "slider",
+  "spinbutton",
+  "combobox",
+  "listbox",
+  "listitem",
+  "option",
+  "gridcell",
+  "cell",
+  "menubutton",
+  "splitbutton",
+])
+
+// The point a pointer click aims at, chosen from element metadata rather than
+// the center of the bounding box: the clickable point UIA computes first, then
+// the role-specific inset. The returned strategy is recorded so a bounds-center
+// guess is never silent.
+export function aimPoint(
+  element: Pick<CuaElement, "role" | "bounds">,
+  clickablePoint: { x: number; y: number } | undefined,
+): { x: number; y: number; strategy: string } | undefined {
+  const bounds = element.bounds
+  if (bounds === undefined) return undefined
+  const clamp = (x: number, y: number) => ({
+    x: Math.min(Math.max(Math.round(x), bounds.x), bounds.x + bounds.width),
+    y: Math.min(Math.max(Math.round(y), bounds.y), bounds.y + bounds.height),
+  })
+  if (clickablePoint !== undefined) return { ...clamp(clickablePoint.x, clickablePoint.y), strategy: "provider-hint" }
+  const edge = TITLE_BAR_EDGE[element.role]
+  if (edge !== undefined) {
+    const inset = Math.max(1, Math.round(bounds.width * AIM_INSET_RATIO))
+    return {
+      ...clamp(edge === "right" ? bounds.x + bounds.width - inset : bounds.x + inset, bounds.y + bounds.height / 2),
+      strategy: "role-inset",
+    }
+  }
+  if (SCROLLBAR_ROLES.has(element.role)) {
+    const vertical = bounds.height > bounds.width
+    const inset = Math.max(1, Math.round((vertical ? bounds.width : bounds.height) * AIM_INSET_RATIO))
+    return vertical
+      ? { ...clamp(bounds.x + bounds.width - inset, bounds.y + bounds.height / 2), strategy: "role-inset" }
+      : { ...clamp(bounds.x + bounds.width / 2, bounds.y + bounds.height - inset), strategy: "role-inset" }
+  }
+  if (TOGGLE_ROLES.has(element.role) || CONTROL_ROLES.has(element.role)) {
+    return { ...clamp(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2), strategy: "control-center" }
+  }
+  return { ...clamp(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2), strategy: "bounds-center" }
+}
+
+function clickablePointAttributes(point: Point | undefined, bounds: Bounds | undefined): Record<string, number> | undefined {
+  if (point === undefined || bounds === undefined) return undefined
+  if (point.x < bounds.x || point.y < bounds.y) return undefined
+  if (point.x > bounds.x + bounds.width || point.y > bounds.y + bounds.height) return undefined
+  return { clickablePointX: point.x, clickablePointY: point.y }
+}
 
 export function defaultWindowsRunner(
   script: string,
@@ -270,7 +381,10 @@ function normalizeBounds(bounds: { x: number; y: number; width: number; height: 
   return bounds
 }
 
-function buildAttributes(node: WindowsElementSnapshot): Record<string, string | number | boolean> {
+function buildAttributes(
+  node: WindowsElementSnapshot,
+  bounds: Bounds | undefined,
+): Record<string, string | number | boolean> {
   const attributes: Record<string, string | number | boolean> = { uiaRole: node.role }
   if (node.patterns.length > 0) attributes.uiaPatterns = node.patterns.join(", ")
   if (node.value !== undefined && node.value.length > 0) attributes.value = node.value
@@ -281,6 +395,11 @@ function buildAttributes(node: WindowsElementSnapshot): Record<string, string | 
   if (node.className !== undefined && node.className.length > 0) attributes.className = node.className
   if (node.hwnd !== undefined && node.hwnd !== 0) attributes.hwnd = node.hwnd
   if (node.pid !== undefined) attributes.pid = node.pid
+  const clickable = clickablePointAttributes(node.clickablePoint, bounds)
+  if (clickable !== undefined) {
+    attributes.clickablePointX = clickable.clickablePointX
+    attributes.clickablePointY = clickable.clickablePointY
+  }
   return attributes
 }
 
@@ -301,15 +420,32 @@ interface ElementBuildInput {
   window: CuaWindow
   parentRef: string | undefined
   elementOccurrences: Map<string, number>
+  maxElements: number
+  windowCounts: Map<string, number>
+  windowTruncated: Set<string>
+}
+
+function perWindowBudget(maxElements: number): number {
+  return Math.max(1, Math.floor(maxElements / MAX_ELEMENTS_PER_WINDOW_RATIO))
 }
 
 function addElement(elements: CuaElement[], input: ElementBuildInput): void {
+  if (input.windowTruncated.has(input.window.ref)) return
+  // Per-window cap: one window with a thousand rows must not consume the whole
+  // observe budget and drop every other window from the observation.
+  const kept = input.windowCounts.get(input.window.ref) ?? 0
+  if (kept >= perWindowBudget(input.maxElements)) {
+    input.windowTruncated.add(input.window.ref)
+    return
+  }
+  input.windowCounts.set(input.window.ref, kept + 1)
   const role = canonicalWindowsRole(input.node.role)
   const name = input.node.name ?? ""
   const key = `${input.window.ref}|${role}|${slugify(name)}`
   const occurrence = input.elementOccurrences.get(key) ?? 0
   input.elementOccurrences.set(key, occurrence + 1)
   const bounds = normalizeBounds(input.node.bounds)
+  const text = input.node.text ?? windowsDisplayText(input.node.role, input.node.value, input.node.editable)
   const element: CuaElement = {
     ref: buildElementRef(input.window.ref, role, name, occurrence),
     backendRef: `win:${input.node.runtimeId}`,
@@ -324,10 +460,12 @@ function addElement(elements: CuaElement[], input: ElementBuildInput): void {
       valuePresent: input.node.valuePresent,
     }),
     states: input.node.states,
-    attributes: buildAttributes(input.node),
+    attributes: buildAttributes(input.node, bounds),
     generation: input.generation,
     windowRef: input.window.ref,
+    application: input.window.app,
     ...(input.parentRef === undefined ? {} : { parentRef: input.parentRef }),
+    ...(text === undefined ? {} : { text }),
     ...(input.node.value === undefined || input.node.value.length === 0 ? {} : { value: input.node.value }),
     ...(input.node.description === undefined || input.node.description.length === 0
       ? {}
@@ -348,8 +486,11 @@ export function buildWindowsSnapshot(input: WindowsSnapshotBuildInput): CuaSnaps
   const windows: CuaWindow[] = []
   const elements: CuaElement[] = []
   const warnings = [...(input.warnings ?? [])]
+  let helperTruncated = input.helperTruncated === true
   const windowOccurrences = new Map<string, number>()
   const elementOccurrences = new Map<string, number>()
+  const windowCounts = new Map<string, number>()
+  const windowTruncated = new Set<string>()
   const appFilter = input.requestedApp?.toLowerCase()
 
   for (const entry of input.windows) {
@@ -360,6 +501,10 @@ export function buildWindowsSnapshot(input: WindowsSnapshotBuildInput): CuaSnaps
     }
     if (entry.node === undefined) continue
     if (appFilter !== undefined && !app.toLowerCase().includes(appFilter)) continue
+    if (windows.length >= MAX_WINDOWS) {
+      helperTruncated = true
+      break
+    }
     const title = entry.title ?? entry.node.name ?? app
     const occurrenceKey = `${app}|${title}`
     const occurrence = windowOccurrences.get(occurrenceKey) ?? 0
@@ -382,11 +527,38 @@ export function buildWindowsSnapshot(input: WindowsSnapshotBuildInput): CuaSnaps
       window,
       parentRef: undefined,
       elementOccurrences,
+      maxElements: input.maxElements,
+      windowCounts,
+      windowTruncated,
     })
   }
 
   if (input.requestedApp !== undefined && windows.length === 0) {
     warnings.push(`No application matched "${input.requestedApp}"; no elements are available for this snapshot.`)
+  }
+  // A window whose subtree hit the per-window cap is missing descendants, so the
+  // observation must say so instead of reporting a complete tree.
+  if (windowTruncated.size > 0) {
+    helperTruncated = true
+    for (const ref of windowTruncated) {
+      const window = windows.find((candidate) => candidate.ref === ref)
+      if (window === undefined) continue
+      warnings.push(
+        `The window "${window.title}" of ${window.app} was capped at ${perWindowBudget(input.maxElements)} elements; its subtree was truncated before the element budget was applied.`,
+      )
+    }
+  }
+  if (helperTruncated && !warnings.some((warning) => warning.includes("accessibility tree was truncated"))) {
+    warnings.push(
+      "The accessibility tree was truncated before the element budget was applied; some elements are missing.",
+    )
+  }
+  // A zero-element tree must never be indistinguishable from a healthy empty
+  // desktop: if no other warning explains the emptiness, say so explicitly.
+  if (windows.length === 0 && warnings.length === 0) {
+    warnings.push(
+      "No accessibility windows were observed; the app may have no open windows or the accessibility tree may be unavailable.",
+    )
   }
   return limitSnapshot(
     {
@@ -397,8 +569,10 @@ export function buildWindowsSnapshot(input: WindowsSnapshotBuildInput): CuaSnaps
       windows,
       elements,
       ...(input.screen === undefined ? {} : { screen: input.screen }),
-      truncated: input.helperTruncated === true,
+      truncated: helperTruncated,
       warnings,
+      accessibility:
+        windows.length === 0 || elements.length === 0 || helperTruncated ? "degraded" : "available",
     },
     input.maxElements,
   )
@@ -504,14 +678,47 @@ export interface WindowsCuaBackendOptions {
   allowForeground?: boolean
 }
 
+// Every action type carries the observation/generation pair the engine forwards
+// it with, including pointer clicks, so a click aimed from an older observation
+// is refused rather than delivered against whatever is on screen now. `key` and
+// `dismiss` carry no pair to check.
 function windowsBindingOf(action: CuaAction): { observationId?: string; generation?: number } {
-  if (action.type === "click" || action.type === "drag" || action.type === "key" || action.type === "dismiss") {
-    return {}
-  }
+  if (action.type === "key" || action.type === "dismiss") return {}
+  const scope = action as CuaAction & { observationId?: string; generation?: number }
   return {
-    ...(action.observationId === undefined ? {} : { observationId: action.observationId }),
-    ...(action.generation === undefined ? {} : { generation: action.generation }),
+    ...(scope.observationId === undefined ? {} : { observationId: scope.observationId }),
+    ...(scope.generation === undefined ? {} : { generation: scope.generation }),
   }
+}
+
+// A typed refusal naming both ids: the pair the action carries and the pair the
+// current snapshot holds. A caller must be able to tell an observation mismatch
+// from a generation mismatch without guessing, and no path silently rebinds.
+function bindingRefusal(
+  action: CuaAction,
+  ref: string,
+  source: CuaSnapshot,
+  binding: { observationId?: string; generation?: number },
+  generation: number,
+): CuaActionResult | undefined {
+  if (binding.observationId === undefined && binding.generation === undefined) return undefined
+  const observationMatches = binding.observationId === undefined || binding.observationId === source.id
+  const generationMatches = binding.generation === undefined || binding.generation === source.generation
+  if (observationMatches && generationMatches) return undefined
+  const from = (observed: string | undefined, value: number | undefined) =>
+    observed === undefined
+      ? value === undefined
+        ? "an unknown observation"
+        : `generation ${value}`
+      : value === undefined
+        ? `observation ${observed}`
+        : `observation ${observed} (generation ${value})`
+  return refuse(
+    action,
+    "stale_ref",
+    `Target ${ref} is from ${from(binding.observationId, binding.generation)}, not the current observation ${source.id} (generation ${source.generation}); re-observe before acting.`,
+    generation,
+  )
 }
 
 interface RefResolution {
@@ -538,6 +745,9 @@ function isWindowResolution(value: WindowResolution | CuaActionResult): value is
 class WindowsCuaBackend implements CuaBackend {
   readonly platform: CuaPlatform = "win32"
   readonly name = "cua-windows"
+  // The engine needs the backend's default walk budget to decide whether a
+  // cached snapshot covers a request.
+  readonly defaultMaxElements = DEFAULT_MAX_ELEMENTS
   private readonly maxElements: number
   private readonly allowForeground: boolean
   private readonly runner: WindowsRunner
@@ -615,6 +825,7 @@ class WindowsCuaBackend implements CuaBackend {
       ...(options.app === undefined ? {} : { app: options.app }),
       maxElements: Math.max(1000, maxElements * 2),
       maxDepth: WINDOWS_MAX_DEPTH,
+      timeBudgetMs: WINDOWS_OBSERVE_BUDGET_MS,
     })
     const raw = await this.runScript(script, WINDOWS_OBSERVE_TIMEOUT_MS)
     const payload = parseWindowsSnapshotPayload(raw)
@@ -836,6 +1047,21 @@ class WindowsCuaBackend implements CuaBackend {
     return classified
   }
 
+  private bindingStaleness(
+    action: CuaAction,
+    snapshot: CuaSnapshot | undefined,
+    generation: number,
+  ): CuaActionResult | undefined {
+    const binding = windowsBindingOf(action)
+    if (binding.observationId === undefined && binding.generation === undefined) return undefined
+    const source = snapshot ?? this.latest
+    if (source === undefined) {
+      return refuse(action, "no_snapshot", "Take a snapshot before acting on an element ref.", generation)
+    }
+    const label = "ref" in action && typeof action.ref === "string" ? action.ref : `${action.type} action`
+    return bindingRefusal(action, label, source, binding, generation)
+  }
+
   private async expectElement(
     ref: string,
     action: CuaAction,
@@ -846,23 +1072,8 @@ class WindowsCuaBackend implements CuaBackend {
     if (source === undefined) {
       return refuse(action, "no_snapshot", "Take a snapshot before acting on an element ref.", generation)
     }
-    const binding = windowsBindingOf(action)
-    if (binding.observationId !== undefined && binding.observationId !== source.id) {
-      return refuse(
-        action,
-        "stale_ref",
-        `Target ${ref} is from observation ${binding.observationId}, not the current ${source.id}; re-observe before acting.`,
-        generation,
-      )
-    }
-    if (binding.generation !== undefined && binding.generation !== source.generation) {
-      return refuse(
-        action,
-        "stale_ref",
-        `Target ${ref} is from generation ${binding.generation}, not the current ${source.generation}; re-observe before acting.`,
-        generation,
-      )
-    }
+    const stale = bindingRefusal(action, ref, source, windowsBindingOf(action), generation)
+    if (stale !== undefined) return stale
     const element = source.elements.find((candidate) => candidate.ref === ref)
     if (element === undefined) return refuse(action, "stale_ref", `Unknown element ref: ${ref}`, generation)
     if (!(await this.probe()).ok) {
@@ -899,23 +1110,8 @@ class WindowsCuaBackend implements CuaBackend {
     if (source === undefined) {
       return refuse(action, "no_snapshot", "Take a snapshot before acting on a window ref.", generation)
     }
-    const binding = windowsBindingOf(action)
-    if (binding.observationId !== undefined && binding.observationId !== source.id) {
-      return refuse(
-        action,
-        "stale_ref",
-        `Target ${ref} is from observation ${binding.observationId}, not the current ${source.id}; re-observe before acting.`,
-        generation,
-      )
-    }
-    if (binding.generation !== undefined && binding.generation !== source.generation) {
-      return refuse(
-        action,
-        "stale_ref",
-        `Target ${ref} is from generation ${binding.generation}, not the current ${source.generation}; re-observe before acting.`,
-        generation,
-      )
-    }
+    const stale = bindingRefusal(action, ref, source, windowsBindingOf(action), generation)
+    if (stale !== undefined) return stale
     const window = source.windows.find((candidate) => candidate.ref === ref)
     if (window === undefined) return refuse(action, "stale_ref", `Unknown window ref: ${ref}`, generation)
     if (!(await this.probe()).ok) {
@@ -1001,7 +1197,15 @@ class WindowsCuaBackend implements CuaBackend {
     if (bounds === undefined) {
       return refuse(action, "background_unavailable", `The element at ${action.ref} has no bounds for a pointer fallback.`, generation)
     }
-    const point = { x: Math.round(bounds.x + bounds.width / 2), y: Math.round(bounds.y + bounds.height / 2) }
+    // Choose the point from element metadata, never the center of the bounding
+    // box by default: UIA's own clickable point first, then the role-specific
+    // inset.
+    const aim = aimPoint({ ...resolved.element, bounds }, resolved.live.clickablePoint) ?? {
+      x: Math.round(bounds.x + bounds.width / 2),
+      y: Math.round(bounds.y + bounds.height / 2),
+      strategy: "bounds-center",
+    }
+    const point = { x: aim.x, y: aim.y }
     if (this.allowForeground) {
       const output = parseWindowsResultPayload(
         await this.runScript(windowsPointerClickScript(point, "left", 1), WINDOWS_SCRIPT_TIMEOUT_MS),
@@ -1009,7 +1213,17 @@ class WindowsCuaBackend implements CuaBackend {
       if (output?.ok !== true) {
         return this.classifyFailure(action, output, generation, "The pointer click fallback failed.")
       }
-      return success(action, "pointer", `Clicked ${action.ref} at its center.`, generation, false)
+      if (aim.strategy === "bounds-center") {
+        return success(
+          action,
+          "pointer",
+          `Clicked ${action.ref} at the center of its bounds (${point.x},${point.y}); no better aim point was reported.`,
+          generation,
+          false,
+          ["aim: bounds-center"],
+        )
+      }
+      return success(action, "pointer", `Clicked ${action.ref} at its ${aim.strategy} (${point.x},${point.y}).`, generation, false)
     }
     const hwnd = resolved.element.attributes?.hwnd
     if (typeof hwnd !== "number" || hwnd === 0) {
@@ -1273,7 +1487,12 @@ class WindowsCuaBackend implements CuaBackend {
       if (bounds === undefined) {
         return refuse(action, "invalid_target", `The element at ${action.ref} has no bounds to scroll.`, generation)
       }
-      const point = { x: Math.round(bounds.x + bounds.width / 2), y: Math.round(bounds.y + bounds.height / 2) }
+      const aim = aimPoint({ ...resolved.element, bounds }, resolved.live.clickablePoint) ?? {
+        x: Math.round(bounds.x + bounds.width / 2),
+        y: Math.round(bounds.y + bounds.height / 2),
+        strategy: "bounds-center",
+      }
+      const point = { x: aim.x, y: aim.y }
       const output = parseWindowsResultPayload(
         await this.runScript(windowsScrollScript(action.direction, amount, point), WINDOWS_SCRIPT_TIMEOUT_MS),
       )
@@ -1398,6 +1617,11 @@ class WindowsCuaBackend implements CuaBackend {
     if (!probe.ok) {
       return refuse(action, "backend_unavailable", probe.error ?? "Windows UI Automation is not available.", generation)
     }
+    // Refuse the whole action before any delivery when the pair it carries
+    // names another observation — including pointer clicks, which are the ones
+    // a silently rebound ref would land on the wrong control.
+    const stale = this.bindingStaleness(action, snapshot, generation)
+    if (stale !== undefined) return stale
     switch (action.type) {
       case "invoke":
         return this.executeInvoke(action, snapshot, generation)

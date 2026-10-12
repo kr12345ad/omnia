@@ -1,3 +1,4 @@
+import { computeAim, isCenterGuess, type Aim, type AimStrategy } from "./aim"
 import type {
   ComputerUseAction,
   ComputerUsePlatform,
@@ -211,6 +212,17 @@ export function isTitleBarTarget(targetDescription?: string, taskContext?: strin
   return TITLE_BAR_TARGET_PATTERN.test(haystack)
 }
 
+// A titled-window click is nameable: the target either resolves to a window
+// control or names a window title. Only those clicks are held to the aim rules,
+// because a wrong click there destroys or lowers the target window instead of
+// missing a button inside it.
+function isTitledWindowClick(targetDescription?: string, taskContext?: string): boolean {
+  return (
+    isTitleBarTarget(targetDescription, taskContext) ||
+    extractWindowTitleFragment(targetDescription, taskContext) !== undefined
+  )
+}
+
 // Title-bar region: top strip where window controls live. Linux/Windows keep
 // controls top-right; macOS keeps them top-left, so the x side flips with the
 // controlled computer's platform. Thresholds scale with screenshot size so the
@@ -344,9 +356,191 @@ export function checkCloseGuard(point: SafetyPoint, closePoints: readonly Safety
   return { safe: true }
 }
 
+// A centre-of-bounds aim carries no evidence about where the control actually
+// is, so the safety layer reports it instead of letting the click pass quietly.
+// Returns undefined for every strategy that resolves an actionable point.
+export function describeAimRisk(aim: Aim): string | undefined {
+  if (!isCenterGuess(aim)) return undefined
+  return (
+    `Aim (${aim.x}, ${aim.y}) resolved with strategy "bounds-center": the element exposes no focus point, ` +
+    `no provider aim hint, and a role that does not identify an actionable region, so the click target is ` +
+    `only a guess inside the bounding box. Resolve a ref, supply a focus point or aim hint, or ground with a ` +
+    `screenshot cropped around the control before clicking.`
+  )
+}
+
+// Window-control cluster guard. A control this close to the title-bar corner is
+// one jitter step (±10px) from the button next door, because Minimize and Close
+// sit 9px apart there.
+export const TITLE_BAR_CORNER_GUARD_PX = 24
+
+// Roles that mean "this element is one of the window controls". The vocabulary
+// matches the TITLE_BAR_EDGE table in ./aim, because that table is also what
+// resolves the safe role-inset aim for each of them.
+const TITLE_BAR_BUTTON_ROLES: ReadonlySet<string> = new Set([
+  "close",
+  "closebutton",
+  "minimize",
+  "minimizebutton",
+  "maximize",
+  "maximizebutton",
+  "restore",
+  "restorebutton",
+])
+// Accessible names for the same cluster. The name has to name the button and
+// nothing else, so a content button ("Close sidebar") never counts.
+const TITLE_BAR_BUTTON_NAME = /^\s*(close|minimi[sz]e|maximi[sz]e|restore)\s*((button|control|window|icon)\b|[x\u00d7])?\s*$/i
+
+const AIM_STRATEGIES: readonly AimStrategy[] = ["control-center", "focus-point", "role-inset", "provider-hint", "bounds-center"]
+
+export interface ClickRiskBounds {
+  readonly x: number
+  readonly y: number
+  readonly width: number
+  readonly height: number
+}
+
+export interface ClickRiskInput {
+  readonly aim: { readonly x: number; readonly y: number; readonly strategy: string }
+  readonly elementRole?: string
+  readonly elementName?: string
+  readonly bounds: ClickRiskBounds
+  readonly windowTitle?: string
+}
+
+export interface ClickRiskResult {
+  readonly risk: "low" | "medium" | "high"
+  readonly reason: string
+}
+
+// A strategy outside the aim vocabulary resolved the point from nothing the
+// safety layer can inspect, so it is not evidence about where the control is.
+export function isKnownAimStrategy(value: string): value is AimStrategy {
+  return (AIM_STRATEGIES as readonly string[]).includes(value)
+}
+
+function usableBounds(bounds: ClickRiskBounds): boolean {
+  return (
+    Number.isFinite(bounds.x) &&
+    Number.isFinite(bounds.y) &&
+    Number.isFinite(bounds.width) &&
+    Number.isFinite(bounds.height) &&
+    bounds.width > 0 &&
+    bounds.height > 0
+  )
+}
+
+// Why the element cannot be identified at all, or undefined when it can.
+function unresolvableElement(bounds: ClickRiskBounds, role: string | undefined, name: string | undefined): string | undefined {
+  if (!usableBounds(bounds)) return `bounds ${bounds.x},${bounds.y} ${bounds.width}x${bounds.height} are not a usable rectangle`
+  if ((role ?? "").trim().length === 0 && (name ?? "").trim().length === 0) return "the element exposes no role and no name"
+  return undefined
+}
+
+function isTitleBarButton(role: string | undefined, name: string | undefined): boolean {
+  if (TITLE_BAR_BUTTON_ROLES.has((role ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, ""))) return true
+  return TITLE_BAR_BUTTON_NAME.test((name ?? "").trim())
+}
+
+// Gap from the element's bounds to the window-control corner region. The
+// window's own geometry is not part of the risk input, so the region comes
+// from the reference screen the ban thresholds are calibrated to (1920x1080):
+// an element already inside that region has a gap of zero.
+function titleBarCornerGap(bounds: ClickRiskBounds): number {
+  const { xThreshold, yThreshold, width } = titleBarThresholds(undefined, "linux")
+  const dx = Math.max(xThreshold - (bounds.x + bounds.width), bounds.x - width, 0)
+  const dy = Math.max(bounds.y - yThreshold, -(bounds.y + bounds.height), 0)
+  return Math.hypot(dx, dy)
+}
+
+// How risky one click is, before any region policy applies. The aim strategy
+// is the evidence: a metadata-resolved strategy (control-center, focus-point,
+// role-inset, provider-hint) names a point the element itself vouches for,
+// while bounds-center is a guess and only survives away from the window
+// controls. `medium` means the click may proceed but has to be recorded.
+export function evaluateClickRisk(params: ClickRiskInput): ClickRiskResult {
+  const strategy = params.aim.strategy
+  const centerGuess = strategy === "bounds-center"
+  // A centre guess on a control of a titled window is the recorded P0 failure:
+  // the window names itself, its control cluster lives in the title strip, and
+  // Close/Minimize are 9px apart there.
+  if (centerGuess && (params.windowTitle ?? "").trim().length > 0) {
+    return { risk: "high", reason: "center-guess on a titled control; Close/Minimize sit 9px apart" }
+  }
+  // Window controls are only separable by the role inset; every other strategy
+  // aims into a cluster whose buttons are one jitter step apart.
+  if (isTitleBarButton(params.elementRole, params.elementName) && strategy !== "role-inset") {
+    const safe = computeAim({ bounds: params.bounds, role: params.elementRole })
+    const label = params.elementRole ?? params.elementName ?? "window control"
+    return {
+      risk: "high",
+      reason:
+        `aim strategy "${strategy}" on the ${label} button is not the role inset ` +
+        `(aim ${safe.x},${safe.y} instead); Close/Minimize sit 9px apart inside ±10px vision jitter`,
+    }
+  }
+  // A centre guess this close to the window-control corner has nothing to
+  // separate it from the button next door.
+  if (centerGuess && titleBarCornerGap(params.bounds) <= TITLE_BAR_CORNER_GUARD_PX) {
+    return {
+      risk: "high",
+      reason:
+        `center-guess at (${params.aim.x},${params.aim.y}) lands within ${TITLE_BAR_CORNER_GUARD_PX}px of the window's top-right ` +
+        `title-bar corner; Close/Minimize sit 9px apart inside ±10px vision jitter`,
+    }
+  }
+  // Nothing identifies the element or the strategy, so nothing vouches for the
+  // aim: the click may proceed, but it is recorded as uncertain.
+  if (!isKnownAimStrategy(strategy)) {
+    return {
+      risk: "medium",
+      reason: `aim strategy "${strategy}" is outside the aim vocabulary, so the click target cannot be confirmed`,
+    }
+  }
+  const unresolvable = unresolvableElement(params.bounds, params.elementRole, params.elementName)
+  if (unresolvable !== undefined) {
+    return {
+      risk: "medium",
+      reason: `unresolvable element: ${unresolvable}, so the click target cannot be confirmed`,
+    }
+  }
+  return {
+    risk: "low",
+    reason: `aim (${params.aim.x},${params.aim.y}) resolved from element metadata with strategy "${strategy}"`,
+  }
+}
+
 export interface TitleBarBanResult {
   readonly banned: boolean
   readonly reason?: string
+  // A `medium` click risk is allowed but recorded here, so nothing that grounds
+  // without evidence about the target passes quietly.
+  readonly warnings?: readonly string[]
+}
+
+// A `medium` click risk is allowed but recorded, so the caller surface shows
+// the uncertainty instead of the click passing quietly.
+function allowedWithWarnings(warnings: readonly string[]): TitleBarBanResult {
+  return warnings.length === 0 ? { banned: false } : { banned: false, warnings }
+}
+
+// The click-risk half of the verdict, or undefined when the call carries no
+// element to judge (aim and element bounds are both required).
+function clickRiskFor(options: {
+  readonly aim?: Aim
+  readonly elementRole?: string
+  readonly elementName?: string
+  readonly bounds?: ClickRiskBounds
+  readonly windowTitle?: string
+}): ClickRiskResult | undefined {
+  if (options.aim === undefined || options.bounds === undefined) return undefined
+  return evaluateClickRisk({
+    aim: options.aim,
+    ...(options.elementRole === undefined ? {} : { elementRole: options.elementRole }),
+    ...(options.elementName === undefined ? {} : { elementName: options.elementName }),
+    bounds: options.bounds,
+    ...(options.windowTitle === undefined ? {} : { windowTitle: options.windowTitle }),
+  })
 }
 
 // Ban: reject full-screen grounding targeting the title-bar region unless
@@ -355,6 +549,9 @@ export interface TitleBarBanResult {
 // grounded point when available (post-grounding check), or with only
 // descriptions to deflect before grounding. The region side comes from the
 // controlled computer's platform (macOS top-left, Linux/Windows top-right).
+// Pass the resolved element (`aim` plus its role/name/bounds and the window
+// title) to run the click-risk gate: a `high` risk is a refusal no opt-in or
+// trusted crop can admit, and a `medium` risk comes back in `warnings`.
 export function checkTitleBarBan(options: {
   readonly point?: SafetyPoint
   readonly targetDescription?: string
@@ -363,9 +560,31 @@ export function checkTitleBarBan(options: {
   readonly allowTitleBarClicks?: boolean
   readonly crop?: boolean
   readonly platform?: ComputerUsePlatform
+  readonly aim?: Aim
+  readonly elementRole?: string
+  readonly elementName?: string
+  readonly bounds?: ClickRiskBounds
+  readonly windowTitle?: string
 }): TitleBarBanResult {
-  if (options.allowTitleBarClicks === true) return { banned: false }
-  if (options.crop === true || isCropPath(options.image)) return { banned: false }
+  // Element-level risk first: it is the most specific statement about the
+  // click, and a high risk is refused with its own reason.
+  const warnings: string[] = []
+  const risk = clickRiskFor(options)
+  if (risk?.risk === "high") return { banned: true, reason: risk.reason }
+  if (risk?.risk === "medium") warnings.push(risk.reason)
+  // A centre guess has no evidence of hitting any named control, so no opt-in
+  // or trusted-crop path may silently admit it.
+  const aimRisk = options.aim === undefined ? undefined : describeAimRisk(options.aim)
+  if (aimRisk !== undefined && isTitledWindowClick(options.targetDescription, options.taskContext)) {
+    return {
+      banned: true,
+      reason:
+        `${aimRisk} The target names a titled window or a window control, and Minimize (1834,45) vs Close ` +
+        `(1843,45) are 9px apart, so a bounds-centre guess on that cluster hits the wrong control.`,
+    }
+  }
+  if (options.allowTitleBarClicks === true) return allowedWithWarnings(warnings)
+  if (options.crop === true || isCropPath(options.image)) return allowedWithWarnings(warnings)
   const platform = options.platform ?? "linux"
   const { xThreshold, yThreshold } = titleBarThresholds(options.image, platform)
   if (options.point !== undefined && isTitleBarPoint(options.point, options.image, platform)) {
@@ -388,7 +607,7 @@ export function checkTitleBarBan(options: {
         `Use keyboard/semantic window management (Super+Down, Alt+Space+N, KWin DBus) or retry with a cropped screenshot around the button.`,
     }
   }
-  return { banned: false }
+  return allowedWithWarnings(warnings)
 }
 
 // Fallback: window-management intents default to keyboard/semantic instead

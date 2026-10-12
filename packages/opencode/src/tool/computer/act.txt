@@ -9,31 +9,57 @@ computer_read) merely look. Treat every call as a real hand on the user's
 machine: aim with a ref, bind it to its observation, and verify the effect
 before moving on.
 
-Targeting, in strict order of preference:
+Targeting, in strict order of preference. computer_act reads the current
+observation itself before it acts, resolves the target against it, and
+refuses anything it cannot resolve honestly: a refusal performs no action
+and never falls back to another targeting mode.
 
-1. target: a stable element ID from the most recent computer_find or
-   computer_observe, for example atspi:3.5, plus observationId from the
-   same observation so the runtime can refuse a stale target instead of
-   clicking the wrong thing. This is the default. Use it for click,
-   double_click, right_click, middle_click, hover, type, focus, move,
-   scroll-on-element, and every ref-only action below.
+1. target: a stable element ID from the most recent computer_find,
+   computer_observe, or computer_snapshot, for example
+   cua:window/kitty/OC | Quick hello/3/button/Minimize/1 or atspi:3.5,
+   plus observationId from the same observation. The ref is resolved
+   against that observation, and a ref that is not in it belongs to an
+   older state of the interface: it is refused, never rebound to whatever
+   matches now, and the refusal names the observationId it claimed. Take a
+   fresh snapshot with computer_snapshot (or computer_find) and act on the
+   ref and observationId it returns. A ref sent without observationId is
+   resolved against the newest observation for that computer, and when
+   there is none the action fails asking for a snapshot, so pass the
+   observationId whenever you have one. A ref or observation read off
+   another computer, or invalidated by a switch, is refused with both
+   computers named: refs never travel between computers.
 2. query (+ optional role and window): a control by meaning, for example
-   "Export button". The runtime resolves it server-side and rejects
-   ambiguous matches instead of guessing. Prefer this when you do not
-   have a fresh ref yet; it re-resolves against the live tree.
-3. x/y screen pixels: pointer actions only, and only when no element
-   target exists (canvas, image surface). Use only pixel centers reported
-   by observe, find, or inspect. Never invent, round, nudge, or average
-   coordinates. A guessed pixel is a misclick.
+   "Export". The query is matched against the controls in the current
+   observation with a 0.6 confidence floor. A query under the floor, or
+   one that ties between two controls, is refused with the query, role,
+   window, observation, and candidate count that were searched. Rename the
+   control more precisely or act on a ref; never retry the same vague
+   query, and never treat a refusal as a reason to click.
+3. x/y screen pixels: only for a surface that has no accessible controls.
+   Pass surface: "canvas" to declare that surface, or allowCoordinates:
+   true to let the runtime accept the pixel only when no control resolves
+   under it. A pixel that lands on a real control is refused and names
+   that control, so aim for it with its ref or a query instead. Use only
+   pixel centers reported by observe, find, or inspect; never invent,
+   round, nudge, or average coordinates. A guessed pixel is a misclick.
+
+Every result that resolved a target reports the point it was aimed at as
+aim: x,y (strategy), where strategy is provider-hint, focus-point,
+role-inset, control-center, bounds-center, or explicit-coordinate for a
+pixel you supplied yourself. bounds-center is a guess inside the reported
+bounds and is always flagged as one; when a control's aim is only a
+bounds-center, re-observe it or resolve a better point rather than
+clicking blind.
 
 Actions:
 
 - click, double_click, right_click, middle_click, hover, move: accept a
-  target element ID from the most recent computer_find or computer_observe,
-  a query, or explicit x/y screen pixels. Target refs are scoped to the
+  target ref bound to its observationId, a query, or explicit x/y screen
+  pixels on a declared canvas surface. Target refs are scoped to the
   observation they came from: pass observationId, re-observe after any
-  change, and re-find on target_stale. Refs are preferred over coordinates:
-  no vision model is needed to act on accessible controls.
+  change, and re-find on target_stale, target_not_found, or
+  ambiguous_target. Refs are preferred over coordinates: no vision model
+  is needed to act on accessible controls.
 - type and focus: type requires text plus a target element ID, query, or
   window to type into; focus requires a target or query. type first
   focuses the field through the accessibility layer when it can, then
@@ -78,8 +104,10 @@ Actions:
   when the target is merely below the fold.
 - drag: from and to endpoints, each an element ID or x/y coordinates. Both
   endpoints must resolve before the drag starts; a drag with one vague end
-  is two misclicks. Verify the drop effect (order changed, text moved)
-  before continuing.
+  is two misclicks. Pixel endpoints follow the same rule as x/y: declare
+  surface: "canvas" or pass allowCoordinates: true, and the runtime refuses
+  a pixel that lands on a control. Verify the drop effect (order changed,
+  text moved) before continuing.
 - paste_table: rows, a 2D array of cell values, optionally starting at a
   target cell. This is the only sane way to fill spreadsheets and grids:
   one paste instead of dozens of type actions. Verify by selecting the
@@ -139,8 +167,30 @@ Verification rubric — every result is one of three:
   chain the next step off an unverified state change.
 - failed: the runtime refused or the action errored, with a code. Read
   the code, not just the message:
-  - target_stale: the ref belongs to an older observation. Re-observe or
-    re-find and act again with the fresh ref and observationId.
+  - target_stale: the ref is not in the observation it claimed, or in the
+    newest observation when none was given. Nothing was acted on.
+    Re-observe or re-find and act again with the fresh ref and
+    observationId; never resent the old ref and never fall back to a
+    query or a pixel.
+  - identity_not_for_this_computer: the observation or ref was read off
+    another computer, or a switch invalidated it, so it is refused naming
+    both computers instead of being resolved against this computer's
+    element list. Nothing was acted on. Refs never travel between
+    computers: take a fresh computer_snapshot on this computer and act on
+    a ref it returns; an invalidated ref is never rebound.
+  - target_not_found: no control reached the 0.6 match floor for the
+    query. Nothing was clicked. The message names what was searched;
+    name the control more precisely or act on a ref.
+  - ambiguous_target: the query tied between controls. Nothing was
+    clicked. Narrow with role or window, or act on a ref.
+  - coordinates_required: x/y were sent for a surface that has accessible
+    controls. Nothing was clicked. Declare surface: "canvas", or pass
+    allowCoordinates: true and let the runtime check the point.
+  - coordinate_on_control: the pixel lands on a real control, named in
+    the message. Nothing was clicked. Act on that control by ref or
+    query.
+  - observation_unavailable: the current interface could not be read, so
+    nothing could be resolved. Take a fresh snapshot and retry.
   - marker_not_found: a type start/stop marker is absent. Nothing was
     typed. Fix the marker, do not retype blindly.
   - permission_required: request the named scope or credential and retry.
@@ -149,6 +199,8 @@ Verification rubric — every result is one of three:
     hammering the same action.
 
 State-changing actions ask the user for approval first unless computer
-access was already approved. Prefer refs over coordinates; use only
-pixel centers reported by observe, find, or inspect, never guessed
-coordinates; never assume an action worked because input was sent.
+access was already approved; a refused target asks for nothing, because
+nothing will run. Prefer refs bound to their observationId over
+coordinates, use only pixel centers reported by observe, find, or inspect,
+never guessed coordinates, never a ref from an older observation, and
+never assume an action worked because input was sent.

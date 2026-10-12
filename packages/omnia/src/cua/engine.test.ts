@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { ComputerAction } from "../protocol"
-import { CuaEngine, computeStateDelta } from "./engine"
+import { DEFAULT_SNAPSHOT_TTL_MS, CuaEngine, computeStateDelta, refIdentity, scopedRef } from "./engine"
+import { StaleRefError } from "./types"
 import { CuaHostDriver } from "./host-driver"
 import type { CuaLegacyFallbacks } from "./host-driver"
 import type {
@@ -188,14 +189,25 @@ const mainSnapshot = (): CuaSnapshot =>
 
 function driverWith(options: { queue?: CuaSnapshot[]; result?: Partial<CuaActionResult> } = {}): {
   driver: CuaHostDriver
+  engine: CuaEngine
   backend: FakeBackend
 } {
   const backend = new FakeBackend()
   backend.queue = options.queue ?? [mainSnapshot()]
   backend.result = options.result ?? {}
-  const engine = new CuaEngine({ backend, cacheTtlMs: 0 })
+  // A frozen clock with the production freshness window, so the observation a
+  // test reads its refs from stays the one the act path resolves against.
+  const engine = new CuaEngine({ backend, cacheTtlMs: DEFAULT_SNAPSHOT_TTL_MS, now: () => 1000 })
   const driver = new CuaHostDriver({ engine })
-  return { driver, backend }
+  return { driver, engine, backend }
+}
+
+// Refs are generation-scoped, so a test acts on the ref string the observation
+// it read minted rather than the backend's unscoped one.
+async function liveRef(driver: CuaHostDriver, ref: string): Promise<string> {
+  const observation = await driver.observe()
+  const element = (observation.elements ?? []).find((candidate) => refIdentity(candidate.id ?? "") === ref)
+  return element?.id ?? ref
 }
 
 function window(ref: string, overrides: Partial<CuaWindow> = {}): CuaWindow {
@@ -263,8 +275,11 @@ describe("cua engine", () => {
     const { engine } = engineWith([before, after])
     const result = await engine.execute({ type: "invoke", ref: "save" })
     expect(result.ok).toBe(true)
-    expect(result.stateDelta?.changedRefs).toEqual(["field", "save"])
-    expect(result.stateDelta?.focusedRef).toBe("new")
+    // The delta reports the refs the observation each side actually minted:
+    // a changed ref belongs to the after-observation, whose scoped ref string
+    // differs from the before-observation's.
+    expect(result.stateDelta?.changedRefs?.map(refIdentity)).toEqual(["field", "save"])
+    expect(result.stateDelta?.focusedRef).toBe(scopedRef("new", 2))
   })
 
   test("verifies focus", async () => {
@@ -395,7 +410,7 @@ describe("cua engine", () => {
     const result = await engine.execute({ type: "dismiss" })
     expect(result.ok).toBe(true)
     expect(result.verified).toBe(true)
-    expect(result.stateDelta?.removedRefs).toEqual(["cua:menu"])
+    expect(result.stateDelta?.removedRefs).toEqual([scopedRef("cua:menu", 1)])
   })
 
   test("keeps dismiss ok but unverified when nothing observable changed", async () => {
@@ -440,6 +455,72 @@ describe("cua engine", () => {
     )
     const unverified = await still.engine.execute({ type: "drag", from: { x: 0, y: 0 }, to: { x: 5, y: 5 } })
     expect(unverified.verified).toBe(false)
+  })
+
+  test("does not count the same focused element in a later generation as a focus move", async () => {
+    // Refs are generation-scoped, so the same focused element necessarily carries
+    // a different ref string in each observation. Changing the scope is not a
+    // move: reading it as one verified every action taken while anything was
+    // focused, which is the false-Verified bug.
+    const before = snapshot("same-before", 1, {
+      focusedRef: "cua:field",
+      elements: [element("cua:field", { role: "textbox", editable: true, focused: true }), element("cua:save")],
+    })
+    const after = snapshot("same-after", 2, {
+      focusedRef: "cua:field",
+      elements: [element("cua:field", { role: "textbox", editable: true, focused: true }), element("cua:save")],
+    })
+    const { engine } = engineWith([before, after], { delivery: "pointer" })
+    const result = await engine.execute({ type: "click", point: { x: 2, y: 2 } })
+    expect(result.ok).toBe(true)
+    expect(result.verified).toBe(false)
+    expect(result.warnings?.some((warning) => warning.includes("did not confirm"))).toBe(true)
+    // Both observations describe the same focused element, so only the scope of
+    // its ref differs.
+    expect(refIdentity(result.stateDelta?.focusedRef ?? "")).toBe("cua:field")
+    expect(result.stateDelta?.focusedRef).toBe(scopedRef("cua:field", 2))
+  })
+
+  test("counts a focus move to a different window as an observed change", async () => {
+    const before = snapshot("moved-before", 1, {
+      windows: [window("cua:window/away"), window("cua:window/here", { focused: true })],
+      focusedRef: "cua:window/here",
+      elements: [element("cua:item")],
+    })
+    const after = snapshot("moved-after", 2, {
+      windows: [window("cua:window/away", { focused: true }), window("cua:window/here")],
+      focusedRef: "cua:window/away",
+      elements: [element("cua:item")],
+    })
+    const { engine } = engineWith([before, after], { delivery: "pointer" })
+    const result = await engine.execute({ type: "click", point: { x: 2, y: 2 } })
+    expect(result.ok).toBe(true)
+    // Nothing in the element tree changed: the focus move is the whole evidence.
+    expect(result.stateDelta?.changedRefs).toBeUndefined()
+    expect(refIdentity(result.stateDelta?.focusedRef ?? "")).toBe("cua:window/away")
+    expect(result.verified).toBe(true)
+  })
+
+  test("an action with no observable change is not verified", async () => {
+    // A window is focused, as it always is on a real desktop, and nothing about
+    // the desktop changes: writing back a value the control already holds leaves
+    // the state exactly as it was.
+    const before = snapshot("still-before", 1, {
+      windows: [window("cua:window", { focused: true })],
+      focusedRef: "cua:window",
+      elements: [element("cua:field", { role: "textbox", editable: true, value: "ls -la" })],
+    })
+    const after = snapshot("still-after", 2, {
+      windows: [window("cua:window", { focused: true })],
+      focusedRef: "cua:window",
+      elements: [element("cua:field", { role: "textbox", editable: true, value: "ls -la" })],
+    })
+    // The backend claims the action verified itself; only the readback counts.
+    const { engine } = engineWith([before, after], { delivery: "keyboard", verified: true })
+    const result = await engine.execute({ type: "type", text: "ls -la" })
+    expect(result.ok).toBe(true)
+    expect(result.verified).toBe(false)
+    expect(result.warnings?.some((warning) => warning.includes("did not confirm"))).toBe(true)
   })
 
   test("window close with a missing after-snapshot never verifies", async () => {
@@ -547,7 +628,7 @@ describe("cua snapshot cache", () => {
     expect(backend.refreshWindowCalls).toEqual(["cua:window"])
     expect(backend.snapshotCalls).toBe(1)
     expect(result.verified).toBe(true)
-    expect(result.stateDelta?.addedRefs).toEqual(["cua:new"])
+    expect(result.stateDelta?.addedRefs).toEqual([scopedRef("cua:new", 2)])
     expect(engine.latestSnapshot()?.id).toBe("refreshed")
   })
 
@@ -561,7 +642,7 @@ describe("cua snapshot cache", () => {
     const result = await engine.execute({ type: "drag", from: { x: 0, y: 0 }, to: { x: 5, y: 5 } })
     expect(backend.snapshotCalls).toBe(1)
     expect(result.verified).toBe(true)
-    expect(result.stateDelta?.focusedRef).toBe("b")
+    expect(result.stateDelta?.focusedRef).toBe(scopedRef("b", 2))
     expect(engine.latestSnapshot()?.id).toBe("driver-after")
   })
 
@@ -591,9 +672,10 @@ describe("cua snapshot cache", () => {
 describe("cua host driver", () => {
   test("maps element clicks to invoke actions", async () => {
     const { driver, backend } = driverWith()
-    const result = await driver.execute({ type: "click", target: { kind: "element", elementId: "cua:save" } })
+    const save = await liveRef(driver, "cua:save")
+    const result = await driver.execute({ type: "click", target: { kind: "element", elementId: save } })
     expect(result.success).toBe(true)
-    expect(backend.executed.at(-1)).toMatchObject({ type: "invoke", ref: "cua:save" })
+    expect(backend.executed.at(-1)).toMatchObject({ type: "invoke", ref: save })
   })
 
   test("maps point clicks and carries the capture id", async () => {
@@ -604,32 +686,39 @@ describe("cua host driver", () => {
 
   test("falls back to a pointer click when an element exposes no action", async () => {
     const { driver, backend } = driverWith()
-    await driver.execute({ type: "click", target: { kind: "element", elementId: "cua:plain" } })
+    const plain = await liveRef(driver, "cua:plain")
+    await driver.execute({ type: "click", target: { kind: "element", elementId: plain } })
     expect(backend.executed.at(-1)).toMatchObject({ type: "click", point: { x: 20, y: 205 } })
   })
 
   test("maps editable type to focus plus type without silent set_value", async () => {
     const { driver, backend } = driverWith()
+    const field = await liveRef(driver, "cua:field")
     const editable = await driver.execute({
       type: "type",
-      target: { kind: "element", elementId: "cua:field" },
+      target: { kind: "element", elementId: field },
       text: "hello",
     })
     expect(editable.success).toBe(true)
     // NO silent type→set_value: even editable fields use keyboard input after
-    // focus. Explicit setvalue still uses the background set_value path.
+    // focus. Explicit setvalue still uses the background set_value path. Focus
+    // reads a new observation, so the text is aimed at the ref that observation
+    // minted rather than the one focus consumed.
     const shapes = backend.executed.slice(-2)
-    expect(shapes[0]).toMatchObject({ type: "focus", ref: "cua:field" })
+    expect(shapes[0]).toMatchObject({ type: "focus", ref: field })
     expect(shapes[1]).toMatchObject({ type: "type", text: "hello" })
 
+    // An action reads a new observation, so the second act resolves the ref
+    // that observation minted instead of reusing the one focus consumed.
+    const save = await liveRef(driver, "cua:save")
     const nonEditable = await driver.execute({
       type: "type",
-      target: { kind: "element", elementId: "cua:save" },
+      target: { kind: "element", elementId: save },
       text: "x",
     })
     expect(nonEditable.success).toBe(true)
     const plainShapes = backend.executed.slice(-2)
-    expect(plainShapes[0]).toMatchObject({ type: "focus", ref: "cua:save" })
+    expect(plainShapes[0]).toMatchObject({ type: "focus", ref: save })
     expect(plainShapes[1]).toMatchObject({ type: "type", text: "x" })
 
     const global = await driver.execute({ type: "type", text: "global" })
@@ -639,46 +728,29 @@ describe("cua host driver", () => {
 
   test("maps setvalue to set_value", async () => {
     const { driver, backend } = driverWith()
-    await driver.execute({ type: "setvalue", target: { kind: "element", elementId: "cua:field" }, value: 42 })
-    expect(backend.executed.at(-1)).toMatchObject({ type: "set_value", ref: "cua:field", value: "42" })
+    const field = await liveRef(driver, "cua:field")
+    await driver.execute({ type: "setvalue", target: { kind: "element", elementId: field }, value: 42 })
+    expect(backend.executed.at(-1)).toMatchObject({ type: "set_value", ref: field, value: "42" })
   })
 
   test("maps rich accessibility actions to their cua actions", async () => {
     const { driver, backend } = driverWith()
-    const cases: readonly [ComputerAction, CuaAction][] = [
-      [
-        { type: "toggle", target: { kind: "element", elementId: "cua:save" } },
-        { type: "invoke", ref: "cua:save" },
-      ],
-      [
-        { type: "select", target: { kind: "element", elementId: "cua:save" } },
-        { type: "select", ref: "cua:save" },
-      ],
-      [
-        { type: "expand", target: { kind: "element", elementId: "cua:save" } },
-        { type: "expand", ref: "cua:save" },
-      ],
-      [
-        { type: "collapse", target: { kind: "element", elementId: "cua:save" } },
-        { type: "collapse", ref: "cua:save" },
-      ],
-      [
-        { type: "increment", target: { kind: "element", elementId: "cua:save" } },
-        { type: "increment", ref: "cua:save" },
-      ],
-      [
-        { type: "decrement", target: { kind: "element", elementId: "cua:save" } },
-        { type: "decrement", ref: "cua:save" },
-      ],
-      [
-        { type: "scroll_into_view", target: { kind: "element", elementId: "cua:save" } },
-        { type: "scroll_into_view", ref: "cua:save" },
-      ],
+    const cases: readonly [string, (elementId: string) => ComputerAction][] = [
+      ["invoke", (elementId) => ({ type: "toggle", target: { kind: "element", elementId } })],
+      ["select", (elementId) => ({ type: "select", target: { kind: "element", elementId } })],
+      ["expand", (elementId) => ({ type: "expand", target: { kind: "element", elementId } })],
+      ["collapse", (elementId) => ({ type: "collapse", target: { kind: "element", elementId } })],
+      ["increment", (elementId) => ({ type: "increment", target: { kind: "element", elementId } })],
+      ["decrement", (elementId) => ({ type: "decrement", target: { kind: "element", elementId } })],
+      ["scroll_into_view", (elementId) => ({ type: "scroll_into_view", target: { kind: "element", elementId } })],
     ]
-    for (const [action, expected] of cases) {
-      const result = await driver.execute(action)
-      expect(result.success, `${action.type}: ${result.message}`).toBe(true)
-      expect(backend.executed.at(-1)).toMatchObject(expected)
+    for (const [expected, build] of cases) {
+      // Each act read a new observation, so the table re-resolves its target
+      // and expects the ref that observation minted.
+      const save = await liveRef(driver, "cua:save")
+      const result = await driver.execute(build(save))
+      expect(result.success, `${expected}: ${result.message}`).toBe(true)
+      expect(backend.executed.at(-1)).toMatchObject({ type: expected, ref: save })
     }
   })
 
@@ -691,35 +763,39 @@ describe("cua host driver", () => {
 
   test("maps focus on a window ref to a window action", async () => {
     const { driver, backend } = driverWith()
-    await driver.execute({ type: "focus", target: { kind: "element", elementId: "cua:window" } })
-    expect(backend.executed.at(-1)).toMatchObject({ type: "window", action: "focus", ref: "cua:window" })
+    const window = await liveRef(driver, "cua:window")
+    await driver.execute({ type: "focus", target: { kind: "element", elementId: window } })
+    expect(backend.executed.at(-1)).toMatchObject({ type: "window", action: "focus", ref: window })
   })
 
   test("maps scroll to a semantic scroll with the element ref", async () => {
     const { driver, backend } = driverWith()
+    const list = await liveRef(driver, "cua:list")
     await driver.execute({
       type: "scroll",
-      target: { kind: "element", elementId: "cua:list" },
+      target: { kind: "element", elementId: list },
       direction: "down",
       amount: 3,
     })
-    expect(backend.executed.at(-1)).toMatchObject({ type: "scroll", direction: "down", amount: 3, ref: "cua:list" })
+    expect(backend.executed.at(-1)).toMatchObject({ type: "scroll", direction: "down", amount: 3, ref: list })
   })
 
   test("reads element text from the snapshot", async () => {
     const { driver } = driverWith()
-    const result = await driver.execute({ type: "read", target: { kind: "element", elementId: "cua:label" } })
+    const label = await liveRef(driver, "cua:label")
+    const result = await driver.execute({ type: "read", target: { kind: "element", elementId: label } })
     expect(result.success).toBe(true)
     expect("text" in result ? result.text : undefined).toBe("Total 42")
 
-    const text = await driver.readText({ elementId: "cua:label" })
+    const text = await driver.readText({ elementId: label })
     expect(text.text).toBe("Total 42")
     expect(text.length).toBe(8)
   })
 
   test("reads a window's subtree text by window ref", async () => {
     const { driver } = driverWith()
-    const result = await driver.readText({ elementId: "cua:window" })
+    const window = await liveRef(driver, "cua:window")
+    const result = await driver.readText({ elementId: window })
     expect(result.success).toBe(true)
     expect(result.text).toContain("Test")
     expect(result.text).toContain("Total 42")
@@ -730,16 +806,19 @@ describe("cua host driver", () => {
     const { driver, backend } = driverWith()
     const result = await driver.find({ query: "cua:save" })
     expect(backend.snapshotOptions.at(-1)?.maxElements).toBeGreaterThan(1000)
-    expect(result.matches?.map((match) => match.element.id)).toEqual(["cua:save"])
+    // The ref handed to the agent is scoped to the observation that minted it.
+    expect(result.matches?.map((match) => refIdentity(match.element.id ?? ""))).toEqual(["cua:save"])
+    expect(result.matches?.map((match) => match.element.id)).toEqual([scopedRef("cua:save", 1)])
     expect(result.matches?.[0]?.element.metadata?.application).toBe("test")
   })
 
   test("carries the application name on element metadata", async () => {
     const { driver } = driverWith()
+    const save = await liveRef(driver, "cua:save")
     const observation = await driver.observe()
-    const save = (observation.elements ?? []).find((element) => element.id === "cua:save")
-    expect(save?.metadata?.application).toBe("test")
-    expect(save?.metadata?.app).toBe("test")
+    const element = (observation.elements ?? []).find((candidate) => candidate.id === save)
+    expect(element?.metadata?.application).toBe("test")
+    expect(element?.metadata?.app).toBe("test")
   })
 
   test("revalidates refs against a fresh snapshot", async () => {
@@ -764,10 +843,13 @@ describe("cua host driver", () => {
     const { driver } = driverWith()
     const observation = await driver.observe()
     const ids = (observation.elements ?? []).map((element) => element.id)
-    expect(ids).toContain("cua:save")
-    expect(ids).toContain("cua:window")
-    const save = (observation.elements ?? []).find((element) => element.id === "cua:save")
-    expect(save?.reference?.elementId).toBe("cua:save")
+    // Every id is scoped to the observation, and its identity is the backend
+    // ref an agent recognizes.
+    expect(ids.map((id) => refIdentity(id ?? ""))).toContain("cua:save")
+    expect(ids.map((id) => refIdentity(id ?? ""))).toContain("cua:window")
+    expect(ids).toContain(scopedRef("cua:save", 1))
+    const save = (observation.elements ?? []).find((element) => element.id === scopedRef("cua:save", 1))
+    expect(save?.reference?.elementId).toBe(scopedRef("cua:save", 1))
     expect(save?.metadata?.editable).toBe(false)
   })
 
@@ -791,40 +873,73 @@ describe("cua host driver", () => {
   })
 
   test("refuses a stale observationId instead of rebinding", async () => {
-    const { driver } = driverWith()
-    const observation = await driver.observe()
-    const save = (observation.elements ?? []).find((element) => element.id === "cua:save")
+    const { driver, engine } = driverWith()
+    const first = await driver.observe()
+    const firstSnapshot = engine.latestSnapshot()
+    if (firstSnapshot === undefined) throw new Error("no observation")
+    const save = (first.elements ?? []).find((element) => refIdentity(element.id ?? "") === "cua:save")
     if (save?.reference === undefined) throw new Error("missing reference")
-    // Advance the generation with a fresh snapshot, then act with the old
-    // observationId: the driver must refuse as target_stale.
-    await driver.observe()
-    const stale = await driver.execute({
+
+    // The desktop moved on: the current observation minted new refs, so the old
+    // string is simply absent rather than aimed at whatever now occupies it.
+    const second = await engine.refresh()
+    expect(firstSnapshot.generation).toBeLessThan(second.generation)
+    const stale = await driver.execute({ type: "click", target: { kind: "element", elementId: save.id ?? "" } })
+    expect(stale.success).toBe(false)
+    expect(typeof stale.error === "object" ? stale.error.code : undefined).toBe("target_stale")
+    expect(stale.message).toContain("cua:save")
+
+    // A ref that is present but paired with another observation's id or
+    // generation is refused by the pair check, naming both observations.
+    const current = await driver.observe()
+    const currentSnapshot = engine.latestSnapshot()
+    if (currentSnapshot === undefined) throw new Error("no observation")
+    const liveSave = (current.elements ?? []).find((element) => refIdentity(element.id ?? "") === "cua:save")
+    const liveList = (current.elements ?? []).find((element) => refIdentity(element.id ?? "") === "cua:list")
+    if (liveSave?.reference === undefined || liveList?.reference === undefined) throw new Error("missing reference")
+
+    const mismatched = await driver.execute({
       type: "click",
       target: {
         kind: "element",
-        elementId: "cua:save",
-        reference: { ...save.reference, observationId: "obs-stale" },
+        elementId: liveSave.id ?? "",
+        reference: { ...liveSave.reference, observationId: firstSnapshot.id },
       },
     })
-    expect(stale.success).toBe(false)
-    expect(typeof stale.error === "object" ? stale.error.code : undefined).toBe("target_stale")
+    expect(mismatched.success).toBe(false)
+    expect(typeof mismatched.error === "object" ? mismatched.error.code : undefined).toBe("target_stale")
+    expect(mismatched.message).toContain(firstSnapshot.id)
+    expect(mismatched.message).toContain(currentSnapshot.id)
 
-    // Scroll and close resolve element refs through a different path; the
-    // advertised observation identity must be enforced there too.
+    // Scroll resolves element refs through a different path; the advertised
+    // generation identity must be enforced there too.
     const staleScroll = await driver.execute({
       type: "scroll",
-      target: { kind: "element", elementId: "cua:list", reference: { ...save.reference, observationId: "obs-stale" } },
+      target: { kind: "element", elementId: liveList.id ?? "", reference: { ...liveList.reference, generation: 999 } },
       direction: "down",
     })
     expect(staleScroll.success).toBe(false)
     expect(typeof staleScroll.error === "object" ? staleScroll.error.code : undefined).toBe("target_stale")
+    expect(staleScroll.message).toContain("999")
+
+    // A current pair is still honoured, so a refusal is about the observation
+    // and not about the driver refusing to act.
+    const bound = await driver.execute({
+      type: "click",
+      target: { kind: "element", elementId: liveSave.id ?? "", reference: { ...liveSave.reference } },
+    })
+    expect(bound.success, bound.message).toBe(true)
+    const latest = engine.latestSnapshot()
+    if (latest === undefined) throw new Error("no observation")
+    expect(second.generation).toBeLessThan(latest.generation)
   })
 
   test("does not invoke a first action when no backend action matches a click", async () => {
     const { driver, backend } = driverWith()
     // cua:plain exposes no actions, so a click must be pointer input, never an
     // invoke with an empty action (first-action fallback).
-    const result = await driver.execute({ type: "click", target: { kind: "element", elementId: "cua:plain" } })
+    const plain = await liveRef(driver, "cua:plain")
+    const result = await driver.execute({ type: "click", target: { kind: "element", elementId: plain } })
     expect(result.success).toBe(true)
     expect(backend.executed.at(-1)).toMatchObject({ type: "click", point: { x: 20, y: 205 } })
     expect(backend.executed.at(-1)).not.toMatchObject({ type: "invoke" })
@@ -1006,4 +1121,212 @@ function legacyFallbacks(overrides: Partial<CuaLegacyFallbacks>): CuaLegacyFallb
     get: (target, key: string) =>
       key in target ? target[key] : () => async () => { throw new Error(`unexpected legacy call: ${key}`) },
   }) as unknown as CuaLegacyFallbacks
+}
+
+describe("cua generation-scoped refs", () => {
+  test("gives every snapshot its own observation id and generation", async () => {
+    const backend = new FakeBackend()
+    // The backend reports the same id and the same generation on both walks:
+    // an unchanged desktop still has to produce two distinguishable
+    // observations, or a ref from the first would bind in the second.
+    backend.queue = [snapshot("obs-1", 1, { elements: [element("cua:save")] })]
+    const engine = new CuaEngine({ backend, cacheTtlMs: 0 })
+    const first = await engine.snapshot()
+    const second = await engine.snapshot()
+    expect(first.generation).toBe(1)
+    expect(second.generation).toBe(first.generation + 1)
+    expect(second.id).not.toBe(first.id)
+    expect(second.id.length).toBeGreaterThan(0)
+  })
+
+  test("keeps one ref per element across every read inside a generation", async () => {
+    const backend = new FakeBackend()
+    backend.queue = [snapshot("obs-1", 1, { elements: [element("cua:save"), element("cua:field")] })]
+    const engine = new CuaEngine({ backend, cacheTtlMs: 1000, now: () => 1000 })
+    const full = await engine.snapshot({ maxElements: 10_000 })
+    // A smaller budget re-caps the same observation, and a later read reuses
+    // it: both must report the ref the observation minted.
+    const capped = await engine.snapshot({ maxElements: 1 })
+    const reread = await engine.snapshot()
+    const save = (full.elements ?? []).find((element) => refIdentity(element.ref) === "cua:save")
+    if (save === undefined) throw new Error("missing element")
+    expect(save.ref).toBe(scopedRef("cua:save", 1))
+    expect(capped.generation).toBe(full.generation)
+    expect(capped.elements).toEqual([save])
+    expect(reread.elements).toEqual(full.elements)
+    expect(reread.elements.map((element) => element.ref)).toEqual(full.elements.map((element) => element.ref))
+  })
+
+  test("mints a different ref for the same element in the next generation", async () => {
+    const backend = new FakeBackend()
+    backend.queue = [snapshot("obs-1", 1, { elements: [element("cua:save")] })]
+    const engine = new CuaEngine({ backend, cacheTtlMs: 0 })
+    const first = await engine.snapshot()
+    const second = await engine.snapshot()
+    expect(first.elements[0]?.ref).toBe(scopedRef("cua:save", 1))
+    expect(second.elements[0]?.ref).toBe(scopedRef("cua:save", 2))
+    // Same element, different generation: the identity survives, the string does
+    // not, so a ref from the first observation is meaningless in the second.
+    expect(refIdentity(second.elements[0]?.ref ?? "")).toBe("cua:save")
+  })
+
+  test("resolves a ref only inside the observation that minted it", async () => {
+    const backend = new FakeBackend()
+    backend.queue = [
+      snapshot("obs-1", 1, {
+        windows: [window("cua:window", { focused: true })],
+        elements: [element("cua:save"), element("cua:field")],
+      }),
+      snapshot("obs-2", 2, {
+        windows: [window("cua:window", { focused: true })],
+        elements: [element("cua:save"), element("cua:field")],
+      }),
+    ]
+    const engine = new CuaEngine({ backend, cacheTtlMs: 0 })
+    const first = await engine.snapshot()
+    const second = await engine.snapshot()
+
+    const save = first.elements[0]
+    if (save === undefined) throw new Error("missing element")
+    expect(engine.resolveRef(first.id, save.ref)).toEqual(save)
+    expect(engine.resolveRef(first.id, first.windows[0]?.ref ?? "").role).toBe("window")
+
+    // A ref from the newer observation is absent from the older one, and an
+    // unknown observation resolves nothing. Both name the observation and the
+    // ref, so a caller can re-observe instead of guessing.
+    const refusals = [
+      captureError(() => engine.resolveRef(first.id, second.elements[0]?.ref ?? "")),
+      captureError(() => engine.resolveRef("obs-unknown", save.ref)),
+      captureError(() => engine.resolveRef(first.id, "cua:never-minted")),
+      captureError(() => engine.resolveRef(first.id, first.windows[0]?.ref ?? "")),
+    ]
+    expect(refusals.map((error) => error instanceof StaleRefError)).toEqual([true, true, true, false])
+
+    const error = captureError(() => engine.resolveRef(first.id, second.elements[0]?.ref ?? ""))
+    expect(error).toBeInstanceOf(StaleRefError)
+    if (!(error instanceof StaleRefError)) throw new Error("wrong error type")
+    expect(error.observationId).toBe(first.id)
+    expect(error.ref).toBe(second.elements[0]?.ref)
+    expect(error.reason).toBe("absent_ref")
+    expect(error.message).toContain(first.id)
+    expect(error.message).toContain(second.elements[0]?.ref ?? "")
+
+    const unknown = captureError(() => engine.resolveRef("obs-unknown", save.ref))
+    if (!(unknown instanceof StaleRefError)) throw new Error("wrong error type")
+    expect(unknown.reason).toBe("unknown_observation")
+    expect(unknown.message).toContain("obs-unknown")
+    expect(unknown.message).toContain(save.ref)
+  })
+
+  test("refuses an action bound to another generation before the backend sees it", async () => {
+    const backend = new FakeBackend()
+    backend.queue = [snapshot("obs-1", 1, { elements: [element("cua:save")] }), snapshot("obs-2", 2)]
+    const engine = new CuaEngine({ backend, cacheTtlMs: 0 })
+    const first = await engine.snapshot()
+    const second = await engine.snapshot()
+
+    const stale = await engine.execute({
+      type: "invoke",
+      ref: scopedRef("cua:save", first.generation),
+      observationId: first.id,
+      generation: first.generation,
+    })
+    expect(stale.ok).toBe(false)
+    expect(stale.delivery).toBe("refused")
+    expect(stale.error?.code).toBe("stale_ref")
+    expect(stale.generation).toBe(second.generation)
+    expect(stale.message).toContain(first.id)
+    expect(stale.message).toContain(second.id)
+    expect(backend.executed).toHaveLength(0)
+
+    // A click cannot be answered without a generation match either, even when
+    // its capture id is the current observation.
+    const refusedClick = await engine.execute({
+      type: "click",
+      point: { x: 4, y: 4 },
+      captureId: second.id,
+      observationId: first.id,
+      generation: first.generation,
+    })
+    expect(refusedClick.ok).toBe(false)
+    expect(refusedClick.delivery).toBe("refused")
+    expect(refusedClick.error?.code).toBe("stale_ref")
+    expect(backend.executed).toHaveLength(0)
+
+    // The current pair still reaches the backend, so a refusal is about the
+    // generation and not about the engine refusing to act.
+    const current = await engine.execute({
+      type: "invoke",
+      ref: scopedRef("cua:save", second.generation),
+      observationId: second.id,
+      generation: second.generation,
+    })
+    expect(current.ok).toBe(true)
+    expect(backend.executed).toHaveLength(1)
+  })
+
+  test("forwards the observation pair to the remote computer and rejects a mismatch", async () => {
+    const { driver, backend, engine } = driverWith()
+    const save = await liveRef(driver, "cua:save")
+    const current = engine.latestSnapshot()
+    if (current === undefined) throw new Error("no observation")
+    const acted = await driver.execute({ type: "click", target: { kind: "element", elementId: save } })
+    expect(acted.success).toBe(true)
+    // The invoke carries the observation pair, so the remote computer can refuse
+    // a ref that no longer belongs to the observation it was minted in.
+    expect(backend.executed.at(-1)).toMatchObject({
+      type: "invoke",
+      ref: save,
+      observationId: current.id,
+      generation: current.generation,
+    })
+
+    // A ref that is still present but paired with another observation is
+    // refused by the pair check, and the engine never sees the action.
+    const live = await liveRef(driver, "cua:save")
+    const mismatched = await driver.execute({
+      type: "click",
+      target: {
+        kind: "element",
+        elementId: live,
+        reference: { kind: "element", elementId: live, observationId: "obs-elsewhere", generation: 99 },
+      },
+    })
+    expect(mismatched.success).toBe(false)
+    expect(typeof mismatched.error === "object" ? mismatched.error.code : undefined).toBe("target_stale")
+    expect(mismatched.message).toContain("obs-elsewhere")
+    expect(mismatched.message).toContain("99")
+    expect(backend.executed).toHaveLength(1)
+  })
+
+  test("translates a historical ref into the fresh observation on revalidation", async () => {
+    const { driver, engine } = driverWith()
+    const first = await driver.observe()
+    const staleRef = (first.elements ?? []).find((element) => refIdentity(element.id ?? "") === "cua:save")?.id
+    if (staleRef === undefined) throw new Error("missing ref")
+    await engine.refresh()
+    // Revalidation is the explicit rebind: the historical string is matched by
+    // identity and the fresh pair is handed back for the next act.
+    const revalidated = await driver.revalidateTarget({ kind: "element", elementId: staleRef })
+    expect(revalidated.valid).toBe(true)
+    expect(revalidated.reference?.elementId).not.toBe(staleRef)
+    expect(revalidated.reference?.observationId).toBe(engine.latestSnapshot()?.id)
+    expect(revalidated.reference?.generation).toBe(engine.latestSnapshot()?.generation)
+    expect(refIdentity(revalidated.reference?.elementId ?? "")).toBe("cua:save")
+
+    const rebound = await driver.execute({
+      type: "focus",
+      target: { kind: "element", elementId: revalidated.reference?.elementId ?? "" },
+    })
+    expect(rebound.success, rebound.message).toBe(true)
+  })
+})
+
+function captureError(run: () => unknown): unknown {
+  try {
+    run()
+  } catch (error) {
+    return error
+  }
+  return undefined
 }

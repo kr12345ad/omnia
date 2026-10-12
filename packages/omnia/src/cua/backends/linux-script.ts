@@ -15,7 +15,17 @@ import re
 import sys
 import time
 
-LIMITS = {"max_apps": 40, "max_depth": 28, "max_nodes": 4000, "text_limit": 500}
+LIMITS = {
+    "max_apps": 40,
+    "max_depth": 28,
+    "max_nodes": 4000,
+    "text_limit": 500,
+    # Seconds a single snapshot command may spend walking the tree. The walk is
+    # breadth-first, so hitting it keeps every shallow control and drops the
+    # deep tail; the backend reports the snapshot as degraded instead of
+    # blocking on an unresponsive application.
+    "time_budget": 1.5,
+}
 
 ${ATSPI_STATE_PY}
 
@@ -425,6 +435,22 @@ def focus_path_still(path, name):
         return False
 
 
+def out_of_time(budget):
+    # The deadline is per snapshot command, not per application, so one hung
+    # application cannot eat every other application's budget.
+    return time.time() > budget["deadline"]
+
+
+def walk_budget(limits):
+    return {
+        "count": 0,
+        "truncated": False,
+        "pruned": 0,
+        "timeout": False,
+        "deadline": time.time() + max(0.05, float(limits["time_budget"])),
+    }
+
+
 def app_token(index, app, key):
     version = EVENTS["apps"].get(key, 0)
     try:
@@ -673,12 +699,21 @@ def walk_app(app, index, limits, budget, windows_only=False):
         if budget["count"] >= limits["max_nodes"]:
             budget["truncated"] = True
             break
+        if out_of_time(budget):
+            # Keep the partial tree: a shorter list of real controls beats an
+            # empty snapshot or a walk that never returns.
+            budget["timeout"] = True
+            budget["truncated"] = True
+            break
         try:
             total_children = target.get_child_count()
         except Exception:
             try:
                 total_children = target.childCount
             except Exception:
+                # The subtree could not be read at all, so what survives is
+                # partial and the snapshot has to say so.
+                budget["truncated"] = True
                 continue
         if total_children > 200:
             budget["truncated"] = True
@@ -689,6 +724,10 @@ def walk_app(app, index, limits, budget, windows_only=False):
             if depth + 1 > limits["max_depth"]:
                 if total_children > 0:
                     budget["truncated"] = True
+                break
+            if out_of_time(budget):
+                budget["timeout"] = True
+                budget["truncated"] = True
                 break
             child = child_at(target, child_index)
             if child is None:
@@ -705,6 +744,8 @@ def walk_app(app, index, limits, budget, windows_only=False):
                 focus = {"path": child_path, "name": child_node.get("name")}
             if not windows_only:
                 pending.append((child_node, child, child_path, depth + 1))
+        if budget["timeout"]:
+            break
     compact(root)
     return root, focus
 
@@ -716,11 +757,17 @@ def cmd_snapshot(params):
     for key in ("max_apps", "max_depth", "max_nodes", "text_limit"):
         if params.get(key) is not None:
             limits[key] = int(params.get(key))
+    budget_seconds = params.get("time_budget")
+    if budget_seconds is not None:
+        try:
+            limits["time_budget"] = max(0.05, float(budget_seconds))
+        except Exception:
+            pass
     force = params.get("force") is True
     windows_only = params.get("windows_only") is True
     desktop = pyatspi.Registry().getDesktop(0)
     targets, fallback, focused_key = select_apps(desktop, params)
-    budget = {"count": 0, "truncated": False, "pruned": 0}
+    budget = walk_budget(limits)
     applications = []
     hits = 0
     for index, app, name, pid in targets:
@@ -755,7 +802,11 @@ def cmd_snapshot(params):
             },
             "truncated": budget["truncated"],
         }
-        APP_CACHE[key] = entry
+        # A walk that stopped on its budget is not cached: the next snapshot has
+        # to be able to retry with a fresh budget instead of being served the
+        # same truncated tree from the cache.
+        if not budget["timeout"]:
+            APP_CACHE[key] = entry
         # Recompute the token now that the new focus path is cached: storing the
         # pre-walk token would make a focus transition look changed immediately
         # after the walk and force a second walk.
@@ -767,6 +818,7 @@ def cmd_snapshot(params):
         "applications": applications,
         "screen": desktop_extents(),
         "truncated": budget["truncated"],
+        "timeout": budget["timeout"],
         "pruned": budget["pruned"],
         "cache_hits": hits,
         "fallback": fallback,
@@ -1218,6 +1270,14 @@ export interface AtspiSnapshotPayload {
   applications: AtspiApplicationSnapshot[]
   screen?: { x?: number; y?: number; width: number; height: number }
   truncated: boolean
+  // True when the walk stopped on its time budget. The partial tree is still
+  // usable; the snapshot reports degraded so a caller never mistakes it for a
+  // complete read.
+  timeout?: boolean
+  // True when the requested scope (the focused application) resolved to no
+  // application at all, which is what happens when the window the agent is
+  // looking at has no accessibility tree of its own.
+  fallback?: boolean
 }
 
 export interface AtspiAppSignature {
@@ -1396,6 +1456,8 @@ export function parseSnapshotPayload(value: unknown): AtspiSnapshotPayload | und
     applications,
     ...(screen === undefined ? {} : { screen }),
     truncated: value.truncated === true,
+    ...(value.timeout === true ? { timeout: true } : {}),
+    ...(value.fallback === true ? { fallback: true } : {}),
   }
 }
 

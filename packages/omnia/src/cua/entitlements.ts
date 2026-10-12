@@ -29,6 +29,12 @@
 //     adds no latency storm and recovers within the outage window. An install
 //     with no control plane at all has no billing relationship to enforce, so
 //     there is nothing to enforce against and observation keeps working.
+//   - What may be metered at all is a fixed, named list (METERED_CAPABILITIES),
+//     because the reliability contract keeps honest verification, ref
+//     resolution, aim computation, stale-ref refusal and the centre-of-bounds
+//     guess warning on every tier including free. A gate that could refuse
+//     those would be the entitlement layer turning a safety feature off, so a
+//     capability outside that list is refused here rather than answered.
 //
 // One client per SIGNED-IN PROFILE, resolved on every check rather than read once
 // at construction. Entitlements are per profile, so a process that resolved the
@@ -43,6 +49,62 @@ import { readFileSync } from "node:fs"
 import { defaultGitHubAuthFile } from "../auth/github"
 import { BillingClient, type BillingEntitlement, type BillingEnv, type BillingOrigin } from "../billing/client"
 import type { Capability } from "../billing/plans"
+
+/**
+ * The capabilities this gate is allowed to meter: paid CAPACITY.
+ *
+ * `cloud_vision` is remote vision inference and `live_view` is a stream of
+ * frames off a computer. Both have a per-unit cost, so both are metered.
+ *
+ * What is deliberately NOT on this list is the whole point. The reliability
+ * contract (docs/computer-use-reliability.md) keeps honest verification, ref
+ * resolution, aim computation, stale-ref refusal and the bounds-centre guess
+ * warning on every tier including free, because a safety behaviour a refund can
+ * switch off is not a safety behaviour. A capability that is not on this list
+ * cannot be asked about here, so no call site can turn one of them into an
+ * entitlement: `check` and `authorize` refuse the question instead of answering
+ * it. Adding a capability to the plan matrix is therefore not enough to meter
+ * it through this gate — promoting one is a decision somebody makes here, in
+ * the open.
+ */
+export const METERED_CAPABILITIES: readonly Capability[] = ["cloud_vision", "live_view"]
+
+/**
+ * The reliability behaviours the contract keeps on every tier, including free.
+ *
+ * Named so the claim is checkable rather than assumed. Every one of them is
+ * decided by the CUA engine and the computer-use service from what the screen
+ * actually showed; none of them asks this gate anything, and
+ * METERED_CAPABILITIES is what keeps it that way.
+ */
+export const ALWAYS_ON_RELIABILITY: readonly string[] = [
+  "honest-verification",
+  "ref-resolution",
+  "aim-computation",
+  "stale-ref-refusal",
+  "center-guess-warning",
+]
+
+/**
+ * Thrown when a call site tries to meter something that is not metered capacity.
+ *
+ * This is a bug at the call site rather than a billing outcome, so it is loud:
+ * a silent `allowed: false` here would be exactly the entitlement layer
+ * switching a safety feature off.
+ */
+export class UnmeteredCapabilityError extends Error {
+  readonly capability: Capability
+
+  constructor(capability: Capability) {
+    super(`${capability} is not metered capacity, so the entitlement gate cannot refuse it.`)
+    this.name = "UnmeteredCapabilityError"
+    this.capability = capability
+  }
+}
+
+export function isMeteredCapability(capability: Capability): boolean {
+  return METERED_CAPABILITIES.includes(capability)
+}
 
 /**
  * How long a fallback answer is reused, handed to the client as its degraded TTL.
@@ -82,6 +144,10 @@ export function isEntitlementRefusedError(value: unknown): value is EntitlementR
   return value instanceof EntitlementRefusedError
 }
 
+export function isUnmeteredCapabilityError(value: unknown): value is UnmeteredCapabilityError {
+  return value instanceof UnmeteredCapabilityError
+}
+
 export interface EntitlementGateOptions {
   /**
    * The environment to read the control plane from: OMNIA_SERVER_URL, then
@@ -118,8 +184,12 @@ export class EntitlementGate {
    * burst of actions spends its own units and cannot quietly under-count an
    * allowance. The only thing cached is a degraded answer (see
    * ENTITLEMENT_OUTAGE_TTL_MS), and only for the profile it was resolved for.
+   *
+   * Only metered capacity reaches the control plane. Anything else is refused
+   * here, loudly, rather than answered: see METERED_CAPABILITIES.
    */
   async check(capability: Capability): Promise<EntitlementDecision> {
+    requireMeteredCapability(capability)
     return this.billing().check(capability)
   }
 
@@ -209,4 +279,17 @@ function signedInProfileId(file: string): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Refuses the question rather than answering it.
+ *
+ * A gate that answered for a non-metered capability would be the entitlement
+ * layer switching a safety behaviour off — the one thing the reliability
+ * contract forbids. It throws rather than returning a refusal so the bug is at
+ * the call site, in development, instead of in front of a user.
+ */
+function requireMeteredCapability(capability: Capability): void {
+  if (isMeteredCapability(capability)) return
+  throw new UnmeteredCapabilityError(capability)
 }

@@ -3,6 +3,8 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { CuaElement, CuaSnapshot } from "../types"
+import { StaleRefError } from "../types"
+import { CuaEngine } from "../engine"
 import {
   buildDarwinSnapshot,
   buildElementRef,
@@ -13,6 +15,7 @@ import {
   createDarwinCuaBackend,
   DARWIN_NATIVE_SNAPSHOT_BUDGET_MS,
   DARWIN_NATIVE_SNAPSHOT_TIMEOUT_MS,
+  aimPoint,
   matchesWaitCondition,
   parseDarwinBackendRef,
   slugify,
@@ -126,6 +129,15 @@ function requireElement(snapshot: CuaSnapshot, name: string): CuaElement {
   const element = snapshot.elements.find((candidate) => candidate.name === name)
   if (element === undefined) throw new Error(`missing element: ${name}`)
   return element
+}
+
+function captureError(run: () => unknown): unknown {
+  try {
+    run()
+    return undefined
+  } catch (error) {
+    return error
+  }
 }
 
 type ScriptKind =
@@ -1281,5 +1293,337 @@ describe("cua darwin retina scale", () => {
     const scripts = runner.calls.filter((script) => scriptKind(script) === "click")
     expect(scripts).toHaveLength(1)
     expect(scripts[0]).toContain("CGPointMake(50, 32)")
+  })
+})
+
+describe("cua darwin observation scoping", () => {
+  test("the engine scopes refs to the observation id and generation it assigns", async () => {
+    const { backend } = createHarness()
+    const engine = new CuaEngine({ backend })
+    const first = await engine.snapshot()
+    // The backend minted cap-1; the engine keeps that id but owns the
+    // generation, and every ref it hands out carries that generation.
+    expect(first.id).toBe("cap-1")
+    expect(first.generation).toBe(1)
+    const button = requireElement(first, "Export")
+    expect(button.ref).toBe("cua:window/textedit/untitled/0/button/export/0@g1")
+    expect(button.windowRef).toBe("cua:window/textedit/untitled/0@g1")
+    expect(first.focusedRef).toBe("cua:window/textedit/untitled/0/window/untitled/0@g1")
+    expect(engine.resolveRef(first.id, button.ref).name).toBe("Export")
+
+    const second = await engine.refresh()
+    expect(second.generation).toBe(2)
+    const rebound = requireElement(second, "Export")
+    // Same desktop, same backend ref, different scoped ref: a ref string only
+    // ever means one element of one observation.
+    expect(rebound.ref).toBe("cua:window/textedit/untitled/0/button/export/0@g2")
+    const error = captureError(() => engine.resolveRef(second.id, button.ref))
+    expect(error).toBeInstanceOf(StaleRefError)
+    expect((error as StaleRefError).reason).toBe("absent_ref")
+  })
+
+  test("a resolve against another observation refuses instead of rebinding", async () => {
+    const { backend } = createHarness()
+    const first = await backend.snapshot()
+    const button = requireElement(first, "Export")
+    const second = await backend.snapshot()
+    // The backend ref is identical in both observations, so the only thing that
+    // distinguishes them is the pair the action carries.
+    expect(second.elements.map((element) => element.ref)).toContain(button.ref)
+    const refused = await backend.execute({
+      type: "invoke",
+      ref: button.ref,
+      observationId: first.id,
+      generation: first.generation,
+    })
+    expect(refused.ok).toBe(false)
+    expect(refused.delivery).toBe("refused")
+    expect(refused.error?.code).toBe("stale_ref")
+    expect(refused.error?.message).toContain(first.id)
+    expect(refused.error?.message).toContain(second.id)
+    // Nothing was delivered: no action script ran.
+    const accepted = await backend.execute({
+      type: "invoke",
+      ref: button.ref,
+      observationId: second.id,
+      generation: second.generation,
+    })
+    expect(accepted.ok).toBe(true)
+  })
+
+  test("a generation mismatch alone refuses and names both ids", async () => {
+    const { backend } = createHarness()
+    const first = await backend.snapshot()
+    const button = requireElement(first, "Export")
+    const second = await backend.snapshot()
+    const refused = await backend.execute({ type: "invoke", ref: button.ref, generation: first.generation })
+    expect(refused.error?.code).toBe("stale_ref")
+    expect(refused.error?.message).toContain(`generation ${first.generation}`)
+    expect(refused.error?.message).toContain(second.id)
+    expect(refused.error?.message).toContain(`generation ${second.generation}`)
+  })
+
+  test("a pointer click aimed from another observation is refused, not delivered", async () => {
+    const { backend, runner } = createHarness()
+    const first = await backend.snapshot()
+    await backend.snapshot()
+    const refused = await backend.execute({
+      type: "click",
+      point: { x: 50, y: 32 },
+      captureId: first.id,
+      observationId: first.id,
+      generation: first.generation,
+    })
+    expect(refused.ok).toBe(false)
+    expect(refused.error?.code).toBe("stale_ref")
+    expect(runner.calls.filter((script) => scriptKind(script) === "click")).toHaveLength(0)
+  })
+
+  test("an unknown ref is refused, never rebound by name", async () => {
+    const { backend } = createHarness()
+    await backend.snapshot()
+    const refused = await backend.execute({ type: "invoke", ref: "cua:window/textedit/untitled/0/button/nope/0" })
+    expect(refused.ok).toBe(false)
+    expect(refused.error?.code).toBe("stale_ref")
+    expect(refused.error?.message).toContain("Unknown element ref")
+  })
+})
+
+describe("cua darwin element fields", () => {
+  const STATIC_TEXT_PAYLOAD = {
+    applications: [
+      {
+        name: "TextEdit",
+        pid: 4242,
+        nodes: [
+          {
+            index: 0,
+            role: "AXWindow",
+            name: "Untitled",
+            states: ["focused"],
+            bounds: { x: 0, y: 0, width: 800, height: 600 },
+            children: [
+              {
+                index: 0,
+                role: "AXStaticText",
+                name: "Document status",
+                value: "3 pages",
+                states: [],
+                actions: [],
+                bounds: { x: 10, y: 40, width: 120, height: 20 },
+                children: [],
+              },
+              {
+                index: 1,
+                role: "AXTextField",
+                name: "Search",
+                value: "hello",
+                states: ["focused"],
+                actions: ["AXSetValue"],
+                editable: true,
+                valuePresent: true,
+                bounds: { x: 200, y: 40, width: 200, height: 24 },
+                // AXSelectedTextRange + AXBoundsForRange: the caret geometry.
+                focusPoint: { x: 208, y: 50 },
+                children: [],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    screen: { width: 1920, height: 1080 },
+    truncated: false,
+  }
+
+  test("carries the application, text, and the native focus point", () => {
+    const payload = parseDarwinSnapshotPayload(STATIC_TEXT_PAYLOAD)
+    if (payload === undefined) throw new Error("payload did not parse")
+    const snapshot = buildDarwinSnapshot({ generation: 1, takenAt: 0, applications: payload.applications, maxElements: 20 })
+
+    const label = requireElement(snapshot, "Document status")
+    expect(label.application).toBe("TextEdit")
+    expect(label.windowRef).toBe("cua:window/textedit/untitled/0")
+    expect(label.role).toBe("text")
+    expect(label.text).toBe("3 pages")
+    expect(label.value).toBe("3 pages")
+    expect(label.bounds).toEqual({ x: 10, y: 40, width: 120, height: 20 })
+
+    const search = requireElement(snapshot, "Search")
+    expect(search.application).toBe("TextEdit")
+    expect(search.text).toBe("hello")
+    expect(search.value).toBe("hello")
+    expect(search.focused).toBe(true)
+    // The caret the platform reported, carried through for the aim layer.
+    expect(search.attributes?.focusPointX).toBe(208)
+    expect(search.attributes?.focusPointY).toBe(50)
+    // A label with no caret reports none rather than a guess.
+    expect(label.attributes?.focusPointX).toBeUndefined()
+  })
+
+  test("a focus point outside the element's own bounds is discarded", () => {
+    const payload = parseDarwinSnapshotPayload({
+      ...STATIC_TEXT_PAYLOAD,
+      applications: STATIC_TEXT_PAYLOAD.applications.map((application) => ({
+        ...application,
+        nodes: application.nodes.map((node) => ({
+          ...node,
+          children: node.children.map((child) =>
+            child.index === 1 ? { ...child, focusPoint: { x: 9000, y: 9000 } } : child,
+          ),
+        })),
+      })),
+    })
+    if (payload === undefined) throw new Error("payload did not parse")
+    const snapshot = buildDarwinSnapshot({ generation: 1, takenAt: 0, applications: payload.applications, maxElements: 20 })
+    expect(requireElement(snapshot, "Search").attributes?.focusPointX).toBeUndefined()
+  })
+})
+
+describe("cua darwin discovery bounds", () => {
+  function manyChildren(count: number, prefix: string) {
+    return Array.from({ length: count }, (_, index) => ({
+      index,
+      role: "AXButton",
+      name: `${prefix} ${index}`,
+      states: ["enabled"],
+      actions: ["AXPress"],
+      bounds: { x: 10 + index * 5, y: 40, width: 80, height: 24 },
+      children: [],
+    }))
+  }
+
+  test("a huge tree degrades instead of consuming the whole observation", () => {
+    const payload = parseDarwinSnapshotPayload({
+      applications: [
+        {
+          name: "TextEdit",
+          pid: 4242,
+          nodes: [
+            { index: 0, role: "AXWindow", name: "First", states: ["focused"], children: manyChildren(600, "A") },
+            { index: 1, role: "AXWindow", name: "Second", states: [], children: manyChildren(600, "B") },
+          ],
+        },
+      ],
+      truncated: false,
+    })
+    if (payload === undefined) throw new Error("payload did not parse")
+    const snapshot = buildDarwinSnapshot({ generation: 1, takenAt: 0, applications: payload.applications, maxElements: 1000 })
+
+    expect(snapshot.windows).toHaveLength(2)
+    // Both windows keep a share of the budget; one cannot eat the observation.
+    for (const window of snapshot.windows) {
+      expect(snapshot.elements.filter((element) => element.windowRef === window.ref).length).toBeGreaterThan(400)
+    }
+    expect(snapshot.elements.length).toBeLessThanOrEqual(1000)
+    expect(snapshot.truncated).toBe(true)
+    expect(snapshot.accessibility).toBe("degraded")
+    expect(snapshot.warnings.some((warning) => warning.includes("capped at"))).toBe(true)
+    expect(snapshot.warnings.some((warning) => warning.includes("accessibility tree was truncated"))).toBe(true)
+  })
+
+  test("a window count above the cap truncates rather than dropping silently", () => {
+    const nodes = Array.from({ length: 70 }, (_, index) => ({
+      index,
+      role: "AXWindow",
+      name: `Window ${index}`,
+      states: index === 0 ? ["focused"] : [],
+      children: manyChildren(2, `W${index}`),
+    }))
+    const payload = parseDarwinSnapshotPayload({ applications: [{ name: "TextEdit", pid: 1, nodes }], truncated: false })
+    if (payload === undefined) throw new Error("payload did not parse")
+    const snapshot = buildDarwinSnapshot({ generation: 1, takenAt: 0, applications: payload.applications, maxElements: 1000 })
+    expect(snapshot.windows).toHaveLength(64)
+    expect(snapshot.truncated).toBe(true)
+    expect(snapshot.accessibility).toBe("degraded")
+  })
+
+  test("an unresolvable AX tree reports unavailable, not an empty desktop", () => {
+    const snapshot = buildDarwinSnapshot({
+      generation: 1,
+      takenAt: 0,
+      applications: [],
+      maxElements: 100,
+      accessibility: "unavailable",
+      warnings: ["The macOS accessibility helper timed out while walking the app tree; the accessibility tree may be incomplete."],
+    })
+    expect(snapshot.accessibility).toBe("unavailable")
+    expect(snapshot.elements).toHaveLength(0)
+    expect(snapshot.warnings[0]).toContain("timed out")
+  })
+})
+
+describe("cua darwin aim points", () => {
+  const BOUNDS = { x: 10, y: 20, width: 80, height: 24 }
+
+  test("prefers the reported focus point over any guess", () => {
+    expect(aimPoint({ role: "textbox", bounds: BOUNDS }, { x: 30, y: 40 })).toEqual({ x: 30, y: 40, strategy: "focus-point" })
+    // A focus point outside the element's own bounds is clamped back into it.
+    expect(aimPoint({ role: "textbox", bounds: BOUNDS }, { x: 9000, y: 9000 })).toEqual({
+      x: 90,
+      y: 44,
+      strategy: "focus-point",
+    })
+  })
+
+  test("mirrors the engine's role vocabulary", () => {
+    expect(aimPoint({ role: "button", bounds: BOUNDS }, undefined)).toEqual({ x: 50, y: 32, strategy: "control-center" })
+    expect(aimPoint({ role: "checkbox", bounds: BOUNDS }, undefined)).toEqual({ x: 50, y: 32, strategy: "control-center" })
+    expect(aimPoint({ role: "close", bounds: BOUNDS }, undefined)).toEqual({ x: 80, y: 32, strategy: "role-inset" })
+    expect(aimPoint({ role: "minimize", bounds: BOUNDS }, undefined)).toEqual({ x: 20, y: 32, strategy: "role-inset" })
+    expect(aimPoint({ role: "generic", bounds: BOUNDS }, undefined)).toEqual({ x: 50, y: 32, strategy: "bounds-center" })
+    expect(aimPoint({ role: "button", bounds: undefined }, undefined)).toBeUndefined()
+  })
+
+  function payloadWithoutActions(role: string, name: string) {
+    const source = JSON.parse(DARWIN_FIXTURE_JSON) as {
+      applications: { nodes: { children: { name: string; role: string; actions: string[] }[] }[] }[]
+    }
+    return {
+      ...source,
+      applications: source.applications.map((application) => ({
+        ...application,
+        nodes: application.nodes.map((node) => ({
+          ...node,
+          children: node.children.map((child) => (child.name === "Export" ? { ...child, role, actions: [] } : child)),
+        })),
+      })),
+    }
+  }
+
+  test("the pointer fallback aims at the reported focus point", async () => {
+    const { backend, runner } = createHarness({
+      allowForeground: true,
+      handlers: {
+        observe: () => payloadWithoutActions("AXButton", "Export"),
+        resolve: () => ({ ...RESOLVED_BUTTON, role: "AXButton", actions: [], focusPoint: { x: 30, y: 40 } }),
+      },
+    })
+    const snapshot = await backend.snapshot()
+    const element = requireElement(snapshot, "Export")
+    const result = await backend.execute({ type: "invoke", ref: element.ref })
+    expect(result.ok).toBe(true)
+    expect(result.message).toContain("focus-point")
+    const clicks = runner.calls.filter((script) => scriptKind(script) === "click")
+    expect(clicks).toHaveLength(1)
+    expect(clicks[0]).toContain("CGPointMake(30, 40)")
+  })
+
+  test("a role with no better hint records the bounds-center guess", async () => {
+    const { backend, runner } = createHarness({
+      allowForeground: true,
+      handlers: {
+        observe: () => payloadWithoutActions("AXLayoutItem", "Export"),
+        resolve: () => ({ ...RESOLVED_BUTTON, role: "AXLayoutItem", actions: [] }),
+      },
+    })
+    const snapshot = await backend.snapshot()
+    const element = requireElement(snapshot, "Export")
+    const result = await backend.execute({ type: "invoke", ref: element.ref })
+    expect(result.ok).toBe(true)
+    expect(result.warnings).toEqual(["aim: bounds-center"])
+    expect(result.message).toContain("no better aim point was reported")
+    const clicks = runner.calls.filter((script) => scriptKind(script) === "click")
+    expect(clicks[0]).toContain("CGPointMake(50, 32)")
   })
 })

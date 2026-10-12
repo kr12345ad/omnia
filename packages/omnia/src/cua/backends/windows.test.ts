@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test"
 import type { CuaElement, CuaSnapshot } from "../types"
+import { StaleRefError } from "../types"
+import { CuaEngine } from "../engine"
 import {
   buildElementRef,
   buildWindowRef,
   buildWindowsSnapshot,
   canonicalWindowsActions,
   canonicalWindowsRole,
+  aimPoint,
   chooseWindowsPattern,
+  WINDOWS_OBSERVE_BUDGET_MS,
   createWindowsCuaBackend,
   matchesWaitCondition,
   parseWindowsBackendRef,
@@ -19,8 +23,11 @@ import {
   parseWindowsResultPayload,
   parseWindowsScriptOutput,
   parseWindowsSnapshotPayload,
+  windowsDisplayText,
   windowsKeySpec,
+  windowsObserveScript,
   windowsPointerClickScript,
+  WINDOWS_TIME_BUDGET_MS,
 } from "./windows-script"
 
 const WINDOWS_FIXTURE_JSON = `{
@@ -156,6 +163,15 @@ function requireElement(snapshot: CuaSnapshot, name: string): CuaElement {
   const element = snapshot.elements.find((candidate) => candidate.name === name)
   if (element === undefined) throw new Error(`missing element: ${name}`)
   return element
+}
+
+function captureError(run: () => unknown): unknown {
+  try {
+    run()
+    return undefined
+  } catch (error) {
+    return error
+  }
 }
 
 type ScriptKind =
@@ -957,5 +973,420 @@ describe("windows pointer click scripts", () => {
     const left = windowsPointerClickScript({ x: 5, y: 6 }, "left", 4)
     expect(left).toContain("$i -lt 4")
     expect(left).toContain("mouse_event(0x0002")
+  })
+})
+
+describe("cua windows observation scoping", () => {
+  test("the engine scopes refs to the observation id and generation it assigns", async () => {
+    const { backend } = createHarness()
+    const engine = new CuaEngine({ backend })
+    const first = await engine.snapshot()
+    expect(first.id).toBe("cap-1")
+    expect(first.generation).toBe(1)
+    const save = requireElement(first, "Save")
+    expect(save.ref).toBe("cua:window/notepad/untitled-notepad/0/button/save/0@g1")
+    expect(save.windowRef).toBe("cua:window/notepad/untitled-notepad/0@g1")
+    expect(engine.resolveRef(first.id, save.ref).name).toBe("Save")
+
+    const second = await engine.refresh()
+    expect(second.generation).toBe(2)
+    expect(requireElement(second, "Save").ref).toBe("cua:window/notepad/untitled-notepad/0/button/save/0@g2")
+    const error = captureError(() => engine.resolveRef(second.id, save.ref))
+    expect(error).toBeInstanceOf(StaleRefError)
+    expect((error as StaleRefError).reason).toBe("absent_ref")
+  })
+
+  test("a resolve against another observation refuses instead of rebinding", async () => {
+    const { backend } = createHarness()
+    const first = await backend.snapshot()
+    const save = requireElement(first, "Save")
+    const second = await backend.snapshot()
+    // The backend ref is identical in both observations, so the only thing that
+    // distinguishes them is the pair the action carries.
+    expect(second.elements.map((element) => element.ref)).toContain(save.ref)
+    const refused = await backend.execute({
+      type: "invoke",
+      ref: save.ref,
+      observationId: first.id,
+      generation: first.generation,
+    })
+    expect(refused.ok).toBe(false)
+    expect(refused.delivery).toBe("refused")
+    expect(refused.error?.code).toBe("stale_ref")
+    expect(refused.error?.message).toContain(first.id)
+    expect(refused.error?.message).toContain(second.id)
+    const accepted = await backend.execute({
+      type: "invoke",
+      ref: save.ref,
+      observationId: second.id,
+      generation: second.generation,
+    })
+    expect(accepted.ok).toBe(true)
+  })
+
+  test("a generation mismatch alone refuses and names both ids", async () => {
+    const { backend } = createHarness()
+    const first = await backend.snapshot()
+    const save = requireElement(first, "Save")
+    const second = await backend.snapshot()
+    const refused = await backend.execute({ type: "set_value", ref: save.ref, value: "x", generation: first.generation })
+    expect(refused.error?.code).toBe("stale_ref")
+    expect(refused.error?.message).toContain(`generation ${first.generation}`)
+    expect(refused.error?.message).toContain(second.id)
+    expect(refused.error?.message).toContain(`generation ${second.generation}`)
+  })
+
+  test("a pointer click aimed from another observation is refused, not delivered", async () => {
+    const { backend, runner } = createHarness()
+    const first = await backend.snapshot()
+    await backend.snapshot()
+    const refused = await backend.execute({
+      type: "click",
+      point: { x: 50, y: 32 },
+      captureId: first.id,
+      observationId: first.id,
+      generation: first.generation,
+    })
+    expect(refused.ok).toBe(false)
+    expect(refused.error?.code).toBe("stale_ref")
+    expect(runner.calls.filter((script) => scriptKind(script) === "pointer_click")).toHaveLength(0)
+  })
+
+  test("an unknown ref is refused, never rebound by name", async () => {
+    const { backend } = createHarness()
+    await backend.snapshot()
+    const refused = await backend.execute({ type: "invoke", ref: "cua:window/notepad/untitled-notepad/0/button/nope/0" })
+    expect(refused.ok).toBe(false)
+    expect(refused.error?.code).toBe("stale_ref")
+    expect(refused.error?.message).toContain("Unknown element ref")
+  })
+})
+
+describe("cua windows element fields", () => {
+  test("carries the application, text, and UIA's clickable point", () => {
+    const payload = parseWindowsSnapshotPayload({
+      windows: [
+        {
+          app: "notepad",
+          pid: 4242,
+          title: "Untitled - Notepad",
+          hwnd: 66000,
+          focused: true,
+          node: {
+            runtimeId: "42.1001",
+            index: 0,
+            role: "ControlType.Window",
+            name: "Untitled - Notepad",
+            states: ["focused"],
+            patterns: ["Window"],
+            editable: false,
+            valuePresent: false,
+            bounds: { x: 0, y: 0, width: 800, height: 600 },
+            children: [
+              {
+                runtimeId: "42.1002",
+                index: 0,
+                role: "ControlType.Text",
+                name: "3 pages",
+                description: "",
+                value: null,
+                text: "3 pages",
+                states: [],
+                patterns: [],
+                editable: false,
+                valuePresent: false,
+                bounds: { x: 10, y: 40, width: 120, height: 20 },
+                children: [],
+              },
+              {
+                runtimeId: "42.1003",
+                index: 1,
+                role: "ControlType.Button",
+                name: "Save",
+                states: [],
+                patterns: ["Invoke"],
+                editable: false,
+                valuePresent: false,
+                bounds: { x: 10, y: 10, width: 80, height: 24 },
+                clickablePoint: { x: 30, y: 18 },
+                children: [],
+              },
+            ],
+          },
+        },
+      ],
+      screen: { width: 1920, height: 1080 },
+      truncated: false,
+      errors: [],
+    })
+    if (payload === undefined) throw new Error("payload did not parse")
+    const snapshot = buildWindowsSnapshot({
+      generation: 1,
+      takenAt: 0,
+      windows: payload.windows,
+      maxElements: 20,
+    })
+
+    const label = requireElement(snapshot, "3 pages")
+    expect(label.application).toBe("notepad")
+    expect(label.windowRef).toBe("cua:window/notepad/untitled-notepad/0")
+    expect(label.role).toBe("text")
+    expect(label.text).toBe("3 pages")
+    // A value-less label reports no value rather than echoing its text.
+    expect(label.value).toBeUndefined()
+    expect(label.bounds).toEqual({ x: 10, y: 40, width: 120, height: 20 })
+
+    const save = requireElement(snapshot, "Save")
+    expect(save.application).toBe("notepad")
+    expect(save.attributes?.clickablePointX).toBe(30)
+    expect(save.attributes?.clickablePointY).toBe(18)
+    expect(label.attributes?.clickablePointX).toBeUndefined()
+  })
+
+  test("a clickable point outside the element's own bounds is discarded", () => {
+    const payload = parseWindowsSnapshotPayload({
+      windows: [
+        {
+          app: "notepad",
+          title: "Untitled - Notepad",
+          node: {
+            runtimeId: "42.1001",
+            index: 0,
+            role: "ControlType.Window",
+            name: "Untitled - Notepad",
+            states: [],
+            patterns: [],
+            editable: false,
+            valuePresent: false,
+            bounds: { x: 0, y: 0, width: 800, height: 600 },
+            children: [
+              {
+                runtimeId: "42.1003",
+                index: 0,
+                role: "ControlType.Button",
+                name: "Save",
+                states: [],
+                patterns: ["Invoke"],
+                editable: false,
+                valuePresent: false,
+                bounds: { x: 10, y: 10, width: 80, height: 24 },
+                clickablePoint: { x: 9000, y: 9000 },
+                children: [],
+              },
+            ],
+          },
+        },
+      ],
+      truncated: false,
+      errors: [],
+    })
+    if (payload === undefined) throw new Error("payload did not parse")
+    const snapshot = buildWindowsSnapshot({ generation: 1, takenAt: 0, windows: payload.windows, maxElements: 20 })
+    expect(requireElement(snapshot, "Save").attributes?.clickablePointX).toBeUndefined()
+  })
+
+  test("parses the display text and clickable point the helper reports", () => {
+    const node = {
+      runtimeId: "42.1002",
+      index: 0,
+      role: "ControlType.Edit",
+      name: "Text editor",
+      text: "hello",
+      value: "hello",
+      clickablePoint: { x: 12, y: 24 },
+      states: [],
+      patterns: ["Value"],
+      editable: true,
+      valuePresent: true,
+    }
+    const payload = parseWindowsSnapshotPayload({ windows: [{ app: "notepad", node }], truncated: false, errors: [] })
+    const parsed = payload?.windows[0]?.node
+    expect(parsed?.text).toBe("hello")
+    expect(parsed?.clickablePoint).toEqual({ x: 12, y: 24 })
+    expect(windowsDisplayText("ControlType.Edit", "hello", true)).toBe("hello")
+    expect(windowsDisplayText("ControlType.Slider", "40", false)).toBeUndefined()
+  })
+})
+
+describe("cua windows discovery bounds", () => {
+  function manyChildren(count: number, prefix: string) {
+    return Array.from({ length: count }, (_, index) => ({
+      runtimeId: `42.2${index}`,
+      index,
+      role: "ControlType.Button",
+      name: `${prefix} ${index}`,
+      states: [],
+      patterns: ["Invoke"],
+      editable: false,
+      valuePresent: false,
+      bounds: { x: 10 + index * 5, y: 40, width: 80, height: 24 },
+      children: [],
+    }))
+  }
+
+  test("a huge tree degrades instead of consuming the whole observation", () => {
+    const payload = parseWindowsSnapshotPayload({
+      windows: [
+        { app: "notepad", pid: 1, title: "First", hwnd: 1, focused: true, node: { runtimeId: "42.1", role: "ControlType.Window", name: "First", states: ["focused"], patterns: [], editable: false, valuePresent: false, children: manyChildren(600, "A") } },
+        { app: "notepad", pid: 1, title: "Second", hwnd: 2, focused: false, node: { runtimeId: "42.9", role: "ControlType.Window", name: "Second", states: [], patterns: [], editable: false, valuePresent: false, children: manyChildren(600, "B") } },
+      ],
+      truncated: false,
+      errors: [],
+    })
+    if (payload === undefined) throw new Error("payload did not parse")
+    const snapshot = buildWindowsSnapshot({ generation: 1, takenAt: 0, windows: payload.windows, maxElements: 1000 })
+
+    expect(snapshot.windows).toHaveLength(2)
+    // Both windows keep a share of the budget; one cannot eat the observation.
+    for (const window of snapshot.windows) {
+      expect(snapshot.elements.filter((element) => element.windowRef === window.ref).length).toBeGreaterThan(400)
+    }
+    expect(snapshot.elements.length).toBeLessThanOrEqual(1000)
+    expect(snapshot.truncated).toBe(true)
+    expect(snapshot.accessibility).toBe("degraded")
+    expect(snapshot.warnings.some((warning) => warning.includes("capped at"))).toBe(true)
+    expect(snapshot.warnings.some((warning) => warning.includes("accessibility tree was truncated"))).toBe(true)
+  })
+
+  test("a window count above the cap truncates rather than dropping silently", () => {
+    const payload = parseWindowsSnapshotPayload({
+      windows: Array.from({ length: 70 }, (_, index) => ({
+        app: "app",
+        pid: 1,
+        title: `Window ${index}`,
+        hwnd: index + 1,
+        focused: index === 0,
+        node: { runtimeId: `42.${index}`, role: "ControlType.Window", name: `Window ${index}`, states: index === 0 ? ["focused"] : [], patterns: [], editable: false, valuePresent: false, children: manyChildren(2, `W${index}`) },
+      })),
+      truncated: false,
+      errors: [],
+    })
+    if (payload === undefined) throw new Error("payload did not parse")
+    const snapshot = buildWindowsSnapshot({ generation: 1, takenAt: 0, windows: payload.windows, maxElements: 1000 })
+    expect(snapshot.windows).toHaveLength(64)
+    expect(snapshot.truncated).toBe(true)
+    expect(snapshot.accessibility).toBe("degraded")
+  })
+
+  test("a helper-truncated walk reports the accessibility state as degraded", () => {
+    const payload = parseWindowsSnapshotPayload(JSON.parse(WINDOWS_FIXTURE_JSON))
+    if (payload === undefined) throw new Error("payload did not parse")
+    const snapshot = buildWindowsSnapshot({
+      generation: 1,
+      takenAt: 0,
+      windows: payload.windows,
+      maxElements: 20,
+      helperTruncated: true,
+    })
+    expect(snapshot.truncated).toBe(true)
+    expect(snapshot.accessibility).toBe("degraded")
+    expect(snapshot.warnings.some((warning) => warning.includes("accessibility tree was truncated"))).toBe(true)
+  })
+
+  test("a healthy tree reports available accessibility", () => {
+    const payload = parseWindowsSnapshotPayload(JSON.parse(WINDOWS_FIXTURE_JSON))
+    if (payload === undefined) throw new Error("payload did not parse")
+    const snapshot = buildWindowsSnapshot({ generation: 1, takenAt: 0, windows: payload.windows, maxElements: 20 })
+    expect(snapshot.accessibility).toBe("available")
+    expect(snapshot.truncated).toBe(false)
+  })
+
+  test("the observe script carries per-window, window-count, and time bounds", () => {
+    const script = windowsObserveScript({ maxElements: 400, maxDepth: 12 })
+    expect(script).toContain("$maxElementsPerWindow")
+    expect(script).toContain("$maxWindows")
+    // One window cannot consume the whole walk: the counter resets per window.
+    expect(script).toContain("$script:omniaWindowCount = 0")
+    // A cooperative deadline, because UIA COM round trips have no element-count
+    // equivalent of their cost.
+    expect(script).toContain("$script:omniaDeadline")
+    expect(WINDOWS_OBSERVE_BUDGET_MS).toBe(WINDOWS_TIME_BUDGET_MS)
+  })
+})
+
+describe("cua windows aim points", () => {
+  const BOUNDS = { x: 10, y: 20, width: 80, height: 24 }
+
+  test("prefers UIA's clickable point over any guess", () => {
+    expect(aimPoint({ role: "button", bounds: BOUNDS }, { x: 30, y: 40 })).toEqual({
+      x: 30,
+      y: 40,
+      strategy: "provider-hint",
+    })
+    expect(aimPoint({ role: "button", bounds: BOUNDS }, { x: 9000, y: 9000 })).toEqual({
+      x: 90,
+      y: 44,
+      strategy: "provider-hint",
+    })
+  })
+
+  test("mirrors the engine's role vocabulary", () => {
+    expect(aimPoint({ role: "button", bounds: BOUNDS }, undefined)).toEqual({ x: 50, y: 32, strategy: "control-center" })
+    expect(aimPoint({ role: "checkbox", bounds: BOUNDS }, undefined)).toEqual({ x: 50, y: 32, strategy: "control-center" })
+    expect(aimPoint({ role: "close", bounds: BOUNDS }, undefined)).toEqual({ x: 80, y: 32, strategy: "role-inset" })
+    expect(aimPoint({ role: "minimize", bounds: BOUNDS }, undefined)).toEqual({ x: 20, y: 32, strategy: "role-inset" })
+    expect(aimPoint({ role: "generic", bounds: BOUNDS }, undefined)).toEqual({ x: 50, y: 32, strategy: "bounds-center" })
+    expect(aimPoint({ role: "button", bounds: undefined }, undefined)).toBeUndefined()
+  })
+
+  function payloadWithoutPatterns(role: string) {
+    const source = JSON.parse(WINDOWS_FIXTURE_JSON) as {
+      windows: { node?: { children: { name: string; role: string; patterns: string[]; editable: boolean }[] } | null }[]
+    }
+    return {
+      ...source,
+      windows: source.windows.map((window) =>
+        window.node === undefined || window.node === null
+          ? window
+          : {
+              ...window,
+              node: {
+                ...window.node,
+                children: window.node.children.map((child) =>
+                  child.name === "Save" ? { ...child, role, patterns: [], editable: false } : child,
+                ),
+              },
+            },
+      ),
+    }
+  }
+
+  test("the foreground pointer fallback records a bounds-center guess", async () => {
+    const { backend, runner } = createHarness({
+      allowForeground: true,
+      handlers: {
+        observe: () => payloadWithoutPatterns("ControlType.Pane"),
+        resolve: () => ({ ...RESOLVED_BUTTON, role: "ControlType.Pane", patterns: [] }),
+      },
+    })
+    const snapshot = await backend.snapshot()
+    const save = requireElement(snapshot, "Save")
+    expect(save.role).toBe("group")
+    const result = await backend.execute({ type: "invoke", ref: save.ref })
+    expect(result.ok).toBe(true)
+    expect(result.delivery).toBe("pointer")
+    expect(result.warnings).toEqual(["aim: bounds-center"])
+    expect(result.message).toContain("no better aim point was reported")
+    const clicked = runner.calls.filter((script) => scriptKind(script) === "pointer_click")
+    expect(clicked).toHaveLength(1)
+    expect(clicked[0]).toContain("SetCursorPos(50, 22)")
+  })
+
+  test("the foreground pointer fallback uses UIA's clickable point", async () => {
+    const { backend, runner } = createHarness({
+      allowForeground: true,
+      handlers: {
+        observe: () => payloadWithoutPatterns("ControlType.Button"),
+        resolve: () => ({ ...RESOLVED_BUTTON, role: "ControlType.Button", patterns: [], clickablePoint: { x: 30, y: 18 } }),
+      },
+    })
+    const snapshot = await backend.snapshot()
+    const save = requireElement(snapshot, "Save")
+    const result = await backend.execute({ type: "invoke", ref: save.ref })
+    expect(result.ok).toBe(true)
+    expect(result.message).toContain("provider-hint")
+    const clicked = runner.calls.filter((script) => scriptKind(script) === "pointer_click")
+    expect(clicked).toHaveLength(1)
+    expect(clicked[0]).toContain("SetCursorPos(30, 18)")
   })
 })

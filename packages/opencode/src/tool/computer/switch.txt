@@ -16,10 +16,21 @@ and credentials stay unchanged. This selects a device served by the current
 control plane, not a different server. It grants no permissions and does not
 launch an application by itself.
 
+A successful switch reports computerId, the new device's accessibility state, and
+freshObservationRequired. It reads the new device once, so the session holds a live
+observation for it (observationId and generation) that computer_snapshot can page
+with sinceGeneration. When freshObservationRequired is true, that tree is degraded
+or was unreadable: confirm with computer_screenshot and ground with
+computer_visual, and treat every control not in the tree as unseen.
+
+Observations and refs do not travel between computers. The switch invalidates every
+observation this session read off the device left behind, so after a switch always
+take a fresh computer_snapshot on the new device before acting: a ref, observation
+ID, coordinate, or browser tab ID from the previous computer is refused with the
+name of both computers, and never resolved against the new device's element list.
+
 Finish any in-flight computer action before switching. Do not run this tool in
 parallel with actions against the old target.
 
-After switching, discard element refs, observation IDs, coordinates and browser tab
-IDs from the previous device. Read computer_capabilities and a fresh
-computer_snapshot before acting on the new device. If it disconnects, report that
-failure rather than silently using another paired computer.
+If the new device disconnects, report that failure rather than silently using
+another paired computer.

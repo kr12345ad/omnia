@@ -17,9 +17,17 @@ first, or when the previous plan failed and you are correcting course.
 
 Building a good plan:
 
-- Start from a fresh snapshot or observe, not from memory. Every target in
-  the plan must exist in the observation you just took, or be produced by
-  an earlier step in the same plan (a dialog a previous step opens).
+- Start from a fresh `computer_snapshot`, not from memory. If any step uses an
+  element `target`, pass the snapshot's `observationId` once at the plan level
+  (or on each targeted step). All refs in one plan must come from that same
+  observation; mixed observations, unknown observations, and refs absent from
+  the held snapshot are refused before approval or execution. Rebuild the plan
+  from a fresh snapshot after a stale-ref refusal.
+- A plan is bound to one generation. If a step changes the screen, later steps
+  that depend on newly created controls must use semantic `query` resolution or
+  be split into a new plan after taking a fresh snapshot; never reuse an old ref.
+  `resumeFrom` does not refresh or rebind skipped steps: resume only when the
+  same observation is still held; otherwise take a fresh snapshot and rebuild.
 - Order matters: launch before click, focus before type, open before read,
   select before copy, navigate before find. Each step may assume only what
   previous steps verified, never what they merely attempted.
@@ -87,6 +95,10 @@ Each step supports:
   false. Unverified steps fail closed. Reach for it for cosmetic steps
   (hover to reveal a tooltip you then read) — never for typing, saving,
   deleting, sending, or anything the user cannot undo.
+- Each step result includes the aim point and strategy when the server resolved
+  an element. `bounds-center` is a guess, not a precise target; re-resolve it
+  with `computer_find`/`computer_inspect` before acting. Warnings are returned
+  at plan level as well as on the step.
 - For type steps, start and stop markers bound the typed text (typing refuses
   to run if a marker is absent), and endKey presses a key afterwards.
 - expect: text, window, or file. After the step, the runtime verifies the

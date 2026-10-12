@@ -43,6 +43,7 @@ import {
   type ResolvedElementPayload,
 } from "./linux-script"
 import { limitSnapshot } from "./snapshot-limit"
+import type { CuaAccessibilityState } from "../types"
 
 export const CUA_TYPE_CHUNK_SIZE = 400
 const DEFAULT_MAX_ELEMENTS = 1000
@@ -55,6 +56,19 @@ const CAPTURE_TIMEOUT_MS = 20000
 const MAX_HELPER_APPS = 40
 const MAX_HELPER_DEPTH = 16
 const MAX_HELPER_NODES = 20000
+// Element-discovery bounds. The AT-SPI tree of an unfocused window can be
+// arbitrarily deep and wide (a browser document, a huge menu), so the walk is
+// capped and a capped snapshot says so instead of either hanging or pretending
+// it read the whole tree. Controls are kept breadth-first, which puts the
+// fields and buttons an agent acts on above the deep document tail.
+const MAX_ELEMENT_DEPTH = 12
+const MAX_ELEMENTS_PER_WINDOW = 400
+const SNAPSHOT_TIME_BUDGET_MS = 1500
+// The helper checks the time budget cooperatively; a hung AT-SPI call cannot
+// be interrupted from inside python, so the request timeout is the hard
+// ceiling that guarantees the snapshot returns.
+const SNAPSHOT_HELPER_TIMEOUT_MS = SNAPSHOT_TIME_BUDGET_MS + 1500
+const ATSPI_TIMEOUT_WARNING = `The accessibility walk exceeded its ${SNAPSHOT_TIME_BUDGET_MS}ms budget; some controls are missing from this snapshot.`
 const HELPER_RESTART_BACKOFF_MS = 500
 const HELPER_RESTART_MAX_MS = 5000
 const CAPTURE_RETRY_MS = 30000
@@ -407,6 +421,11 @@ export interface CuaSnapshotBuildInput {
   requestedApp?: string
   helperTruncated?: boolean
   warnings?: readonly string[]
+  // Overrides for the discovery bounds; the module constants are the defaults.
+  maxDepth?: number
+  maxElementsPerWindow?: number
+  // Honest override for callers that already know why the tree is incomplete.
+  accessibility?: CuaAccessibilityState
 }
 
 function atspiBackendRef(path: readonly number[]): string {
@@ -442,6 +461,19 @@ function buildAttributes(node: AtspiNodeSnapshot): Record<string, string | numbe
   return attributes
 }
 
+// Discovery bounds shared by every window of one snapshot. A bound that
+// truncates records one warning per window and never renumbers a ref: the
+// elements kept are exactly the first ones the walk would have emitted, so a
+// capped snapshot keeps every ref an uncapped snapshot of the same generation
+// would have produced for the same controls.
+interface WalkBounds {
+  maxDepth: number
+  maxElementsPerWindow: number
+  perWindow: Map<string, number>
+  reported: Set<string>
+  warnings: string[]
+}
+
 interface SnapshotBuildContext {
   generation: number
   app: string
@@ -449,6 +481,13 @@ interface SnapshotBuildContext {
   elements: CuaElement[]
   windowOccurrences: Map<string, number>
   elementOccurrences: Map<string, number>
+  bounds: WalkBounds
+}
+
+function noteBound(bounds: WalkBounds, windowRef: string, warning: string): void {
+  if (bounds.reported.has(windowRef)) return
+  bounds.reported.add(windowRef)
+  bounds.warnings.push(warning)
 }
 
 function addElement(
@@ -457,6 +496,7 @@ function addElement(
   node: AtspiNodeSnapshot,
   path: readonly number[],
   parentRef: string | undefined,
+  depth: number,
 ): void {
   const role = canonicalRole(node.role)
   const name = node.name ?? ""
@@ -464,6 +504,18 @@ function addElement(
   const occurrence = context.elementOccurrences.get(key) ?? 0
   context.elementOccurrences.set(key, occurrence + 1)
   const bounds = normalizeBounds(node.bounds)
+  const seen = (context.bounds.perWindow.get(window.ref) ?? 0) + 1
+  context.bounds.perWindow.set(window.ref, seen)
+  // A window with hundreds of controls is walked breadth-first, so the cap
+  // keeps the shallow controls and only drops the deep tail.
+  if (seen > context.bounds.maxElementsPerWindow) {
+    noteBound(
+      context.bounds,
+      window.ref,
+      `The window "${window.title}" exposes more than ${context.bounds.maxElementsPerWindow} elements; only the first ${context.bounds.maxElementsPerWindow} are included.`,
+    )
+    return
+  }
   const element: CuaElement = {
     ref: buildElementRef(window.ref, role, name, occurrence),
     backendRef: atspiBackendRef(path),
@@ -492,7 +544,7 @@ function addElement(
   }
   context.elements.push(element)
   for (const child of node.children) {
-    addChild(context, window, child, [...path, child.index], element.ref)
+    addChild(context, window, child, [...path, child.index], element.ref, depth + 1)
   }
 }
 
@@ -518,7 +570,7 @@ function addWindow(context: SnapshotBuildContext, node: AtspiNodeSnapshot, path:
   // this node. A second window-role element with the same name would make
   // title-based focus ambiguous.
   for (const child of node.children) {
-    addChild(context, window, child, [...path, child.index], undefined)
+    addChild(context, window, child, [...path, child.index], undefined, 1)
   }
 }
 
@@ -544,7 +596,16 @@ function addChild(
   node: AtspiNodeSnapshot,
   path: readonly number[],
   parentRef: string | undefined,
+  depth: number,
 ): void {
+  if (depth > context.bounds.maxDepth) {
+    noteBound(
+      context.bounds,
+      window.ref,
+      `The accessibility tree of "${window.title}" is deeper than ${context.bounds.maxDepth} levels; deeper controls are missing.`,
+    )
+    return
+  }
   if (isWindowNode(node)) {
     if (startsWindowBoundary(node, window)) {
       addWindow(context, node, path)
@@ -554,11 +615,11 @@ function addChild(
     // walked through without emitting an element: a second window-role record
     // with the same name would make title-based focus ambiguous.
     for (const child of node.children) {
-      addChild(context, window, child, [...path, child.index], parentRef)
+      addChild(context, window, child, [...path, child.index], parentRef, depth)
     }
     return
   }
-  addElement(context, window, node, path, parentRef)
+  addElement(context, window, node, path, parentRef, depth)
 }
 
 // The AT-SPI desktop exposes applications, and each application exposes its
@@ -702,6 +763,13 @@ export function buildCuaSnapshot(input: CuaSnapshotBuildInput): CuaSnapshot {
   const windowOccurrences = new Map<string, number>()
   const elementOccurrences = new Map<string, number>()
   const appFilter = input.requestedApp
+  const bounds: WalkBounds = {
+    maxDepth: input.maxDepth ?? MAX_ELEMENT_DEPTH,
+    maxElementsPerWindow: input.maxElementsPerWindow ?? MAX_ELEMENTS_PER_WINDOW,
+    perWindow: new Map(),
+    reported: new Set(),
+    warnings: [],
+  }
 
   const visible = input.applications.filter((application) => {
     if (application.error !== undefined) return false
@@ -726,6 +794,7 @@ export function buildCuaSnapshot(input: CuaSnapshotBuildInput): CuaSnapshot {
       elements,
       windowOccurrences,
       elementOccurrences,
+      bounds,
     }
     for (const root of application.nodes) {
       const children = [...root.children].sort((a, b) => {
@@ -743,6 +812,8 @@ export function buildCuaSnapshot(input: CuaSnapshotBuildInput): CuaSnapshot {
   if (input.requestedApp !== undefined && windows.length === 0) {
     warnings.push(`No application matched "${input.requestedApp}"; no elements are available for this snapshot.`)
   }
+  const walkWarnings = [...warnings, ...bounds.warnings]
+  const bounded = bounds.warnings.length > 0
   const full: CuaSnapshot = {
     id: `cap-${input.generation}`,
     generation: input.generation,
@@ -751,8 +822,14 @@ export function buildCuaSnapshot(input: CuaSnapshotBuildInput): CuaSnapshot {
     windows,
     elements,
     ...(input.screen === undefined ? {} : { screen: input.screen }),
-    truncated: input.helperTruncated === true,
-    warnings,
+    truncated: input.helperTruncated === true || bounded,
+    warnings: walkWarnings,
+    // A snapshot that hit a discovery bound, or that carries no tree at all,
+    // is never indistinguishable from a healthy read: the host driver projects
+    // this state onto the observation's capabilities.
+    accessibility:
+      input.accessibility ??
+      (windows.length === 0 || elements.length === 0 || bounded ? "degraded" : "available"),
   }
   return limitSnapshot(full, input.maxElements, input.focusedWindowBackendRef)
 }
@@ -1229,6 +1306,11 @@ export class LinuxCuaBackend implements CuaBackend {
     for (const window of windows) {
       const title = window.title.length > 0 ? window.title : window.cls.length > 0 ? window.cls : window.id
       const app = window.cls
+      // Omnia's own windows must never pollute an agent's observation; the
+      // accessibility build already drops them, and the X11 list is a different
+      // source that has to be filtered the same way. Otherwise the agent sees
+      // its own UI as the most prominent window on the desktop.
+      if (isSelfApplication(app) || isSelfApplication(title)) continue
       if (!appMatchesFragment(requestedApp, app, title)) continue
       const bounds = { x: window.x, y: window.y, width: window.width, height: window.height }
       if (duplicatesWindow([...snapshot.windows, ...additions], title, bounds)) continue
@@ -1291,6 +1373,9 @@ export class LinuxCuaBackend implements CuaBackend {
         windows: [],
         elements: [],
         truncated: false,
+        // No tree can be read at all when the helper never became ready; a
+        // caller must not be able to mistake this for an empty desktop.
+        accessibility: "unavailable",
         warnings: [
           readiness?.error ?? "The Linux accessibility helper is not available.",
           ...(this.a11yWarning === undefined ? [] : [this.a11yWarning]),
@@ -1311,6 +1396,10 @@ export class LinuxCuaBackend implements CuaBackend {
       // Always ask for the full walk: one cached tree then satisfies both the
       // observe budget and a larger find, instead of re-walking per budget.
       max_nodes: MAX_HELPER_NODES,
+      // The helper stops the walk itself once the budget is spent and flags the
+      // partial tree, so a deep or hung application costs a shorter snapshot
+      // instead of a blocked one.
+      time_budget: SNAPSHOT_TIME_BUDGET_MS / 1000,
       scope,
       ...(options.app === undefined ? {} : { app: options.app }),
       ...(activePid === undefined ? {} : { active_pid: activePid }),
@@ -1318,6 +1407,10 @@ export class LinuxCuaBackend implements CuaBackend {
     })
     const payload = snapshotResult.payload
     const warnings = snapshotResult.warnings
+    // A payload that never arrived, or that stopped on its budget, is a partial
+    // read and is never reported as a full one.
+    const atspiState: CuaAccessibilityState | undefined =
+      payload === undefined || payload.timeout === true ? "degraded" : undefined
     // The helper's desktop extents can be a stale 1024x768 while the X11 root
     // is larger; store the union so observations and point validation agree on
     // the real desktop instead of permanently shrinking to the helper value.
@@ -1341,6 +1434,7 @@ export class LinuxCuaBackend implements CuaBackend {
       helperTruncated: payload?.truncated === true,
       ...(options.app === undefined ? {} : { requestedApp: options.app }),
       ...(warnings.length === 0 ? {} : { warnings }),
+      ...(atspiState === undefined ? {} : { accessibility: atspiState }),
     })
     const mergedRaw = await this.mergeX11Windows(built, options.app)
     // The AT-SPI build cannot know that an X11 window will satisfy the app
@@ -1391,8 +1485,28 @@ export class LinuxCuaBackend implements CuaBackend {
   private async atspiSnapshot(
     params: Record<string, unknown>,
   ): Promise<{ payload?: AtspiSnapshotPayload; warnings: string[] }> {
+    const walked = await this.walkAtspi(params)
+    // Narrowing to the focused application only pays off when that application
+    // actually registered on the accessibility bus. Native X11 clients and
+    // toolkits with the bridge disabled never appear there, so the scope
+    // resolves to nothing and the walk comes back empty. A snapshot whose only
+    // records are X11 window frames has no text field, no button, and nothing
+    // an agent can act on but focus. Every application that did register is
+    // more useful than none, so the scope is widened once and the walk stays
+    // bounded by the snapshot's node, depth, and time budgets. A transport
+    // failure is not evidence of an empty scope, so it is never retried: a
+    // second full walk would only double the wait for an answer that never
+    // came.
+    const narrowed = params.scope === "focused" && params.app === undefined
+    if (!narrowed || !walked.emptyScope) return walked
+    return this.walkAtspi({ ...params, scope: "all", active_pid: undefined })
+  }
+
+  private async walkAtspi(
+    params: Record<string, unknown>,
+  ): Promise<{ payload?: AtspiSnapshotPayload; warnings: string[]; emptyScope: boolean }> {
     if (params.force !== true) {
-      const probe = await this.requestHelper("probe", params)
+      const probe = await this.requestHelper("probe", params, PROBE_TIMEOUT_MS)
       if (probe.response !== undefined && probe.response.ok) {
         const signatures = parseProbePayload(probe.response.payload)
         if (signatures !== undefined && signatures.apps.length > 0) {
@@ -1400,12 +1514,21 @@ export class LinuxCuaBackend implements CuaBackend {
           const signature = signatures.apps.map((app) => `${app.index}:${app.signature}`).join("|")
           const cached = this.walkCache.get(key)
           if (cached !== undefined && cached.signature === signature) {
-            return { payload: cached.payload, warnings: [] }
+            return { payload: cached.payload, warnings: [], emptyScope: false }
+          }
+        }
+        // Nothing is in scope: probing again for a walk can only prove the
+        // registry is empty, and that proof is enough to skip it. A probe that
+        // reports the fallback found no application for the narrowed scope.
+        if (signatures !== undefined && signatures.apps.length === 0) {
+          return {
+            warnings: ["The accessibility registry exposed no applications for this snapshot's scope."],
+            emptyScope: signatures.fallback,
           }
         }
       }
     }
-    const response = (await this.requestHelper("snapshot", params)).response
+    const response = (await this.requestHelper("snapshot", params, SNAPSHOT_HELPER_TIMEOUT_MS)).response
     const warnings =
       response === undefined
         ? ["The snapshot command failed or timed out."]
@@ -1413,9 +1536,14 @@ export class LinuxCuaBackend implements CuaBackend {
           ? []
           : [response.error ?? "The snapshot command failed."]
     const payload = response === undefined || !response.ok ? undefined : parseSnapshotPayload(response.payload)
-    if (payload === undefined) return { warnings }
+    if (payload === undefined) return { warnings, emptyScope: false }
+    // The walk stopped on its time budget: the partial tree is real, so it is
+    // kept and reported as incomplete rather than discarded. A stopped walk is
+    // never cached, or the next snapshot with an unchanged signature would
+    // keep serving the truncated tree long after the desktop got faster.
+    const timedOut = payload.timeout === true
     const metas = payload.applications.filter((app) => app.key !== undefined && app.signature !== undefined)
-    if (metas.length > 0 && metas.length === payload.applications.length) {
+    if (metas.length > 0 && metas.length === payload.applications.length && !timedOut) {
       const key = metas.map((app) => app.key).join("|")
       const signature = metas.map((app) => `${app.index ?? -1}:${app.signature}`).join("|")
       this.walkCache.set(key, { signature, payload })
@@ -1424,7 +1552,11 @@ export class LinuxCuaBackend implements CuaBackend {
         if (oldest !== undefined) this.walkCache.delete(oldest)
       }
     }
-    return { payload, warnings }
+    return {
+      payload,
+      warnings: timedOut ? [...warnings, ATSPI_TIMEOUT_WARNING] : warnings,
+      emptyScope: payload.applications.length === 0 && payload.fallback === true,
+    }
   }
 
   // Cached by active window id so repeated snapshots do not pay for two xprop

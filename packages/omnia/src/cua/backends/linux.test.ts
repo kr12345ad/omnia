@@ -1,12 +1,20 @@
 import { describe, expect, test } from "bun:test"
+import { spawn } from "node:child_process"
 import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { utimes } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { CuaElement, CuaSnapshot } from "../types"
 import type { LinuxSessionType } from "../../daemon/wayland"
-import type { AtspiNodeSnapshot, AtspiSnapshotPayload, HelperReady, ResolvedElementPayload } from "./linux-script"
-import { parseHelperLine, parseResolvedPayload, parseSnapshotPayload } from "./linux-script"
+import type {
+  AtspiApplicationSnapshot,
+  AtspiNodeSnapshot,
+  AtspiSnapshotPayload,
+  HelperLine,
+  HelperReady,
+  ResolvedElementPayload,
+} from "./linux-script"
+import { parseHelperLine, parseResolvedPayload, parseSnapshotPayload, LINUX_CUA_SCRIPT } from "./linux-script"
 import {
   appMatchesFragment,
   buildCuaSnapshot,
@@ -186,6 +194,315 @@ function requireElement(snapshot: CuaSnapshot, name: string): CuaElement {
   const element = snapshot.elements.find((candidate) => candidate.name === name)
   if (element === undefined) throw new Error(`missing element: ${name}`)
   return element
+}
+
+// A window whose frame holds one control of every kind an agent acts on, so
+// role, state, action, bounds, text, description, and parent mapping are all
+// exercised by the same walk.
+function nestedControlTree(): AtspiApplicationSnapshot[] {
+  return [
+    {
+      name: "firefox",
+      pid: 42,
+      nodes: [
+        {
+          index: 0,
+          role: "application",
+          name: "firefox",
+          states: [],
+          actions: [],
+          attributes: {},
+          interfaces: INERT_INTERFACES,
+          children: [
+            {
+              index: 1,
+              role: "frame",
+              name: "Example page",
+              states: ["focused"],
+              actions: [],
+              bounds: { x: 0, y: 0, width: 1024, height: 768 },
+              attributes: {},
+              interfaces: COMPONENT_INTERFACES,
+              children: [
+                {
+                  index: 0,
+                  role: "pushbutton",
+                  name: "Save",
+                  description: "Save the document",
+                  states: ["enabled", "focused"],
+                  actions: ["click"],
+                  bounds: { x: 12, y: 40, width: 90, height: 26 },
+                  attributes: {},
+                  interfaces: { component: true, action: true, editable: false, value: false },
+                  children: [
+                    {
+                      index: 0,
+                      role: "label",
+                      name: "Save",
+                      states: ["enabled"],
+                      actions: [],
+                      attributes: {},
+                      interfaces: INERT_INTERFACES,
+                      children: [],
+                    },
+                  ],
+                },
+                {
+                  index: 1,
+                  role: "entry",
+                  name: "Search",
+                  text: "the quick brown fox",
+                  states: ["enabled", "editable"],
+                  actions: [],
+                  bounds: { x: 12, y: 80, width: 240, height: 24 },
+                  attributes: { placeholder: "Search the web" },
+                  interfaces: { component: true, action: false, editable: true, value: false },
+                  children: [
+                    {
+                      index: 0,
+                      role: "label",
+                      name: "Search",
+                      states: ["enabled"],
+                      actions: [],
+                      attributes: {},
+                      interfaces: INERT_INTERFACES,
+                      children: [],
+                    },
+                  ],
+                },
+                {
+                  index: 2,
+                  role: "panel",
+                  name: "",
+                  states: ["enabled"],
+                  actions: [],
+                  bounds: { x: 12, y: 120, width: 500, height: 200 },
+                  attributes: {},
+                  interfaces: COMPONENT_INTERFACES,
+                  children: [
+                    {
+                      index: 0,
+                      role: "combobox",
+                      name: "Colour",
+                      states: ["enabled", "expanded"],
+                      actions: ["select"],
+                      bounds: { x: 20, y: 130, width: 120, height: 24 },
+                      attributes: {},
+                      interfaces: { component: true, action: true, editable: false, value: true },
+                      children: [],
+                    },
+                    {
+                      index: 1,
+                      role: "checkbox",
+                      name: "Bold",
+                      states: ["enabled", "checked"],
+                      actions: ["toggle"],
+                      bounds: { x: 20, y: 160, width: 120, height: 24 },
+                      attributes: {},
+                      interfaces: { component: true, action: true, editable: false, value: false },
+                      children: [],
+                    },
+                    {
+                      index: 2,
+                      role: "pagetab",
+                      name: "Details",
+                      states: ["enabled", "selected"],
+                      actions: ["jump"],
+                      bounds: { x: 20, y: 190, width: 120, height: 24 },
+                      attributes: {},
+                      interfaces: { component: true, action: true, editable: false, value: false },
+                      children: [],
+                    },
+                  ],
+                },
+                {
+                  index: 3,
+                  role: "radiobutton",
+                  name: "Left",
+                  states: ["enabled", "selected"],
+                  actions: ["select"],
+                  bounds: { x: 12, y: 330, width: 100, height: 20 },
+                  attributes: {},
+                  interfaces: { component: true, action: true, editable: false, value: false },
+                  children: [],
+                },
+                {
+                  index: 4,
+                  role: "listitem",
+                  name: "Documents",
+                  states: ["enabled", "selected"],
+                  actions: ["select"],
+                  bounds: { x: 12, y: 356, width: 100, height: 20 },
+                  attributes: {},
+                  interfaces: { component: true, action: true, editable: false, value: false },
+                  children: [],
+                },
+                {
+                  index: 5,
+                  role: "menuitem",
+                  name: "New",
+                  states: ["enabled"],
+                  actions: ["click"],
+                  bounds: { x: 12, y: 380, width: 100, height: 20 },
+                  attributes: {},
+                  interfaces: { component: true, action: true, editable: false, value: false },
+                  children: [],
+                },
+                {
+                  index: 6,
+                  role: "slider",
+                  name: "Volume",
+                  states: ["enabled"],
+                  actions: [],
+                  bounds: { x: 12, y: 404, width: 100, height: 20 },
+                  attributes: { minimum: "0", maximum: "100", step: "5" },
+                  interfaces: { component: true, action: false, editable: false, value: true },
+                  children: [],
+                },
+                {
+                  index: 7,
+                  role: "spinbutton",
+                  name: "Zoom",
+                  states: ["enabled"],
+                  actions: [],
+                  bounds: { x: 12, y: 428, width: 100, height: 20 },
+                  attributes: { minimum: "0.25", maximum: "4", step: "0.25" },
+                  interfaces: { component: true, action: false, editable: false, value: true },
+                  children: [],
+                },
+                {
+                  index: 8,
+                  role: "treeitem",
+                  name: "Chapter 1",
+                  states: ["enabled", "selected", "expanded"],
+                  actions: ["expand or contract"],
+                  bounds: { x: 12, y: 452, width: 100, height: 20 },
+                  attributes: {},
+                  interfaces: { component: true, action: true, editable: false, value: false },
+                  children: [],
+                },
+                {
+                  index: 9,
+                  role: "searchbox",
+                  name: "Find",
+                  states: ["enabled", "editable"],
+                  actions: [],
+                  bounds: { x: 12, y: 476, width: 100, height: 20 },
+                  attributes: {},
+                  interfaces: { component: true, action: false, editable: true, value: false },
+                  children: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ]
+}
+
+// A chain of passive containers `depth` deep with a named control at every
+// level, so a depth cut is observable level by level. Children are visited in
+// order: container first, then its controls.
+function deepChain(depth: number): AtspiApplicationSnapshot[] {
+  const button = (name: string): AtspiNodeSnapshot => ({
+    index: 0,
+    role: "pushbutton",
+    name,
+    states: ["enabled"],
+    actions: ["click"],
+    bounds: { x: 1, y: 1, width: 10, height: 10 },
+    attributes: {},
+    interfaces: { component: true, action: true, editable: false, value: false },
+    children: [],
+  })
+  let node: AtspiNodeSnapshot = button("Leaf 0")
+  for (let level = 1; level <= depth; level += 1) {
+    node = {
+      index: 0,
+      role: "panel",
+      name: `Level ${level}`,
+      states: ["enabled"],
+      actions: [],
+      bounds: { x: 0, y: 0, width: 400, height: 400 },
+      attributes: {},
+      interfaces: COMPONENT_INTERFACES,
+      children: [node, button(`Leaf ${level}`)],
+    }
+  }
+  return [
+    {
+      name: "firefox",
+      pid: 42,
+      nodes: [
+        {
+          index: 0,
+          role: "application",
+          name: "firefox",
+          states: [],
+          actions: [],
+          attributes: {},
+          interfaces: INERT_INTERFACES,
+          children: [
+            {
+              index: 1,
+              role: "frame",
+              name: "Deep",
+              states: ["focused"],
+              actions: [],
+              bounds: { x: 0, y: 0, width: 1024, height: 768 },
+              attributes: {},
+              interfaces: COMPONENT_INTERFACES,
+              children: [node],
+            },
+          ],
+        },
+      ],
+    },
+  ]
+}
+
+function wideWindow(count: number): AtspiApplicationSnapshot[] {
+  return [
+    {
+      name: "firefox",
+      pid: 42,
+      nodes: [
+        {
+          index: 0,
+          role: "application",
+          name: "firefox",
+          states: [],
+          actions: [],
+          attributes: {},
+          interfaces: INERT_INTERFACES,
+          children: [
+            {
+              index: 1,
+              role: "frame",
+              name: "Busy",
+              states: ["focused"],
+              actions: [],
+              bounds: { x: 0, y: 0, width: 1024, height: 768 },
+              attributes: {},
+              interfaces: COMPONENT_INTERFACES,
+              children: Array.from({ length: count }, (_, index) => ({
+                index,
+                role: "pushbutton",
+                name: `Item ${index}`,
+                states: ["enabled"],
+                actions: ["click"],
+                bounds: { x: 0, y: index * 24, width: 80, height: 20 },
+                attributes: {},
+                interfaces: { component: true, action: true, editable: false, value: false },
+                children: [],
+              })),
+            },
+          ],
+        },
+      ],
+    },
+  ]
 }
 
 describe("cua linux refs", () => {
@@ -484,6 +801,171 @@ describe("cua linux snapshot building", () => {
     expect(names).toContain("Documents")
     expect(names.some((name) => name.startsWith("Menu"))).toBe(false)
     expect(snapshot.warnings.some((warning) => warning.includes("truncated to 4 of"))).toBe(true)
+  })
+
+  test("discovers nested controls with their states, actions, bounds, and parent chain", () => {
+    const snapshot = buildCuaSnapshot({
+      generation: 7,
+      takenAt: 10,
+      applications: nestedControlTree(),
+      maxElements: 500,
+    })
+    expect(snapshot.accessibility).toBe("available")
+    const save = requireElement(snapshot, "Save")
+    expect(save.role).toBe("button")
+    expect(save.states).toEqual(["enabled", "focused"])
+    expect(save.enabled).toBe(true)
+    expect(save.focused).toBe(true)
+    // The raw AT-SPI actions stay in the attributes so invoke can pick one.
+    expect(save.attributes?.atspiActions).toBe("click")
+    expect(save.actions).toContain("click")
+    expect(save.actions).toContain("focus")
+    expect(save.description).toBe("Save the document")
+    expect(save.bounds).toEqual({ x: 12, y: 40, width: 90, height: 26 })
+    expect(save.windowRef).toBe("cua:window/firefox/example-page/0")
+    expect(save.generation).toBe(7)
+    // Actionable controls below the toolbar keep their ancestry.
+    const combo = requireElement(snapshot, "Colour")
+    expect(combo.role).toBe("combobox")
+    expect(combo.states).toContain("expanded")
+    expect(combo.actions).toContain("select")
+    expect(combo.actions).toContain("set_value")
+    const panelRef = "cua:window/firefox/example-page/0/group/unnamed/0"
+    expect(combo.parentRef).toBe(panelRef)
+    expect(requireElement(snapshot, "Bold").parentRef).toBe(panelRef)
+    expect(requireElement(snapshot, "Details").parentRef).toBe(panelRef)
+    expect(requireElement(snapshot, "Details").states).toContain("selected")
+    expect(requireElement(snapshot, "Bold").role).toBe("checkbox")
+    expect(requireElement(snapshot, "Bold").actions).toEqual(["focus", "toggle", "scroll_into_view"])
+    expect(requireElement(snapshot, "Left").role).toBe("radio")
+    expect(requireElement(snapshot, "New").role).toBe("menuitem")
+    expect(requireElement(snapshot, "Documents").role).toBe("listitem")
+    expect(requireElement(snapshot, "Details").role).toBe("tab")
+    expect(requireElement(snapshot, "Volume").role).toBe("slider")
+    expect(requireElement(snapshot, "Zoom").role).toBe("spinbutton")
+    const chapter = requireElement(snapshot, "Chapter 1")
+    expect(chapter.role).toBe("treeitem")
+    expect(chapter.states).toEqual(["enabled", "selected", "expanded"])
+    // Text and value reach the element record instead of being dropped.
+    const search = requireElement(snapshot, "Search")
+    expect(search.role).toBe("textbox")
+    expect(search.editable).toBe(true)
+    expect(search.states).toContain("editable")
+    expect(search.text).toBe("the quick brown fox")
+    expect(search.attributes?.placeholder).toBe("Search the web")
+    expect(requireElement(snapshot, "Find").role).toBe("searchbox")
+    // The window node itself never becomes a duplicate element.
+    expect(snapshot.elements.some((element) => element.role === "window")).toBe(false)
+  })
+
+  test("keeps refs stable for the same desktop within a generation", () => {
+    const input = { generation: 5, takenAt: 4, applications: nestedControlTree(), maxElements: 500 }
+    const first = buildCuaSnapshot(input)
+    const second = buildCuaSnapshot(input)
+    expect(first.elements.map((element) => element.ref)).toEqual(second.elements.map((element) => element.ref))
+    expect(first.elements.every((element) => element.generation === 5)).toBe(true)
+    expect(requireElement(first, "Colour").ref).toBe("cua:window/firefox/example-page/0/combobox/colour/0")
+    // A new generation re-mints the ids so a stale ref can never look current.
+    const next = buildCuaSnapshot({ ...input, generation: 6 })
+    expect(next.elements.some((element) => element.generation === 6)).toBe(true)
+  })
+
+  test("enforces the element depth bound and reports it as degraded", () => {
+    const shallow = buildCuaSnapshot({
+      generation: 1,
+      takenAt: 0,
+      applications: deepChain(3),
+      maxElements: 500,
+    })
+    expect(shallow.accessibility).toBe("available")
+    expect(shallow.elements.map((element) => element.name).sort()).toEqual([
+      "Leaf 0",
+      "Leaf 1",
+      "Leaf 2",
+      "Leaf 3",
+      "Level 1",
+      "Level 2",
+      "Level 3",
+    ])
+
+    const bounded = buildCuaSnapshot({
+      generation: 1,
+      takenAt: 0,
+      applications: deepChain(3),
+      maxDepth: 2,
+      maxElements: 500,
+    })
+    expect(bounded.elements.map((element) => element.name).sort()).toEqual(["Leaf 3", "Level 2", "Level 3"])
+    expect(bounded.accessibility).toBe("degraded")
+    expect(bounded.truncated).toBe(true)
+    expect(bounded.warnings.some((warning) => warning.includes("deeper than 2 levels"))).toBe(true)
+    // The cut never renumbers or renames a ref that survived it.
+    const shallowRefs = new Map(shallow.elements.map((element) => [element.ref, element.name]))
+    expect(bounded.elements.every((element) => shallowRefs.get(element.ref) === element.name)).toBe(true)
+  })
+
+  test("caps the elements of one window and keeps the shallow controls", () => {
+    const applications = wideWindow(6)
+    const capped = buildCuaSnapshot({
+      generation: 2,
+      takenAt: 0,
+      applications,
+      maxElementsPerWindow: 3,
+      maxElements: 500,
+    })
+    expect(capped.elements).toHaveLength(3)
+    expect(capped.elements.map((element) => element.name)).toEqual(["Item 0", "Item 1", "Item 2"])
+    expect(capped.accessibility).toBe("degraded")
+    expect(capped.truncated).toBe(true)
+    expect(capped.windows[0]?.title).toBe("Busy")
+    expect(capped.warnings.some((warning) => warning.includes("more than 3 elements"))).toBe(true)
+    // A cap is a prefix of the full walk: no ref is renumbered or lost behind it.
+    const full = buildCuaSnapshot({ generation: 2, takenAt: 0, applications, maxElements: 500 })
+    expect(full.elements.slice(0, 3).map((element) => element.ref)).toEqual(
+      capped.elements.map((element) => element.ref),
+    )
+    expect(full.accessibility).toBe("available")
+  })
+
+  test("a window with no element at all is never reported as a healthy read", () => {
+    const snapshot = buildCuaSnapshot({
+      generation: 9,
+      takenAt: 0,
+      applications: [
+        {
+          name: "kitty",
+          nodes: [
+            {
+              index: 0,
+              role: "application",
+              name: "kitty",
+              states: [],
+              actions: [],
+              bounds: { x: 0, y: 0, width: 800, height: 600 },
+              attributes: {},
+              interfaces: INERT_INTERFACES,
+              children: [
+                {
+                  index: 0,
+                  role: "frame",
+                  name: "shell",
+                  states: [],
+                  actions: [],
+                  bounds: { x: 0, y: 0, width: 800, height: 600 },
+                  attributes: {},
+                  interfaces: COMPONENT_INTERFACES,
+                  children: [],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      maxElements: 500,
+    })
+    expect(snapshot.windows).toHaveLength(1)
+    expect(snapshot.elements).toHaveLength(0)
+    expect(snapshot.accessibility).toBe("degraded")
   })
 })
 
@@ -1401,6 +1883,22 @@ describe("cua linux X11 app filtering and dedupe", () => {
     expect(unfiltered.windows.map((window) => window.app).sort()).toEqual(["dolphin", "firefox", "kitty"])
   })
 
+  test("drops Omnia's own X11 windows from the merged snapshot", async () => {
+    const { backend } = createHarness({
+      x11Windows: true,
+      onRun: windowRunner({
+        "0x1": { instance: "firefox", cls: "firefox", title: "Example Page" },
+        "0x2": { instance: "io.omnia.desktop", cls: "io.omnia.desktop", title: "Omnia" },
+        "0x3": { instance: "omnia", cls: "omnia", title: "Omnia" },
+      }),
+      handlers: { ...baseHandlers(), snapshot: () => ({ applications: [] }) },
+    })
+    const snapshot = await backend.snapshot()
+    // Omnia's own window is only reachable through X11 here, and it still must
+    // not be shown to an agent as the most prominent window on the desktop.
+    expect(snapshot.windows.map((window) => window.app)).toEqual(["firefox"])
+  })
+
   test("dedupes an X11 window against an AT-SPI window with a normalized title", async () => {
     const { backend } = createHarness({
       x11Windows: true,
@@ -2251,4 +2749,784 @@ describe("cua linux truth-layer regressions", () => {
     expect(geometry?.monitors?.[0]?.width).toBe(1920)
     expect(geometry?.device?.x).toBe(-3840)
   })
+})
+
+// A stub of the pyatspi D-Bus client the helper talks to. The tree, the
+// per-node delay, and the failure are driven by the JSON in ATSPI_SPEC, so the
+// real script and the real traversal are exercised without a desktop.
+const FAKE_ATSPI_SOURCE = `import json
+import os
+import time
+
+SPEC = json.loads(os.environ.get("ATSPI_SPEC") or "null")
+
+
+class FakeState:
+    def __init__(self, name):
+        self.name = name
+
+    def __str__(self):
+        return "state_" + self.name
+
+
+class FakeStateSet:
+    def __init__(self, names):
+        self.names = list(names)
+
+    def getStates(self):
+        return [FakeState(name) for name in self.names]
+
+
+class FakeRect:
+    def __init__(self, bounds):
+        self.x = bounds.get("x", 0)
+        self.y = bounds.get("y", 0)
+        self.width = bounds.get("width", 0)
+        self.height = bounds.get("height", 0)
+
+
+class FakeComponent:
+    def __init__(self, spec):
+        self.spec = spec
+
+    def getExtents(self, coord=0):
+        return FakeRect(self.spec.get("bounds") or {})
+
+    def grabFocus(self):
+        return True
+
+
+class FakeAction:
+    def __init__(self, spec):
+        self.nActions = len(spec.get("actions") or [])
+        self.names = list(spec.get("actions") or [])
+
+    def getName(self, index):
+        return self.names[index]
+
+    def doAction(self, index):
+        return True
+
+
+class FakeText:
+    def __init__(self, text):
+        self.text = text
+
+    def getText(self, start, end):
+        if end is None or end < 0:
+            return self.text
+        return self.text[start:end]
+
+
+class FakeValue:
+    def __init__(self, value):
+        self.currentValue = 0.0 if value is None else float(value)
+        self.minimumValue = 0.0
+        self.maximumValue = 100.0
+        self.minimumIncrement = 1.0
+
+
+class Node:
+    def __init__(self, spec):
+        self.spec = spec or {}
+        self.name = self.spec.get("name", "")
+        self.description = self.spec.get("description", "")
+        self.children = [Node(child) for child in (self.spec.get("children") or [])]
+
+    def tick(self):
+        delay = float(self.spec.get("delay", 0) or 0)
+        if delay > 0:
+            time.sleep(delay)
+
+    def get_role_name(self):
+        self.tick()
+        return self.spec.get("role", "unknown")
+
+    def getState(self):
+        return FakeStateSet(self.spec.get("states") or [])
+
+    def get_process_id(self):
+        return int(self.spec.get("pid", 42))
+
+    def get_child_count(self):
+        self.tick()
+        if self.spec.get("throws"):
+            raise RuntimeError("the stubbed AT-SPI child count failed")
+        return len(self.children)
+
+    @property
+    def childCount(self):
+        if self.spec.get("throws"):
+            raise RuntimeError("the stubbed AT-SPI child count failed")
+        return len(self.children)
+
+    def get_child_at_index(self, index):
+        self.tick()
+        if self.spec.get("throws") or self.spec.get("throws_access"):
+            raise RuntimeError("the stubbed AT-SPI child access failed")
+        if 0 <= index < len(self.children):
+            return self.children[index]
+        return None
+
+    def getChildAtIndex(self, index):
+        return self.get_child_at_index(index)
+
+    def get_extents(self, coord=0):
+        self.tick()
+        return FakeRect(self.spec.get("bounds") or {})
+
+    def queryComponent(self):
+        return FakeComponent(self.spec)
+
+    def queryAction(self):
+        return FakeAction(self.spec)
+
+    def get_n_actions(self):
+        return len(self.spec.get("actions") or [])
+
+    def get_action_name(self, index):
+        return (self.spec.get("actions") or [])[index]
+
+    def get_attributes(self):
+        return dict(self.spec.get("attributes") or {})
+
+    def queryText(self):
+        text = self.spec.get("text")
+        if text is None:
+            raise RuntimeError("no text interface")
+        return FakeText(text)
+
+    def queryEditableText(self):
+        if not self.spec.get("editable"):
+            raise RuntimeError("no editable text interface")
+        return FakeText(self.spec.get("text", ""))
+
+    def get_text(self, start, end):
+        raise RuntimeError("no text interface")
+
+    def queryValue(self):
+        return FakeValue(self.spec.get("value"))
+
+    def get_current_value(self):
+        raise RuntimeError("no value interface")
+
+    def grab_focus(self):
+        return True
+
+
+class Registry:
+    @staticmethod
+    def registerEventListener(listener, event_type):
+        return True
+
+    @staticmethod
+    def pumpQueuedEvents():
+        return None
+
+    def getDesktop(self, screen=0):
+        return ROOT
+
+
+ROOT = Node(SPEC)
+`
+
+interface HelperProcess {
+  request(command: string, params: Record<string, unknown>): Promise<HelperLine>
+  dispose(): Promise<void>
+}
+
+// Runs the real helper script against a stubbed pyatspi and returns the
+// decoded JSON line for each command. The spec drives the fake tree.
+function startStubAtspi(spec: unknown): HelperProcess {
+  const interpreter = Bun.which("python3") ?? Bun.which("python")
+  if (interpreter === null) throw new Error("python is not available")
+  const directory = mkdtempSync(join(tmpdir(), "omnia-linux-atspi-"))
+  writeFileSync(join(directory, "pyatspi.py"), FAKE_ATSPI_SOURCE)
+  writeFileSync(join(directory, "helper.py"), LINUX_CUA_SCRIPT)
+  const child = spawn(interpreter, [join(directory, "helper.py")], {
+    env: { ...process.env, PYTHONPATH: directory, ATSPI_SPEC: JSON.stringify(spec) },
+    stdio: ["pipe", "pipe", "pipe"],
+  })
+  const waiting: Array<(line: HelperLine) => void> = []
+  let buffer = ""
+  let settled = false
+  child.stdout.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString("utf8")
+    const lines = buffer.split("\n")
+    buffer = lines.pop() ?? ""
+    for (const raw of lines) {
+      const trimmed = raw.trim()
+      if (trimmed.length === 0) continue
+      // The helper emits the payload fields at the top level, so the whole
+      // record is the payload just like the persistent helper's line format.
+      const line = parseHelperLine(trimmed)
+      if (line === undefined || line.ready === true) continue
+      const settle = waiting.shift()
+      settle?.(line)
+    }
+  })
+  let stderr = ""
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr = (stderr + chunk.toString("utf8")).slice(-2000)
+  })
+  const request = (command: string, params: Record<string, unknown>): Promise<HelperLine> =>
+    new Promise((resolve, reject) => {
+      if (settled) {
+        reject(new Error("the stubbed helper was already disposed"))
+        return
+      }
+      waiting.push(resolve)
+      child.stdin.write(`${JSON.stringify({ id: "1", command, params })}\n`)
+      const timer = setTimeout(() => {
+        const index = waiting.indexOf(resolve)
+        if (index >= 0) waiting.splice(index, 1)
+        reject(new Error(`the stubbed helper never answered ${command}: ${stderr.trim()}`))
+      }, 20000)
+      timer.unref?.()
+    })
+  return {
+    request,
+    async dispose() {
+      settled = true
+      child.kill("SIGKILL")
+      rmSync(directory, { recursive: true, force: true })
+    },
+  }
+}
+
+// The helper walks the desktop object, so a snapshot payload nests
+// application -> frame -> controls.
+function childrenOf(response: HelperLine): number {
+  const window = (response.payload.applications as Record<string, unknown>[])[0] as Record<string, unknown>
+  const application = (window.nodes as Record<string, unknown>[])[0] as Record<string, unknown>
+  const frame = (application.children as Record<string, unknown>[])[0] as Record<string, unknown>
+  return (frame.children as unknown[]).length
+}
+
+function button(spec: Record<string, unknown>): Record<string, unknown> {
+  return { states: ["sensitive"], actions: ["click"], ...spec }
+}
+
+// The AT-SPI desktop of a window that holds one control of each actionable
+// kind. Role names are the raw pyatspi vocabulary ("push button", "combo
+// box", ...), which is what the helper receives from D-Bus.
+const WINDOW_FRAME: Record<string, unknown> = {
+  role: "frame",
+  name: "Example page",
+  states: ["focused"],
+  bounds: { x: 0, y: 0, width: 1024, height: 768 },
+  children: [
+    button({
+      role: "push button",
+      name: "Save",
+      description: "Save the document",
+      states: ["sensitive", "focused"],
+      bounds: { x: 12, y: 40, width: 90, height: 26 },
+      children: [{ role: "label", name: "Save", text: "Save", children: [] }],
+    }),
+    {
+      role: "entry",
+      name: "Search",
+      states: ["editable", "focusable"],
+      text: "the quick brown fox",
+      editable: true,
+      attributes: { placeholder: "Search the web" },
+      bounds: { x: 12, y: 80, width: 240, height: 24 },
+      children: [],
+    },
+    {
+      role: "panel",
+      name: "",
+      states: ["sensitive"],
+      bounds: { x: 12, y: 120, width: 500, height: 200 },
+      children: [
+        {
+          role: "combo box",
+          name: "Colour",
+          states: ["sensitive", "expanded"],
+          actions: ["select"],
+          value: 1,
+          bounds: { x: 20, y: 130, width: 120, height: 24 },
+          children: [],
+        },
+        {
+          role: "check box",
+          name: "Bold",
+          states: ["sensitive", "checked"],
+          actions: ["toggle"],
+          bounds: { x: 20, y: 160, width: 120, height: 24 },
+          children: [],
+        },
+        {
+          role: "page tab",
+          name: "Details",
+          states: ["sensitive", "selected"],
+          actions: ["jump"],
+          bounds: { x: 20, y: 190, width: 120, height: 24 },
+          children: [],
+        },
+      ],
+    },
+    {
+      role: "radio button",
+      name: "Left",
+      states: ["sensitive", "selected"],
+      actions: ["select"],
+      bounds: { x: 12, y: 330, width: 100, height: 20 },
+      children: [],
+    },
+    {
+      role: "list item",
+      name: "Documents",
+      states: ["sensitive", "selected"],
+      actions: ["select"],
+      bounds: { x: 12, y: 356, width: 100, height: 20 },
+      children: [],
+    },
+    {
+      role: "menu item",
+      name: "New",
+      states: ["sensitive"],
+      actions: ["click"],
+      bounds: { x: 12, y: 380, width: 100, height: 20 },
+      children: [],
+    },
+    {
+      role: "slider",
+      name: "Volume",
+      states: ["sensitive"],
+      value: 3,
+      bounds: { x: 12, y: 404, width: 100, height: 20 },
+      children: [],
+    },
+    {
+      role: "spin button",
+      name: "Zoom",
+      states: ["sensitive"],
+      value: 1,
+      bounds: { x: 12, y: 428, width: 100, height: 20 },
+      children: [],
+    },
+    {
+      role: "tree item",
+      name: "Chapter 1",
+      states: ["sensitive", "selected", "expanded"],
+      actions: ["expand or contract"],
+      bounds: { x: 12, y: 452, width: 100, height: 20 },
+      children: [],
+    },
+    {
+      role: "search box",
+      name: "Find",
+      states: ["sensitive", "editable"],
+      editable: true,
+      bounds: { x: 12, y: 476, width: 100, height: 20 },
+      children: [],
+    },
+  ],
+}
+
+const APPLICATION: Record<string, unknown> = {
+  role: "application",
+  name: "firefox",
+  pid: 42,
+  states: ["active"],
+  children: [WINDOW_FRAME],
+}
+
+const CONTROL_TREE: Record<string, unknown> = { role: "desktop", children: [APPLICATION] }
+
+describe("cua linux helper protocol", () => {
+  test("walks a window and discovers every actionable control below it", async () => {
+    const helper = startStubAtspi(CONTROL_TREE)
+    try {
+      const response = await helper.request("snapshot", { scope: "all", max_apps: 4, max_depth: 12, max_nodes: 500 })
+      expect(response.ok).toBe(true)
+      const payload = parseSnapshotPayload(response.payload)
+      expect(payload?.applications).toHaveLength(1)
+      expect(payload?.timeout).toBeUndefined()
+      const snapshot = buildCuaSnapshot({
+        generation: 1,
+        takenAt: 0,
+        applications: payload?.applications ?? [],
+        maxElements: 500,
+      })
+      expect(snapshot.windows.map((window) => window.title)).toEqual(["Example page"])
+      expect(snapshot.accessibility).toBe("available")
+      const save = requireElement(snapshot, "Save")
+      expect(save.role).toBe("button")
+      expect(save.focused).toBe(true)
+      // "sensitive" is the canonical AT-SPI state for enabled.
+      expect(save.enabled).toBe(true)
+      expect(save.states).toContain("focused")
+      expect(save.attributes?.atspiRole).toBe("pushbutton")
+      expect(save.attributes?.atspiActions).toBe("click")
+      expect(save.description).toBe("Save the document")
+      expect(save.bounds).toEqual({ x: 12, y: 40, width: 90, height: 26 })
+      const search = requireElement(snapshot, "Search")
+      expect(search.role).toBe("textbox")
+      expect(search.editable).toBe(true)
+      expect(search.text).toBe("the quick brown fox")
+      expect(search.attributes?.placeholder).toBe("Search the web")
+      expect(requireElement(snapshot, "Colour").role).toBe("combobox")
+      expect(requireElement(snapshot, "Bold").role).toBe("checkbox")
+      expect(requireElement(snapshot, "Details").role).toBe("tab")
+      expect(requireElement(snapshot, "Left").role).toBe("radio")
+      expect(requireElement(snapshot, "Documents").role).toBe("listitem")
+      expect(requireElement(snapshot, "New").role).toBe("menuitem")
+      expect(requireElement(snapshot, "Volume").role).toBe("slider")
+      expect(requireElement(snapshot, "Zoom").role).toBe("spinbutton")
+      const chapter = requireElement(snapshot, "Chapter 1")
+      expect(chapter.role).toBe("treeitem")
+      expect(chapter.states).toContain("selected")
+      expect(chapter.states).toContain("expanded")
+      expect(requireElement(snapshot, "Find").role).toBe("searchbox")
+      // Controls inside the panel keep their ancestry; the window itself is
+      // never duplicated as an element.
+      expect(requireElement(snapshot, "Colour").parentRef).toBe("cua:window/firefox/example-page/0/group/unnamed/0")
+      expect(snapshot.elements.some((element) => element.role === "window")).toBe(false)
+      expect(snapshot.elements.every((element) => element.windowRef === "cua:window/firefox/example-page/0")).toBe(
+        true,
+      )
+    } finally {
+      await helper.dispose()
+    }
+  })
+
+  test("enforces the helper depth bound and reports the cut", async () => {
+    const helper = startStubAtspi(CONTROL_TREE)
+    try {
+      const response = await helper.request("snapshot", { scope: "all", max_depth: 2 })
+      expect(response.ok).toBe(true)
+      const payload = parseSnapshotPayload(response.payload)
+      expect(payload?.truncated).toBe(true)
+      const snapshot = buildCuaSnapshot({
+        generation: 1,
+        takenAt: 0,
+        applications: payload?.applications ?? [],
+        maxElements: 500,
+      })
+      expect(snapshot.elements.map((element) => element.name)).toContain("Save")
+      // The panel is one level below the frame, its controls are cut.
+      expect(snapshot.elements.some((element) => element.name === "Colour")).toBe(false)
+    } finally {
+      await helper.dispose()
+    }
+  })
+
+  test("stops the walk when its time budget is spent", async () => {
+    // One slow D-Bus round trip per child access: the breadth-first walk
+    // collects the shallow controls first and stops instead of grinding
+    // through the tail.
+    const busy = {
+      ...CONTROL_TREE,
+      children: [
+        {
+          ...APPLICATION,
+          children: [
+            {
+              ...WINDOW_FRAME,
+              delay: 0.05,
+              children: Array.from({ length: 60 }, (_, index) =>
+                button({
+                  role: "push button",
+                  name: `Item ${index}`,
+                  bounds: { x: 0, y: index * 24, width: 80, height: 20 },
+                }),
+              ),
+            },
+          ],
+        },
+      ],
+    }
+    const helper = startStubAtspi(busy)
+    try {
+      const started = Date.now()
+      const response = await helper.request("snapshot", { scope: "all", time_budget: 0.3 })
+      const elapsed = Date.now() - started
+      expect(response.ok).toBe(true)
+      expect(response.payload.timeout).toBe(true)
+      expect(response.payload.truncated).toBe(true)
+      // The helper walks the desktop, so the payload nests application -> frame
+      // -> controls.
+      expect(childrenOf(response)).toBeGreaterThan(0)
+      expect(childrenOf(response)).toBeLessThan(60)
+      // The budget held: the walk never ran past it.
+      expect(elapsed).toBeLessThan(4000)
+    } finally {
+      await helper.dispose()
+    }
+  })
+
+  test("keeps the other controls when one AT-SPI call throws", async () => {
+    const tree = JSON.parse(JSON.stringify(CONTROL_TREE)) as Record<string, unknown>
+    const application = (tree.children as Record<string, unknown>[])[0]!
+    const frame = (application.children as Record<string, unknown>[])[0]!
+    // The panel's children cannot be read: the panel survives, its subtree does
+    // not, and nothing else in the window is lost.
+    const children = frame.children as Record<string, unknown>[]
+    children[2] = { ...children[2]!, throws: true }
+    const helper = startStubAtspi(tree)
+    try {
+      const response = await helper.request("snapshot", { scope: "all" })
+      expect(response.ok).toBe(true)
+      const payload = parseSnapshotPayload(response.payload)
+      const snapshot = buildCuaSnapshot({
+        generation: 1,
+        takenAt: 0,
+        applications: payload?.applications ?? [],
+        maxElements: 500,
+      })
+      expect(requireElement(snapshot, "Save").role).toBe("button")
+      expect(requireElement(snapshot, "New").role).toBe("menuitem")
+      expect(requireElement(snapshot, "Chapter 1").role).toBe("treeitem")
+      // The unreadable panel leaves no controls behind at all, and the walk
+      // reports that the tree is incomplete instead of pretending otherwise.
+      expect(snapshot.elements.some((element) => element.name === "Colour")).toBe(false)
+      expect(snapshot.elements.some((element) => element.role === "group")).toBe(false)
+      expect(payload?.truncated).toBe(true)
+    } finally {
+      await helper.dispose()
+    }
+  })
+
+  test("an unreadable application is reported as an error instead of a false success", async () => {
+    const tree = JSON.parse(JSON.stringify(CONTROL_TREE)) as Record<string, unknown>
+    const application = (tree.children as Record<string, unknown>[])[0]!
+    const frame = (application.children as Record<string, unknown>[])[0]!
+    frame.throws_access = true
+    const helper = startStubAtspi(tree)
+    try {
+      const response = await helper.request("snapshot", { scope: "all" })
+      expect(response.ok).toBe(true)
+      const payload = parseSnapshotPayload(response.payload)
+      expect(payload?.applications[0]?.error).toBeDefined()
+      const snapshot = buildCuaSnapshot({
+        generation: 1,
+        takenAt: 0,
+        applications: payload?.applications ?? [],
+        maxElements: 500,
+      })
+      expect(snapshot.windows).toHaveLength(0)
+      expect(snapshot.elements).toHaveLength(0)
+      // An empty tree is never presented as a healthy read.
+      expect(snapshot.accessibility).toBe("degraded")
+    } finally {
+      await helper.dispose()
+    }
+  })
+
+  test("a walk that hit its budget is retried instead of being served from the cache", async () => {
+    const busy = {
+      ...CONTROL_TREE,
+      children: [
+        {
+          ...APPLICATION,
+          children: [
+            {
+              ...WINDOW_FRAME,
+              delay: 0.02,
+              children: Array.from({ length: 30 }, (_, index) =>
+                button({
+                  role: "push button",
+                  name: `Item ${index}`,
+                  bounds: { x: 0, y: index * 24, width: 80, height: 20 },
+                }),
+              ),
+            },
+          ],
+        },
+      ],
+    }
+    const helper = startStubAtspi(busy)
+    try {
+      const first = await helper.request("snapshot", { scope: "all", time_budget: 0.1 })
+      expect(first.payload.timeout).toBe(true)
+      // The helper walks the desktop, so the payload nests application -> frame
+      // -> controls.
+      const collected = (response: HelperLine): number => childrenOf(response)
+      expect(collected(first)).toBeLessThan(30)
+      // The second snapshot gets a fresh budget and completes the walk instead
+      // of replaying the cached truncated tree.
+      const second = await helper.request("snapshot", { scope: "all", time_budget: 30 })
+      expect(second.payload.timeout).toBe(false)
+      expect(collected(second)).toBe(30)
+    } finally {
+      await helper.dispose()
+    }
+  })
+})
+
+// One application that registered on the accessibility bus: a focused app from
+// another process (native X11, or a toolkit bridge that never loaded) is not
+// in this list at all.
+function registeredApplication(): Record<string, unknown> {
+  return {
+    applications: [
+      {
+        name: "gedit",
+        pid: 9,
+        nodes: [
+          {
+            index: 0,
+            role: "application",
+            name: "gedit",
+            states: [],
+            actions: [],
+            attributes: {},
+            interfaces: { component: false, action: false, editable: false, value: false },
+            children: [
+              {
+                index: 1,
+                role: "frame",
+                name: "notes.txt",
+                states: ["focused"],
+                actions: [],
+                bounds: { x: 0, y: 0, width: 800, height: 600 },
+                attributes: {},
+                interfaces: { component: true, action: false, editable: false, value: false },
+                children: [
+                  {
+                    index: 0,
+                    role: "pushbutton",
+                    name: "Undo",
+                    states: ["enabled"],
+                    actions: ["click"],
+                    bounds: { x: 4, y: 4, width: 60, height: 22 },
+                    attributes: {},
+                    interfaces: { component: true, action: true, editable: false, value: false },
+                    children: [],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    screen: { width: 1920, height: 1080 },
+    truncated: false,
+    timeout: false,
+  }
+}
+
+describe("cua linux element discovery and degradation", () => {
+  test("collects the controls of registered applications when the focused one has no tree", async () => {
+    // The X11 active window belongs to an application that never registered on
+    // the accessibility bus, so narrowing to its pid walks nothing. The X11
+    // merge would then produce window frames with no controls at all, which is
+    // exactly what an agent could not act on.
+    const { backend, helper } = createHarness({
+      handlers: {
+        probe: (params) =>
+          params.scope === "focused"
+            ? { apps: [], fallback: true, focused: null }
+            : {
+                apps: [{ key: "pid:9", signature: "v0", index: 0, name: "gedit", pid: 9, cached: false }],
+                fallback: false,
+                focused: null,
+              },
+        snapshot: (params) => (params.scope === "focused" ? { applications: [] } : registeredApplication()),
+        resolve: () => resolvedElement(),
+      },
+    })
+    const snapshot = await backend.snapshot()
+    expect(snapshot.accessibility).toBe("available")
+    expect(snapshot.windows.map((window) => window.app)).toEqual(["gedit"])
+    expect(snapshot.elements.map((element) => element.name)).toEqual(["Undo"])
+    expect(helper.calls.some((call) => call.command === "probe" && call.params.scope === "all")).toBe(true)
+    expect(helper.calls.some((call) => call.command === "snapshot" && call.params.scope === "all")).toBe(true)
+  })
+
+  test("a walk that hit its time budget is degraded with a warning", async () => {
+    const { backend } = createHarness({
+      handlers: {
+        ...baseHandlers(),
+        snapshot: () => ({ ...atspiSnapshot(), timeout: true, truncated: true }),
+      },
+    })
+    const snapshot = await backend.snapshot()
+    expect(snapshot.accessibility).toBe("degraded")
+    expect(snapshot.truncated).toBe(true)
+    expect(snapshot.warnings.some((warning) => warning.includes("1500ms budget"))).toBe(true)
+    // The partial tree is still returned rather than thrown away.
+    expect(snapshot.elements.length).toBeGreaterThan(0)
+  })
+
+  test("a helper that never answers degrades instead of hanging the snapshot", async () => {
+    const helper: CuaHelper = {
+      ready: Promise.resolve({ ok: true, pyatspi: true, x11: true }),
+      exited: false,
+      request: (command, _params, timeoutMs) =>
+        command === "probe"
+          ? Promise.resolve({ ok: false, error: "probe unavailable", payload: {} })
+          : new Promise((_resolve, reject) => {
+              setTimeout(
+                () => reject(new Error("The Linux CUA helper timed out running snapshot.")),
+                timeoutMs ?? 15000,
+              )
+            }),
+      async dispose() {},
+    }
+    const backend = createLinuxBackend({
+      helper,
+      runner: createFakeRunner().runner,
+      accessibility: false,
+      x11Windows: false,
+      session: "x11",
+      display: ":0",
+      probeDisplay: false,
+    })
+    const started = Date.now()
+    const snapshot = await backend.snapshot()
+    expect(Date.now() - started).toBeLessThan(6000)
+    expect(snapshot.accessibility).toBe("degraded")
+    expect(snapshot.elements).toHaveLength(0)
+    expect(snapshot.warnings.some((warning) => warning.includes("failed or timed out"))).toBe(true)
+  }, 10000)
+
+  test("a failing snapshot command never looks like a healthy empty desktop", async () => {
+    const { backend } = createHarness({
+      handlers: { snapshot: () => ({ ok: false, error: "the accessibility bus closed" }) },
+    })
+    const snapshot = await backend.snapshot()
+    expect(snapshot.accessibility).toBe("degraded")
+    expect(snapshot.warnings).toContain("the accessibility bus closed")
+  })
+
+  test("a backend with no accessibility tree at all is unavailable", async () => {
+    const { backend } = createHarness({ ready: { ok: false, pyatspi: false, error: "pyatspi is not available" } })
+    const snapshot = await backend.snapshot()
+    expect(snapshot.accessibility).toBe("unavailable")
+    expect(snapshot.windows).toHaveLength(0)
+  })
+
+  test("a walk that hit its budget is not served from the walk cache", async () => {
+    // The next snapshot must be able to complete, so a truncated walk is never
+    // remembered as if it were the whole tree.
+    let timedOut = true
+    let walks = 0
+    const { backend, helper } = createHarness({
+      handlers: {
+        probe: (params) => ({
+          apps: [{ key: "pid:42", signature: "v0", index: 0, name: "firefox", pid: 42, cached: false }],
+          fallback: false,
+          focused: null,
+        }),
+        snapshot: () => {
+          walks += 1
+          return { ...atspiSnapshot(), timeout: timedOut, truncated: timedOut }
+        },
+      },
+    })
+    const first = await backend.snapshot()
+    expect(first.accessibility).toBe("degraded")
+    expect(first.warnings.some((warning) => warning.includes("1500ms budget"))).toBe(true)
+    timedOut = false
+    const second = await backend.snapshot()
+    expect(second.accessibility).toBe("available")
+    expect(walks).toBe(2)
+    expect(helper.calls.filter((call) => call.command === "snapshot")).toHaveLength(2)
+  })
+
 })

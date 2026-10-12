@@ -1214,31 +1214,92 @@ interface ElementMatch {
   readonly exact: boolean
 }
 
+// Anything below this is no match at all: callers must never receive a
+// low-confidence element they could turn into a blind center click.
 export const SEMANTIC_MATCH_THRESHOLD = 0.6
 
+const NAME_FLOOR_SCORE = 0.6
+const EXACT_BONUS = 0.25
+const TOKEN_BOUNDARY_BONUS = 0.1
+const ROLE_HINT_SCORE = 0.2
+const ROLE_IN_QUERY_BONUS = 0.05
+const TEXT_HINT_SCORE = 0.3
+// A query shorter than this can only stand for a whole token of the name, so
+// 1-2 character fragments can never drag a vague hit past the floor.
+const MIN_SUBSTRING_QUERY_LENGTH = 3
+
+// Trim, lowercase, collapse whitespace runs and normalize pipe spacing so
+// "OC|Quick hello", "  oc |   QUICK hello " and "OC | Quick hello" are one
+// title.
+function normalizeMatchText(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\s*\|\s*/g, " | ")
+    .replace(/\s+/g, " ")
+}
+
+function isTokenChar(char: string | undefined): boolean {
+  return char !== undefined && /[a-z0-9]/.test(char)
+}
+
+// The query is a complete token inside the value ("oc" in "oc | quick hello"),
+// never a fragment of a longer word ("at" in "catalog").
+function isWholeToken(value: string, query: string): boolean {
+  const index = value.indexOf(query)
+  if (index < 0) return false
+  return !isTokenChar(value[index - 1]) && !isTokenChar(value[index + query.length])
+}
+
+// The query starts the value or is preceded by a separator: "quick hello" in
+// "oc | quick hello" is token-aligned, "uick" is not.
+function isTokenBoundary(value: string, query: string): boolean {
+  const index = value.indexOf(query)
+  if (index < 0) return false
+  return index === 0 || !isTokenChar(value[index - 1])
+}
+
+// The query names the element's role explicitly ("click the close button").
+function mentionsRole(query: string, role: string): boolean {
+  if (role.length === 0) return false
+  const queryTokens = new Set(query.split(/[^a-z0-9]+/).filter((token) => token.length > 0))
+  const roleTokens = role.split(" ").filter((token) => token.length > 0)
+  return roleTokens.length > 0 && roleTokens.every((token) => queryTokens.has(token))
+}
+
 export function bestMatch(elements: readonly SemanticElement[], description: string): ElementMatch | undefined {
-  const query = description.trim().toLowerCase()
-  if (query.length === 0) return undefined
+  const trimmed = description.trim().toLowerCase()
+  if (trimmed.length === 0) return undefined
+  const query = normalizeMatchText(trimmed)
   let best: ElementMatch | undefined
   for (const element of elements) {
     // An explicit element ref is authoritative even without bounds: the
     // driver can execute it by stable id.
-    if (element.elementId !== undefined && element.elementId.toLowerCase() === query) {
+    if (element.elementId !== undefined && element.elementId.toLowerCase() === trimmed) {
       return { element, score: 1, exact: true }
     }
     if (element.bounds === undefined) continue
-    const name = (element.name ?? "").toLowerCase()
-    const text = (element.text ?? "").toLowerCase()
-    const role = (element.role ?? "").toLowerCase()
-    const exact = name === query || text === query
-    // Tightened: element name must contain the full query (0.6). The old
-    // query.includes(name) 0.4 clause over-matched any short element name
-    // ("window", "terminal") inside a long focus query and produced the
-    // (960,539) screen-center click. Removed.
-    const nameScore = name.length > 0 && name.includes(query) ? 0.6 : 0
-    const textScore = text.length > 0 && text.includes(query) ? 0.3 : 0
-    const roleScore = role.length > 0 && role.includes(query) ? 0.2 : 0
-    const score = Math.min(1, nameScore + textScore + roleScore + (exact ? 0.25 : 0))
+    const name = normalizeMatchText(element.name ?? "")
+    const text = normalizeMatchText(element.text ?? "")
+    const role = normalizeMatchText(element.role ?? "")
+    const exact = (name.length > 0 && name === query) || (text.length > 0 && text === query)
+    // The name must carry the whole query. The old query.includes(name) 0.4
+    // clause let any short element name ("window", "terminal") hide inside a
+    // long focus query and resolved to the (960,539) screen-center click.
+    const nameHit = query.length >= MIN_SUBSTRING_QUERY_LENGTH ? name.includes(query) : isWholeToken(name, query)
+    // Exact normalized equality is already the whole string, so it stays at
+    // the 0.85 ceiling and does not also collect the boundary/role bonuses.
+    const score =
+      exact
+        ? NAME_FLOOR_SCORE + EXACT_BONUS
+        : Math.min(
+            1,
+            (nameHit ? NAME_FLOOR_SCORE : 0) +
+              (text.includes(query) ? TEXT_HINT_SCORE : 0) +
+              (role.includes(query) ? ROLE_HINT_SCORE : 0) +
+              (nameHit && isTokenBoundary(name, query) ? TOKEN_BOUNDARY_BONUS : 0) +
+              (mentionsRole(query, role) ? ROLE_IN_QUERY_BONUS : 0),
+          )
     if (score <= 0) continue
     if (best === undefined || score > best.score) best = { element, score, exact }
   }

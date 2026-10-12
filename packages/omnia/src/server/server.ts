@@ -28,10 +28,16 @@ import {
   type RoutingWeights,
 } from "../computer-use"
 import { GitHubAuth, defaultGitHubAuthFile } from "../auth/github"
-import { ComputerManager, type BrowserController, type ServerComputerDriver } from "./computers"
-import { PermissionManager, type ApprovalPolicy, type OmniaScope, type PermissionState } from "./permissions"
+import { ComputerManager, type BrowserController, type ExecuteOutcome, type ServerActionRequest, type ServerComputerDriver } from "./computers"
+import { PermissionManager, requiredScopesForAction, type ApprovalPolicy, type OmniaScope, type PermissionState } from "./permissions"
 import { ApprovalRegistry } from "../security/approval"
-import { SecurityJournal } from "../security/journal"
+import {
+  SecurityJournal,
+  appendComputerUseRecord,
+  readComputerUseTrail,
+  type ComputerUseExecutionInput,
+  type ComputerUseTrailFilter,
+} from "../security/journal"
 import { redactError } from "../security/redaction"
 import { pairingCodeHash } from "../pairing/discovery"
 import {
@@ -69,6 +75,7 @@ export interface OmniaServerOptions {
   readonly pairingsFile?: string
   readonly authFile?: string
   readonly auditFile?: string
+  readonly computerUseAuditFile?: string
   readonly githubClientId?: string
   readonly githubClientSecret?: string
   readonly githubRedirectUri?: string
@@ -115,6 +122,69 @@ function createServerId(): string {
   return `omnia_${randomBytes(8).toString("hex")}`
 }
 
+// Journal every computer-use action at the manager boundary.
+//
+// Wrapping the instance rather than a call site is what makes the trail
+// complete: the action routes (POST /v1/computers/:id/actions, /do, /text) and
+// the semantic computer-use service both reach the manager through this
+// wrapper, and a batch step is journaled by executeBatch's own per-step execute
+// call, so no path double counts and no path is missed. The Cua route is the one
+// path that does not come through here - it reaches its engine driver directly -
+// so it journals through the same writer via journalComputerUseAction below.
+//
+// The record is built by the journal from the request, the observations either
+// side of the action, and the execution's own verification, so the aim strategy
+// (including a bounds-center guess) and the verified/not_verified verdict are
+// the ones the execution actually produced. A journal failure marks the audit
+// storage failed, which fails the server closed exactly as the event
+// subscriber above does; it never changes the action's result.
+function journalComputerUseActions(
+  manager: ComputerManager,
+  options: {
+    readonly journal: SecurityJournal
+    readonly serverId: string
+    readonly now: () => number
+    readonly onFailure: () => void
+  },
+): ComputerManager {
+  const execute = manager.execute.bind(manager)
+  const audited = Object.create(manager) as ComputerManager
+  audited.execute = async (id: string, request: ServerActionRequest): Promise<ExecuteOutcome> => {
+    const before = manager.get(id)?.lastObservation
+    const outcome = await execute(id, request)
+    const target = request.target
+    const ref = target?.elementId ?? target?.id
+    const written = appendComputerUseRecord(options.journal, {
+      computerId: id,
+      serverId: options.serverId,
+      at: options.now(),
+      request: {
+        action: request.action,
+        ...(ref === undefined ? {} : { ref }),
+        ...(request.query === undefined ? {} : { query: request.query }),
+        // A window action reaches the manager as a title, so the trail records
+        // the title the request named even before anything is resolved.
+        ...(request.window === undefined ? {} : { window: request.window }),
+        ...(target?.observationId === undefined ? {} : { observationId: target.observationId }),
+        ...(request.observationId === undefined ? {} : { observationId: request.observationId }),
+        ...(target?.generation === undefined ? {} : { generation: target.generation }),
+        ...(request.x === undefined ? {} : { x: request.x }),
+        ...(request.y === undefined ? {} : { y: request.y }),
+        ...(request.approvedBy === undefined ? {} : { approvedBy: request.approvedBy }),
+        ...(request.origin === undefined ? {} : { origin: request.origin }),
+        ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+      },
+      outcome: outcome.result,
+      scopes: requiredScopesForAction(request.action),
+      ...(before === undefined ? {} : { before }),
+      after: manager.get(id)?.lastObservation,
+    })
+    if (!written) options.onFailure()
+    return outcome
+  }
+  return audited
+}
+
 export async function startOmniaServer(options: OmniaServerOptions = {}): Promise<OmniaServerHandle> {
   if (!["127.0.0.1", "localhost", "::1"].includes(options.host ?? "127.0.0.1")) {
     throw new Error("Omnia Server must bind to loopback. Use an authenticated HTTPS proxy or tunnel for remote access.")
@@ -128,9 +198,24 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
   const corsOrigins = new Set(options.corsOrigins ?? ["oc://renderer", ...(publicOrigin === undefined ? [] : [publicOrigin])])
   if (corsOrigins.has("*") || corsOrigins.has("null")) throw new Error("CORS origins must be explicit origins.")
   const events = new EventBus({ serverId, now })
-  const audit = new SecurityJournal(options.auditFile ?? process.env.OMNIA_AUDIT_FILE ??
-    join(dirname(options.authFile ?? defaultGitHubAuthFile()), "audit", `${serverId}.jsonl`))
+  const auditFile = options.auditFile ?? process.env.OMNIA_AUDIT_FILE ??
+    join(dirname(options.authFile ?? defaultGitHubAuthFile()), "audit", `${serverId}.jsonl`)
+  const audit = new SecurityJournal(auditFile)
+  // The computer-use trail is a second journal, not more records in the one
+  // above. That journal is documented as security metadata only - admission,
+  // status and privileged events, never request bodies, page contents or query
+  // strings - and a regression test enforces it. A computer-use record has to
+  // carry the element ref, the aim point and the verification the reliability
+  // contract asks for (docs/computer-use-reliability.md), which is payload by
+  // that policy. So the trail gets its own private file, its own key and its
+  // own HMAC chain, and the security journal keeps its write path untouched.
+  const computerUseAudit = new SecurityJournal(
+    options.computerUseAuditFile ?? `${auditFile.replace(/\.jsonl$/, "")}.computer-use.jsonl`,
+  )
   let auditFailed = false
+  const failAudit = () => {
+    auditFailed = true
+  }
   const unsubscribeAudit = events.subscribe((event) => {
     if (!/^(server\.|action\.|permission\.|credential\.|auth\.|computer\.pair|browser\.action)/.test(event.type)) return
     try {
@@ -237,7 +322,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     subsystems.set(subsystem.name, subsystem)
   }
 
-  const computers = new ComputerManager({
+  const computerManager = new ComputerManager({
     events,
     permissions,
     now,
@@ -290,6 +375,25 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       }
     },
   })
+
+  // One journaled boundary for every computer-use action, shared by the action
+  // routes and the semantic computer-use service.
+  const computers = journalComputerUseActions(computerManager, {
+    journal: computerUseAudit,
+    serverId,
+    now,
+    onFailure: failAudit,
+  })
+
+  // The Cua routes (POST /v1/computers/:id/cua/act) reach the engine driver
+  // directly, so they never pass through the wrapper above and would otherwise
+  // land actions on a real desktop with nothing in the trail. They journal
+  // through the same writer, fed with what the route parsed out of its own
+  // request: one implementation, so a Cua action carries the same fields as
+  // every other computer-use action.
+  const journalComputerUseAction = (input: ComputerUseExecutionInput) => {
+    if (!appendComputerUseRecord(computerUseAudit, input)) failAudit()
+  }
 
   const unregister: Array<() => void> = []
   const registerComputer = (driver: ServerComputerDriver): (() => void) => {
@@ -458,6 +562,10 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     },
     events,
     computers,
+    // Read-only: the journal is re-opened per request and never locked against
+    // the writer, so a running server keeps appending while the trail is read.
+    computerUseTrail: (filter) => readComputerUseTrail(computerUseAudit.file, filter),
+    journalComputerUse: journalComputerUseAction,
     permissions,
     credentials,
     pairings,
@@ -730,6 +838,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     const failed = (error: Error) => {
       unsubscribeAudit()
       audit.close()
+      computerUseAudit.close()
       reject(error)
     }
     server.once("error", failed)
@@ -836,6 +945,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       events.emit("server.stopped", {})
       unsubscribeAudit()
       audit.close()
+      computerUseAudit.close()
     },
   }
 }
