@@ -1,0 +1,21 @@
+Inspect and manage the repository's version control state.
+
+Run this before and after editing so you know what you changed and what was
+already there. It returns parsed results, not raw terminal output.
+
+Read-only operations (no permission prompt):
+- status: branch, upstream, and changed files with their staged state.
+- diff: the current changes. Set staged to compare the index against HEAD,
+  and paths to limit the output.
+- log: recent commits with their files. Narrow with limit, path, or grep.
+- show: one commit's full patch, by its id or a ref like HEAD~2.
+- blame: who last touched each line of a file, optionally a line range.
+- branch: list branches, or create/switch with create/switch.
+
+Mutating operations (ask the user first):
+- add: stage paths, or everything with all.
+- restore: discard changes. Unstage with staged, or discard edits with worktree.
+- stash: shelve changes, or bring them back with pop.
+
+Always check status first: it separates your edits from work that was already in
+the tree, so you do not report someone else's change as your own.
