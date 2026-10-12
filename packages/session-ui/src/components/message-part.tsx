@@ -45,6 +45,7 @@ import { ToolErrorCard } from "./tool-error-card"
 import { Checkbox } from "@opencode-ai/ui/checkbox"
 import { DiffChanges } from "@opencode-ai/ui/diff-changes"
 import { Markdown } from "./markdown"
+import { OpenUIRender, splitOpenUISegments } from "../openui"
 import { ImagePreview } from "@opencode-ai/ui/image-preview"
 import { getDirectory as _getDirectory, getFilename } from "@opencode-ai/core/util/path"
 import { AttachmentCardV2 } from "../v2/components/attachment-card-v2"
@@ -342,11 +343,30 @@ function PacedMarkdown(props: { text: string; cacheKey: string; streaming: boole
     () => props.text,
     () => props.streaming,
   )
+  // A message is prose plus, when the model draws UI, one or more openui-lang
+  // blocks. Each segment keeps its own renderer: markdown keeps the code
+  // highlighting and copy affordances, an OpenUI block is parsed to components.
+  const segments = createMemo(() => splitOpenUISegments(value() ?? "", props.streaming))
 
   return (
-    <Show when={value()}>
-      <Markdown text={value()} cacheKey={props.cacheKey} streaming={props.streaming} />
-    </Show>
+    <For each={segments()}>
+      {(segment, index) => (
+        <Show when={segment.kind === "markdown" ? segment.text : segment.code}>
+          <Show
+            when={segment.kind === "openui"}
+            fallback={
+              <Markdown
+                text={segment.kind === "markdown" ? segment.text : ""}
+                cacheKey={`${props.cacheKey}:${index()}`}
+                streaming={props.streaming}
+              />
+            }
+          >
+            <OpenUIRender code={segment.kind === "openui" ? segment.code : ""} streaming={props.streaming} />
+          </Show>
+        </Show>
+      )}
+    </For>
   )
 }
 
