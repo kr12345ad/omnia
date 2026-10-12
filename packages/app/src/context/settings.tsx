@@ -22,7 +22,7 @@ export interface SoundSettings {
 
 export interface Settings {
   general: {
-    mode: "work" | "code"
+    mode: "work" | "chat"
     // Mode is fixed at session creation and mirrored here, keyed by session ID,
     // so the UI can show it without waiting for the server session record.
     sessionModes: Record<string, SessionMode>
@@ -376,7 +376,7 @@ export const { use: useSettings, provider: SettingsProvider } = createSimpleCont
       },
       general: {
         mode: withFallback(() => store.general?.mode, defaultSettings.general.mode),
-        setMode(value: "work" | "code") {
+        setMode(value: "work" | "chat") {
           setStore("general", "mode", value)
         },
         sessionModes: {

@@ -46,7 +46,7 @@ import { ServerSyncProvider, useServerSync } from "@/context/server-sync"
 import { GlobalProvider, useGlobal } from "@/context/global"
 import { HighlightsProvider } from "@/context/highlights"
 import { LanguageProvider, type Locale, useLanguage } from "@/context/language"
-import { LayoutProvider } from "@/context/layout"
+import { LayoutProvider, useLayout } from "@/context/layout"
 import { ModelsProvider } from "@/context/models"
 import { NotificationProvider } from "@/context/notification"
 import { PermissionProvider } from "@/context/permission"
@@ -70,7 +70,6 @@ import { createSessionLineage } from "@/pages/session/session-lineage"
 import { SessionPage, SessionRouteErrorBoundary, TargetSessionRouteContent } from "@/pages/session"
 import { NewHome } from "@/pages/home"
 import { LegacyHome } from "@/pages/home/legacy-home"
-import { WorkHome } from "@/pages/home/work-home"
 
 const NewSession = lazy(() => import("@/pages/new-session"))
 
@@ -643,11 +642,52 @@ export function AppInterface(props: {
   )
 }
 
-function HomeByMode() {
-  const settings = useSettings()
+// The new shell has no home screen: the root opens the initial chatbox. A visit
+// to "/" resolves the project the home last pointed at and hands it to
+// `newDraft`, which creates the draft and navigates to it — so a restored empty
+// tab strip and the titlebar's new-session action land in the same place. A
+// server with no project open is the one case that stays here: the home's
+// project column is then the only way in.
+function HomeRoute() {
+  const layout = useLayout()
+  const global = useGlobal()
+  const server = useServer()
+  const tabs = useTabs()
+  const [search] = useSearchParams<{ prompt?: string }>()
+
+  const target = createMemo(() => {
+    const selection = layout.home.selection()
+    const conn = global.servers.list().find((item) => ServerConnection.key(item) === selection.server)
+    const project = conn
+      ? global
+          .ensureServerCtx(conn)
+          .projects.list()
+          .find((item) => item.worktree === selection.directory)
+      : undefined
+    if (conn && project) return { server: ServerConnection.key(conn), directory: project.worktree }
+
+    const current = layout.projects.list()[0]
+    if (current) return { server: server.key, directory: current.worktree }
+
+    return global.servers
+      .list()
+      .flatMap((item) => {
+        const first = global.ensureServerCtx(item).projects.list()[0]
+        return first ? [{ server: ServerConnection.key(item), directory: first.worktree }] : []
+      })
+      .at(0)
+  })
+
+  createEffect(() => {
+    if (!tabs.ready()) return
+    const next = target()
+    if (!next) return
+    void tabs.newDraft(next, search.prompt)
+  })
+
   return (
-    <Show when={settings.general.mode() === "work"} fallback={<LegacyHome />}>
-      <WorkHome />
+    <Show when={target() === undefined}>
+      <NewHome />
     </Show>
   )
 }
@@ -665,7 +705,7 @@ function Routes(props: { serverScoped?: JSX.Element }) {
         <Show when={!settings.general.newLayoutDesigns()}>
           {
             <>
-              <Route path="/" component={HomeByMode} />
+              <Route path="/" component={LegacyHome} />
               <Route path="/server/:serverKey/session/:id" component={LegacyTargetSessionRoute} />
             </>
           }
@@ -676,7 +716,7 @@ function Routes(props: { serverScoped?: JSX.Element }) {
         </Route>
       </Route>
       <Show when={settings.general.newLayoutDesigns()}>
-        <Route path="/" component={NewHome} />
+        <Route path="/" component={HomeRoute} />
         <Route path="/:dir/session/:id" component={NewLayoutLegacySessionRedirect} />
         <Route path="/server/:serverKey/session/:id" component={TargetSessionRoute} />
       </Show>

@@ -1,0 +1,125 @@
+[data-component="shell-sidebar"] {
+  --shell-sidebar-width: 272px;
+  --shell-sidebar-rail-width: 56px;
+
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: var(--shell-sidebar-width);
+  min-height: 0;
+  overflow: hidden;
+  /* The same surface as the titlebar above it: the column and the header read as
+     one shape, and the answer area separates them by tone rather than by a rule. */
+  background: var(--v2-background-bg-deep);
+  /* The width is the only thing that animates: the rail and the expanded column
+     are the same element, so a toggle slides instead of swapping layouts. */
+  transition: width 180ms cubic-bezier(0.215, 0.61, 0.355, 1);
+  /* The rows below read their layout from this element's width. */
+  container-type: inline-size;
+}
+
+[data-component="shell-sidebar"][data-collapsed] {
+  width: var(--shell-sidebar-rail-width);
+}
+
+[data-component="shell-sidebar"] [data-slot="shell-sidebar-sessions"] {
+  overscroll-behavior: contain;
+}
+
+/* One row rhythm, taken from the app's own controls: 28px tall, 28px squares. */
+[data-component="shell-sidebar"] .shell-sidebar-row {
+  height: 1.75rem;
+}
+
+/* Search is one slot in two states: the action row while closed, the field while
+   open. Exactly one of them is drawn, so the rows below never move. */
+[data-component="shell-sidebar"]
+  [data-slot="shell-sidebar-search"][data-searching]
+  [data-slot="shell-sidebar-action"] {
+  display: none;
+}
+
+/* The session glyph is the rail's version of a row; expanded rows are titles. */
+[data-component="shell-sidebar"] [data-slot="shell-sidebar-session-icon"] {
+  display: none;
+}
+
+/* Every selector below repeats the two-part column prefix on purpose: these
+   rules have to outrank the expanded-column rules of equal shape above, not
+   merely come later.
+
+   Below 150px the column is a rail. The threshold sits mid-animation, so the
+   content reshapes while the panel is already narrow: one tree reflowing, not
+   two layouts swapping. */
+@container (max-width: 150px) {
+  /* Column-only pieces: the brand mark, row labels, group headings, the empty
+     state and the search field have nowhere to go in a 56px rail. */
+  [data-component="shell-sidebar"] [data-slot="shell-sidebar-brand"],
+  [data-component="shell-sidebar"] [data-slot="shell-sidebar-group-label"],
+  [data-component="shell-sidebar"] [data-slot="shell-sidebar-empty"],
+  [data-component="shell-sidebar"] .shell-sidebar-expanded {
+    display: none;
+  }
+
+  [data-component="shell-sidebar"] [data-slot="shell-sidebar-label"] {
+    display: none;
+  }
+
+  [data-component="shell-sidebar"] [data-slot="shell-sidebar-session-icon"] {
+    display: flex;
+  }
+
+  [data-component="shell-sidebar"] [data-slot="shell-sidebar-header"] {
+    justify-content: center;
+  }
+
+  /* A row becomes a centered square: the same column, one icon per entry. */
+  [data-component="shell-sidebar"] .shell-sidebar-row {
+    width: 2rem;
+    height: 2rem;
+    margin-inline: auto;
+    justify-content: center;
+    gap: 0;
+    padding-inline: 0;
+  }
+
+  /* A rail has no room for a field, so it keeps the action row: the click opens
+     the column before the query has anywhere to land. */
+  [data-component="shell-sidebar"]
+    [data-slot="shell-sidebar-search"][data-searching]
+    [data-slot="shell-sidebar-action"] {
+    display: flex;
+  }
+
+  /* The state a full row spells out inline becomes a corner dot. */
+  [data-component="shell-sidebar"] [data-slot="shell-sidebar-state"] {
+    position: absolute;
+    top: 0.125rem;
+    inset-inline-end: 0.125rem;
+  }
+
+  /* The row's wrapper is the hover target and the box the revealed delete
+     action is positioned against. In the rail it shrinks with the row: left at
+     full width it would light up the rail's gutters as the pointer crossed
+     them, which is not where the row is. */
+  [data-component="shell-sidebar"] [data-slot="shell-sidebar-session-row"] {
+    width: 2rem;
+    margin-inline: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-component="shell-sidebar"] {
+    transition: none;
+  }
+}
+
+/* The v2 shell is a desktop surface; narrow windows keep the titlebar strip and
+   drop the column rather than squeeze the session view. */
+@media (max-width: 767px) {
+  [data-component="shell-sidebar"] {
+    display: none;
+  }
+}

@@ -10,6 +10,7 @@ import {
   Show,
   untrack,
   type Accessor,
+  type ComponentProps,
 } from "solid-js"
 import { makeEventListener } from "@solid-primitives/event-listener"
 import { useNavigate, useParams } from "@solidjs/router"
@@ -325,7 +326,6 @@ export default function LegacyLayout(props: ParentProps) {
   const navigateWithSidebarReset = (href: string) => {
     clearSidebarHoverState()
     navigate(href)
-    layout.mobileSidebar.hide()
   }
 
   function cycleTheme(direction = 1) {
@@ -897,13 +897,6 @@ export default function LegacyLayout(props: ParentProps) {
 
   command.register("layout", () => {
     const commands: CommandOption[] = [
-      {
-        id: "sidebar.toggle",
-        title: language.t("command.sidebar.toggle"),
-        category: language.t("command.category.view"),
-        keybind: "mod+b",
-        onSelect: () => layout.sidebar.toggle(),
-      },
       {
         id: "project.open",
         title: language.t("command.project.open"),
@@ -1509,7 +1502,6 @@ export default function LegacyLayout(props: ParentProps) {
           onClick: () => {
             const href = `/${base64Encode(directory)}/session`
             navigate(href)
-            layout.mobileSidebar.hide()
           },
         },
         {
@@ -1906,7 +1898,6 @@ export default function LegacyLayout(props: ParentProps) {
       setState("hoverProject", hoverOpen ? worktree : undefined)
     },
     navigateToProject,
-    openSidebar: () => layout.sidebar.open(),
     closeProject,
     showEditProjectDialog: (proj) => showEditProjectDialog(server.current!, proj),
     toggleProjectWorkspaces,
@@ -2218,21 +2209,39 @@ export default function LegacyLayout(props: ParentProps) {
             </div>
           </div>
         </div>
+
+        <div
+          data-component="sidebar-footer"
+          class="shrink-0 border-t border-border-weaker-base px-1 py-2 flex flex-col gap-0.5"
+        >
+          <SidebarFooterItem
+            icon="settings-gear"
+            label={language.t("sidebar.settings")}
+            keybind={command.keybind("settings.open")}
+            onSelect={() => openSettings()}
+          />
+          <SidebarFooterItem
+            icon="workspace"
+            label={language.t("desktop.menu.account")}
+            onSelect={() => openSettings("account")}
+          />
+          <SidebarFooterItem
+            icon="help"
+            label={language.t("sidebar.help")}
+            onSelect={() => platform.openExternal("https://opencode.ai/desktop-feedback")}
+          />
+        </div>
       </div>
     )
   }
 
   const projects = () => layout.projects.list()
   const projectOverlay = () => <ProjectDragOverlay projects={projects} activeProject={() => store.activeProject} />
-  const sidebarContent = (mobile?: boolean) => (
+  const sidebarContent = () => (
     <SidebarContent
-      mobile={mobile}
-      opened={() => layout.sidebar.opened()}
       aimMove={aim.move}
       projects={projects}
-      renderProject={(project) => (
-        <SortableProject ctx={projectSidebarCtx} project={project} sortNow={sortNow} mobile={mobile} />
-      )}
+      renderProject={(project) => <SortableProject ctx={projectSidebarCtx} project={project} sortNow={sortNow} />}
       handleDragStart={handleDragStart}
       handleDragEnd={handleDragEnd}
       handleDragOver={handleDragOver}
@@ -2240,14 +2249,7 @@ export default function LegacyLayout(props: ParentProps) {
       openProjectKeybind={() => command.keybind("project.open")}
       onOpenProject={chooseProject}
       renderProjectOverlay={projectOverlay}
-      settingsLabel={() => language.t("sidebar.settings")}
-      settingsKeybind={() => command.keybind("settings.open")}
-      onOpenSettings={openSettings}
-      helpLabel={() => language.t("sidebar.help")}
-      onOpenHelp={() => platform.openExternal("https://opencode.ai/desktop-feedback")}
-      renderPanel={() =>
-        mobile ? <SidebarPanel project={currentProject} mobile /> : <SidebarPanel project={currentProject} merged />
-      }
+      renderPanel={() => <SidebarPanel project={currentProject} />}
     />
   )
 
@@ -2272,7 +2274,7 @@ export default function LegacyLayout(props: ParentProps) {
               aria-label={language.t("sidebar.nav.projectsAndSessions")}
               data-component="sidebar-nav-desktop"
               classList={{
-                "hidden xl:block": true,
+                "block": true,
                 "absolute inset-y-0 start-0": true,
                 "z-10": true,
               }}
@@ -2295,7 +2297,7 @@ export default function LegacyLayout(props: ParentProps) {
 
             <Show when={layout.sidebar.opened()}>
               <div
-                class="hidden xl:block absolute inset-y-0 z-30 w-0 overflow-visible"
+                class="block absolute inset-y-0 z-30 w-0 overflow-visible"
                 style={{ "inset-inline-start": `${side()}px` }}
                 onPointerDown={() => setState("sizing", true)}
               >
@@ -2319,35 +2321,10 @@ export default function LegacyLayout(props: ParentProps) {
               style={{ "inset-inline-start": "calc(4rem + 12px)" }}
             />
 
-            <div class="xl:hidden">
-              <div
-                classList={{
-                  "fixed inset-x-0 top-10 bottom-0 z-40 transition-opacity duration-200": true,
-                  "opacity-100 pointer-events-auto": layout.mobileSidebar.opened(),
-                  "opacity-0 pointer-events-none": !layout.mobileSidebar.opened(),
-                }}
-                onClick={(e) => {
-                  if (e.target === e.currentTarget) layout.mobileSidebar.hide()
-                }}
-              />
-              <nav
-                aria-label={language.t("sidebar.nav.projectsAndSessions")}
-                data-component="sidebar-nav-mobile"
-                classList={{
-                  "@container fixed top-10 bottom-0 start-0 z-50 w-full max-w-[400px] overflow-hidden border-e border-border-weaker-base bg-background-base transition-transform duration-200 ease-out": true,
-                  "translate-x-0": layout.mobileSidebar.opened(),
-                  "ltr:-translate-x-full rtl:translate-x-full": !layout.mobileSidebar.opened(),
-                }}
-                onClick={(e) => e.stopPropagation()}
-              >
-                {sidebarContent(true)}
-              </nav>
-            </div>
-
             <div
               classList={{
                 "absolute inset-0": true,
-                "xl:inset-y-0 xl:end-0 xl:start-[var(--main-left)]": true,
+                "inset-y-0 end-0 start-[var(--main-left)]": true,
                 "z-20": true,
                 "transition-[inset-inline-start] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-[inset-inline-start] motion-reduce:transition-none":
                   !state.sizing,
@@ -2447,4 +2424,35 @@ function UpdateAvailableToast(props: {
   })
 
   return null
+}
+
+/**
+ * A labelled row at the bottom of the conversation sidebar.
+ *
+ * The panel's bottom is where a session list ends, so settings, the account and
+ * help sit here as rows rather than as bare icons in the rail: the rail keeps its
+ * icons only while the panel is collapsed.
+ */
+function SidebarFooterItem(props: {
+  icon: ComponentProps<typeof IconV2>["name"]
+  label: string
+  keybind?: string | undefined
+  onSelect: () => void
+}) {
+  return (
+    <button
+      type="button"
+      data-component="sidebar-footer-item"
+      class="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-14-regular text-text-base transition-colors hover:bg-surface-raised-base-hover focus-visible:bg-surface-raised-base-hover focus:outline-none"
+      onClick={props.onSelect}
+    >
+      <span class="flex size-5 shrink-0 items-center justify-center text-icon-weak">
+        <IconV2 name={props.icon} size="small" />
+      </span>
+      <span class="min-w-0 flex-1 truncate">{props.label}</span>
+      <Show when={props.keybind}>
+        <span class="shrink-0 text-11-medium text-icon-base">{props.keybind}</span>
+      </Show>
+    </button>
+  )
 }

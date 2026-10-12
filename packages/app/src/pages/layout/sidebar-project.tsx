@@ -6,7 +6,7 @@ import { ContextMenu } from "@opencode-ai/ui/context-menu"
 import { HoverCard } from "@opencode-ai/ui/hover-card"
 import { Icon } from "@opencode-ai/ui/icon"
 import { createSortable } from "@thisbeyond/solid-dnd"
-import { useLayout, type LocalProject } from "@/context/layout"
+import { type LocalProject } from "@/context/layout"
 import { useServerSync } from "@/context/server-sync"
 import { useLanguage } from "@/context/language"
 import { useNotification } from "@/context/notification"
@@ -24,7 +24,6 @@ export type ProjectSidebarContext = {
   onProjectFocus: (worktree: string) => void
   onHoverOpenChanged: (worktree: string, hovered: boolean) => void
   navigateToProject: (directory: string) => void
-  openSidebar: () => void
   closeProject: (directory: string) => void
   showEditProjectDialog: (project: LocalProject) => void
   toggleProjectWorkspaces: (project: LocalProject) => void
@@ -74,7 +73,6 @@ const ProjectTile = (props: {
   language: ReturnType<typeof useLanguage>
 }): JSX.Element => {
   const notification = useNotification()
-  const layout = useLayout()
   const unseenCount = createMemo(() =>
     props.dirs().reduce((total, directory) => total + notification.project.unseenCount(directory), 0),
   )
@@ -136,10 +134,7 @@ const ProjectTile = (props: {
         }}
         onClick={() => {
           props.setOpen(false)
-          if (props.selected()) {
-            layout.sidebar.toggle()
-            return
-          }
+          if (props.selected()) return
           props.navigateToProject(props.project.worktree)
         }}
         onBlur={() => props.setOpen(false)}
@@ -256,7 +251,6 @@ const ProjectPreviewPanel = (props: {
         variant="ghost"
         class="flex w-full text-left justify-start text-text-base px-2 hover:bg-transparent active:bg-transparent"
         onClick={() => {
-          props.ctx.openSidebar()
           props.ctx.onHoverOpenChanged(props.project.worktree, false)
           if (props.selected()) return
           props.ctx.navigateToProject(props.project.worktree)

@@ -1,4 +1,4 @@
-import { createEffect, createMemo, For, Show, type Accessor, type JSX } from "solid-js"
+import { For, Show, type Accessor, type JSX } from "solid-js"
 import {
   DragDropProvider,
   DragDropSensors,
@@ -9,12 +9,10 @@ import {
 } from "@thisbeyond/solid-dnd"
 import { ConstrainDragXAxis } from "@/utils/solid-dnd"
 import { IconButton } from "@opencode-ai/ui/icon-button"
-import { Tooltip, TooltipKeybind } from "@opencode-ai/ui/tooltip"
+import { Tooltip } from "@opencode-ai/ui/tooltip"
 import { type LocalProject } from "@/context/layout"
 
 export const SidebarContent = (props: {
-  mobile?: boolean
-  opened: Accessor<boolean>
   aimMove: (event: MouseEvent) => void
   projects: Accessor<LocalProject[]>
   renderProject: (project: LocalProject) => JSX.Element
@@ -25,26 +23,11 @@ export const SidebarContent = (props: {
   openProjectKeybind: Accessor<string | undefined>
   onOpenProject: () => void
   renderProjectOverlay: () => JSX.Element
-  settingsLabel: Accessor<string>
-  settingsKeybind: Accessor<string | undefined>
-  onOpenSettings: () => void
-  helpLabel: Accessor<string>
-  onOpenHelp: () => void
   renderPanel: () => JSX.Element
 }): JSX.Element => {
-  const expanded = createMemo(() => !!props.mobile || props.opened())
-  const placement = () => (props.mobile ? "bottom" : "right")
-  let panel: HTMLDivElement | undefined
-
-  createEffect(() => {
-    const el = panel
-    if (!el) return
-    if (expanded()) {
-      el.removeAttribute("inert")
-      return
-    }
-    el.setAttribute("inert", "")
-  })
+  // The sidebar is permanent: a project rail on the left of a session panel that
+  // is always expanded, so there is no collapsed variant to switch between.
+  const placement = () => "right" as const
 
   return (
     <div class="flex h-full w-full min-w-0 overflow-hidden">
@@ -71,7 +54,7 @@ export const SidebarContent = (props: {
                 value={
                   <div class="flex items-center gap-2">
                     <span>{props.openProjectLabel}</span>
-                    <Show when={!props.mobile && !!props.openProjectKeybind()}>
+                    <Show when={!!props.openProjectKeybind()}>
                       <span class="text-icon-base text-12-medium">{props.openProjectKeybind()}</span>
                     </Show>
                   </div>
@@ -89,37 +72,9 @@ export const SidebarContent = (props: {
             <DragOverlay>{props.renderProjectOverlay()}</DragOverlay>
           </DragDropProvider>
         </div>
-        <div class="shrink-0 w-full pt-3 pb-6 flex flex-col items-center gap-2">
-          <TooltipKeybind placement={placement()} title={props.settingsLabel()} keybind={props.settingsKeybind() ?? ""}>
-            <IconButton
-              icon="settings-gear"
-              variant="ghost"
-              size="large"
-              onClick={props.onOpenSettings}
-              aria-label={props.settingsLabel()}
-            />
-          </TooltipKeybind>
-          <Tooltip placement={placement()} value={props.helpLabel()}>
-            <IconButton
-              icon="help"
-              variant="ghost"
-              size="large"
-              onClick={props.onOpenHelp}
-              aria-label={props.helpLabel()}
-            />
-          </Tooltip>
-        </div>
       </div>
 
-      <div
-        ref={(el) => {
-          panel = el
-        }}
-        classList={{ "flex-1 flex h-full min-h-0 min-w-0 overflow-hidden": true, "pointer-events-none": !expanded() }}
-        aria-hidden={!expanded()}
-      >
-        {props.renderPanel()}
-      </div>
+      <div class="flex-1 flex h-full min-h-0 min-w-0 overflow-hidden">{props.renderPanel()}</div>
     </div>
   )
 }

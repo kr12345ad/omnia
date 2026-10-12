@@ -272,7 +272,9 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
       { ...target, migrate },
       createStore({
         sidebar: {
-          opened: false,
+          // The v2 shell's conversation column collapses to an icon rail. The
+          // legacy layout has no collapsed state, so the two never share a toggle.
+          collapsed: false,
           width: DEFAULT_SIDEBAR_WIDTH,
           workspaces: {} as Record<string, boolean>,
           workspacesDefault: false,
@@ -292,9 +294,6 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         },
         session: {
           width: DEFAULT_SESSION_WIDTH,
-        },
-        mobileSidebar: {
-          opened: false,
         },
         sessionTabs: {} as Record<string, SessionTabs>,
         sessionView: {} as Record<string, SessionView>,
@@ -660,15 +659,19 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         },
       },
       sidebar: {
-        opened: createMemo(() => store.sidebar.opened),
-        open() {
-          setStore("sidebar", "opened", true)
+        // The legacy layout keeps one state: its column is on screen at every
+        // width, so `opened` always reports true and `width` is the only
+        // preference it reads.
+        opened: () => true,
+        // The v2 shell replaces that with a column that collapses to a rail,
+        // toggled from the titlebar. Its own preference, so the two layouts never
+        // share a toggle.
+        collapsed: createMemo(() => store.sidebar.collapsed ?? false),
+        setCollapsed(collapsed: boolean) {
+          setStore("sidebar", "collapsed", collapsed)
         },
-        close() {
-          setStore("sidebar", "opened", false)
-        },
-        toggle() {
-          setStore("sidebar", "opened", (x) => !x)
+        toggleCollapsed() {
+          setStore("sidebar", "collapsed", (value) => !value)
         },
         width: createMemo(() => store.sidebar.width),
         resize(width: number) {
@@ -749,18 +752,6 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
             return
           }
           setStore("session", "width", width)
-        },
-      },
-      mobileSidebar: {
-        opened: createMemo(() => store.mobileSidebar?.opened ?? false),
-        show() {
-          setStore("mobileSidebar", "opened", true)
-        },
-        hide() {
-          setStore("mobileSidebar", "opened", false)
-        },
-        toggle() {
-          setStore("mobileSidebar", "opened", (x) => !x)
         },
       },
       pendingMessage: {

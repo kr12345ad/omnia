@@ -32,8 +32,12 @@ describe("tab migration", () => {
     expect(migrateTabs([{ type: "draft", draftID: "d1", server, directory: "/tmp" }], server)).toEqual([
       { type: "draft", draftID: "d1", server, directory: "/tmp", mode: "work" },
     ])
-    expect(migrateTabs([{ type: "draft", draftID: "d2", server, directory: "/tmp", mode: "code" }], server)).toEqual([
-      { type: "draft", draftID: "d2", server, directory: "/tmp", mode: "code" },
+    expect(migrateTabs([{ type: "draft", draftID: "d2", server, directory: "/tmp", mode: "chat" }], server)).toEqual([
+      { type: "draft", draftID: "d2", server, directory: "/tmp", mode: "chat" },
+    ])
+    // Drafts persisted before the mode was renamed still open in chat.
+    expect(migrateTabs([{ type: "draft", draftID: "d3", server, directory: "/tmp", mode: "code" }], server)).toEqual([
+      { type: "draft", draftID: "d3", server, directory: "/tmp", mode: "chat" },
     ])
   })
 })

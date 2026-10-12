@@ -11,11 +11,11 @@ import {
   untrack,
 } from "solid-js"
 import { createStore } from "solid-js/store"
-import { useLocation, useNavigate, useParams } from "@solidjs/router"
+import { useLocation, useNavigate } from "@solidjs/router"
 import { IconButton } from "@opencode-ai/ui/icon-button"
 import { Icon } from "@opencode-ai/ui/icon"
 import { Button } from "@opencode-ai/ui/button"
-import { Tooltip, TooltipKeybind } from "@opencode-ai/ui/tooltip"
+import { Tooltip } from "@opencode-ai/ui/tooltip"
 import { IconButtonV2 } from "@opencode-ai/ui/v2/icon-button-v2"
 import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
 import { KeybindV2 } from "@opencode-ai/ui/v2/keybind-v2"
@@ -74,7 +74,6 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
   const server = useServer()
   const navigate = useNavigate()
   const location = useLocation()
-  const params = useParams()
   const tabs = useTabs()
   const sync = useServerSync()
   const useV2Titlebar = createMemo(() => settings.general.newLayoutDesigns())
@@ -104,14 +103,6 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
   })
 
   const path = () => `${location.pathname}${location.search}${location.hash}`
-  const creating = createMemo(() => {
-    const route = layout.route()
-    if (route.type === "draft" || route.type === "dir-new-sesssion") return true
-    if (!params.dir) return false
-    if (params.id) return false
-    const parts = location.pathname.replace(/\/+$/, "").split("/")
-    return parts.at(-1) === "session"
-  })
   // A session or draft shows its fixed mode; home shows the next-session toggle.
   // Agent/Code is chosen at creation. A draft stays editable until its first
   // message is sent; a real session is locked to the mode it was created with.
@@ -347,18 +338,21 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
 
               tabs.newDraft({ server: fallback.server, directory: fallback.project.worktree }, "")
             }
-            const toggleHome = () => tabs.toggleHome({ home: layout.route().type === "home", current: currentTab() })
 
-            command.register("titlebar-home", () => [
-              {
-                id: "home.toggle",
-                title: language.t("home.title"),
-                category: language.t("command.category.view"),
-                keybind: "mod+b",
-                hidden: true,
-                onSelect: toggleHome,
-              },
-            ])
+            // The channel tag is gone from this shell, so the performance bar is
+            // reached from the palette (or its keybind) instead of a chip.
+            command.register("titlebar-debug", () => {
+              if (!props.debugTools) return []
+              return [
+                {
+                  id: "debug.tools",
+                  title: language.t("debugBar.ariaLabel"),
+                  category: language.t("command.category.view"),
+                  keybind: "mod+shift+d",
+                  onSelect: () => props.debugTools?.toggle(),
+                },
+              ]
+            })
 
             command.register("tabs", () => {
               const current = currentTab()
@@ -401,11 +395,33 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                   "pt-2": !bottom(),
                   "pb-2": bottom(),
                   "md:pl-2": macTrafficLights(),
-                  "md:pl-4": !macTrafficLights(),
+                  // 12px keeps the left cluster on the sidebar's own grid: the
+                  // reveal button below is one 32px square of the rail's column.
+                  "md:pl-3": !macTrafficLights(),
                 }}
               >
-                <Show when={!mac()}>
-                  <ChannelIndicator debugTools={props.debugTools} />
+                {/* The reveal control for the conversation column owns the
+                    window's top-left corner, so it never moves between the
+                    expanded column and the rail. The channel tag that used to
+                    sit here is gone from this shell; the palette command above
+                    still reaches the developer tools. */}
+                <Show when={!mobile()}>
+                  <TooltipV2 placement="bottom" value={language.t("sidebar.menu.toggle")} class="shrink-0">
+                    {/* One square of the sidebar's grid: 32px at x=12 in both
+                        states, its icon centred on the same 16px column as
+                        every row and the account avatar. */}
+                    <IconButtonV2
+                      type="button"
+                      variant="ghost-muted"
+                      size="large"
+                      class="!w-8 shrink-0"
+                      icon={<IconV2 name="sidebar-right" />}
+                      onClick={() => layout.sidebar.toggleCollapsed()}
+                      aria-label={language.t("sidebar.menu.toggle")}
+                      aria-expanded={!layout.sidebar.collapsed()}
+                      aria-controls="shell-sidebar-sessions"
+                    />
+                  </TooltipV2>
                 </Show>
                 <Show when={windows() || linux() || mac()}>
                   <WindowsAppMenu command={command} platform={platform} variant="v2" />
@@ -426,29 +442,6 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                     />
                   </TooltipV2>
                 </Show>
-                <TooltipV2
-                  placement="bottom"
-                  value={
-                    <>
-                      {language.t("home.title")}
-                      <KeybindV2 keys={command.keybindParts("home.toggle")} variant="neutral" />
-                    </>
-                  }
-                  class="shrink-0"
-                >
-                  <IconButtonV2
-                    type="button"
-                    variant="ghost-muted"
-                    size="large"
-                    class="!w-9 shrink-0"
-                    icon={<IconV2 name="grid-plus" />}
-                    state={layout.route().type === "home" ? "pressed" : undefined}
-                    onClick={toggleHome}
-                    aria-label={language.t("home.title")}
-                    aria-pressed={layout.route().type === "home"}
-                  />
-                </TooltipV2>
-
                 <TitlebarTabStrip
                   tabs={tabsStore}
                   currentTab={currentTab}
@@ -504,92 +497,9 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                 <WindowsAppMenu command={command} platform={platform} />
                 <ModeToggle mode={activeMode().mode} fixed={activeMode().fixed} onSelect={selectMode} />
               </Show>
-              <Show when={mac()}>
-                <div class="w-10 shrink-0 flex items-center justify-center">
-                  <IconButton
-                    icon="menu"
-                    variant="ghost"
-                    class="titlebar-icon rounded-md"
-                    onClick={layout.mobileSidebar.toggle}
-                    aria-label={language.t("sidebar.menu.toggle")}
-                    aria-expanded={layout.mobileSidebar.opened()}
-                  />
-                </div>
-              </Show>
-              <Show when={!mac()}>
-                <div class="xl:hidden w-[48px] shrink-0 flex items-center justify-center">
-                  <IconButton
-                    icon="menu"
-                    variant="ghost"
-                    class="titlebar-icon rounded-md"
-                    onClick={layout.mobileSidebar.toggle}
-                    aria-label={language.t("sidebar.menu.toggle")}
-                    aria-expanded={layout.mobileSidebar.opened()}
-                  />
-                </div>
-              </Show>
               <div class="flex items-center gap-1 shrink-0">
-                <TooltipKeybind
-                  class={web() ? "hidden xl:flex shrink-0 ml-14" : "hidden xl:flex shrink-0 ml-2"}
-                  placement="bottom"
-                  title={language.t("command.sidebar.toggle")}
-                  keybind={command.keybind("sidebar.toggle")}
-                >
-                  <Button
-                    variant="ghost"
-                    class="group/sidebar-toggle titlebar-icon w-8 h-6 p-0 box-border"
-                    onClick={layout.sidebar.toggle}
-                    aria-label={language.t("command.sidebar.toggle")}
-                    aria-expanded={layout.sidebar.opened()}
-                  >
-                    <Icon size="small" name={layout.sidebar.opened() ? "sidebar-active" : "sidebar"} />
-                  </Button>
-                </TooltipKeybind>
-                <div class="hidden xl:flex items-center shrink-0">
-                  <Show when={params.dir}>
-                    <div
-                      class="flex items-center shrink-0 w-8 mr-1"
-                      aria-hidden={layout.sidebar.opened() ? "true" : undefined}
-                    >
-                      <div
-                        class="transition-opacity"
-                        classList={{
-                          "opacity-100 duration-120 ease-out": !layout.sidebar.opened(),
-                          "opacity-0 duration-120 ease-in delay-0 pointer-events-none": layout.sidebar.opened(),
-                        }}
-                      >
-                        <TooltipKeybind
-                          placement="bottom"
-                          title={language.t("command.session.new")}
-                          keybind={command.keybind("session.new")}
-                          openDelay={800}
-                        >
-                          <Button
-                            variant="ghost"
-                            class="titlebar-icon w-8 h-6 p-0 box-border"
-                            disabled={layout.sidebar.opened()}
-                            tabIndex={layout.sidebar.opened() ? -1 : undefined}
-                            onClick={() => {
-                              if (!params.dir) return
-                              navigate(`/${params.dir}/session`)
-                            }}
-                            aria-label={language.t("command.session.new")}
-                            aria-current={creating() ? "page" : undefined}
-                          >
-                            <IconV2 name="edit" size="small" />
-                          </Button>
-                        </TooltipKeybind>
-                      </div>
-                    </div>
-                  </Show>
-                  <div
-                    class="flex items-center shrink-0"
-                    classList={{
-                      "ltr:-translate-x-[36px] rtl:translate-x-[36px]": layout.sidebar.opened() && !!params.dir,
-                      "duration-180 ease-out": !layout.sidebar.opened(),
-                      "duration-180 ease-in": layout.sidebar.opened(),
-                    }}
-                  >
+                <div class="flex items-center shrink-0">
+                  <div class="flex items-center shrink-0">
                     <Show when={hasProjects() && nav()}>
                       <div class="flex items-center gap-0 transition-transform">
                         <Tooltip placement="bottom" value={language.t("common.goBack")} openDelay={800}>

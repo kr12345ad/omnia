@@ -11,10 +11,10 @@ const sessionCreateInputs: Array<{
   agent?: string
   model?: { id: string; providerID: string; variant?: string }
   location?: { directory: string }
-  mode?: "work" | "code"
+  mode?: "work" | "chat"
 }> = []
-const draftTabs: Array<{ type: "draft"; draftID: string; mode: "work" | "code"; server: string }> = []
-const rememberedSessionModes: Array<{ sessionID: string; mode: "work" | "code" }> = []
+const draftTabs: Array<{ type: "draft"; draftID: string; mode: "work" | "chat"; server: string }> = []
+const rememberedSessionModes: Array<{ sessionID: string; mode: "work" | "chat" }> = []
 const enabledAutoAccept: Array<{ server: string; sessionID: string; directory: string }> = []
 const optimistic: Array<{
   directory?: string
@@ -191,7 +191,7 @@ beforeAll(async () => {
         mode: () => "work",
         sessionModes: {
           get: () => undefined,
-          remember: (sessionID: string, mode: "work" | "code") => {
+          remember: (sessionID: string, mode: "work" | "chat") => {
             rememberedSessionModes.push({ sessionID, mode })
           },
         },
@@ -476,7 +476,7 @@ describe("prompt submit worktree selection", () => {
 
   test("stamps the draft's fixed mode on the created session", async () => {
     search = { draftId: "draft-1" }
-    draftTabs.push({ type: "draft", draftID: "draft-1", mode: "code", server: "project-server" })
+    draftTabs.push({ type: "draft", draftID: "draft-1", mode: "chat", server: "project-server" })
     const submit = createPromptSubmit({
       prompt,
       info: () => undefined,
@@ -500,8 +500,8 @@ describe("prompt submit worktree selection", () => {
     await submit.handleSubmit({ preventDefault: () => undefined } as unknown as Event)
 
     // The draft's mode wins over the toggle's "work" selection.
-    expect(sessionCreateInputs[0]?.mode).toBe("code")
-    expect(rememberedSessionModes).toEqual([{ sessionID: "session-1", mode: "code" }])
+    expect(sessionCreateInputs[0]?.mode).toBe("chat")
+    expect(rememberedSessionModes).toEqual([{ sessionID: "session-1", mode: "chat" }])
   })
 
   test("includes the selected variant on optimistic prompts", async () => {

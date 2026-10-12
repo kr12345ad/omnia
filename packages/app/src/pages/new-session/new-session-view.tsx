@@ -1,12 +1,15 @@
 import { useDialog } from "@opencode-ai/ui/context/dialog"
+import { Icon } from "@opencode-ai/ui/icon"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
+import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2"
 import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
 import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
 import { WordmarkV2 } from "@opencode-ai/ui/v2/wordmark-v2"
-import { Show, createMemo, createSignal, type Accessor } from "solid-js"
+import { For, Show, createMemo, createResource, createSignal, type Accessor } from "solid-js"
 import { createStore } from "solid-js/store"
 import { Portal } from "solid-js/web"
 import createPresence from "solid-presence"
+import { DialogNewDiscussion } from "@/components/dialog-new-discussion"
 import { PromptInputV2Composer } from "@/components/prompt-input-v2"
 import { PromptGitStatus, PromptWorkspaceSelector } from "@/components/prompt-workspace-selector"
 import {
@@ -14,8 +17,11 @@ import {
   PromptProjectSelector,
   type PromptProjectController,
 } from "@/components/prompt-project-selector"
+import { useSettingsDialog } from "@/components/settings-dialog"
 import { StatusPopoverV2 } from "@/components/status-popover"
 import { useLanguage } from "@/context/language"
+import { usePlatform } from "@/context/platform"
+import { usePrompt } from "@/context/prompt"
 import { useSDK } from "@/context/sdk"
 import { useServerSync } from "@/context/server-sync"
 import { useProviders } from "@/hooks/use-providers"
@@ -26,22 +32,95 @@ import type { NewSessionWorkspaceController } from "./new-session-workspace-cont
 
 const providerTipDismissalDuration = 30 * 24 * 60 * 60 * 1000
 
+const QUICK_ACTIONS = [
+  { id: "discussion", icon: "speech-bubble", labelKey: "work.home.discussion" },
+  { id: "research", icon: "magnifying-glass-menu", labelKey: "work.home.action.research", promptKey: "work.home.action.research.prompt", values: { topic: "[topic]" } },
+  { id: "files", icon: "file-tree", labelKey: "work.home.action.files", promptKey: "work.home.action.files.prompt", values: { path: "[folder]" } },
+  { id: "spreadsheet", icon: "bullet-list", labelKey: "work.home.action.spreadsheet", promptKey: "work.home.action.spreadsheet.prompt", values: { path: "[spreadsheet]" } },
+  { id: "application", icon: "window-cursor", labelKey: "work.home.action.application", promptKey: "work.home.action.application.prompt", values: { app: "[application]" } },
+  { id: "browser", icon: "square-arrow-top-right", labelKey: "work.home.action.browser", promptKey: "work.home.action.browser.prompt", values: { url: "[url]" } },
+  { id: "agent", icon: "subagent", labelKey: "work.home.action.agent", promptKey: "work.home.action.agent.prompt", values: { purpose: "[purpose]" } },
+  { id: "superskill", icon: "dot-grid", labelKey: "work.home.action.superskill", promptKey: "work.home.action.superskill.prompt", values: { app: "[application]" } },
+] as const
+
+// Flat, like the prompt box above them: the same surface as the v2 input, with no
+// gradient or card outline, so the actions read as part of the page they sit on.
+const TILE_SURFACE = "bg-v2-background-bg-base transition-colors hover:bg-v2-overlay-simple-overlay-hover"
+
 export function NewSessionView(props: {
   input: NewSessionDraftController["input"]
   project: PromptProjectController
   workspace: NewSessionWorkspaceController
 }) {
+  const language = useLanguage()
+  const platform = usePlatform()
+  const prompt = usePrompt()
+  const dialog = useDialog()
+  const openSettings = useSettingsDialog("superskills")
+
+  const [superskills] = createResource(async () => {
+    if (!platform.superskills) return undefined
+    return platform.superskills.list().catch(() => undefined)
+  })
+
+  // A quick action fills the box the user is already looking at rather than
+  // opening a second draft: the click is a starting point they can edit and send.
+  const start = (action: (typeof QUICK_ACTIONS)[number]) => {
+    if (action.id === "discussion") {
+      void dialog.show(() => <DialogNewDiscussion />)
+      return
+    }
+    if (!("promptKey" in action)) return
+    const text = language.t(action.promptKey, "values" in action ? action.values : undefined)
+    prompt.set([{ type: "text", content: text, start: 0, end: text.length }], text.length)
+    props.input.restoreFocus()
+  }
+
   return (
     <div class="@container relative flex flex-col min-h-0 h-full flex-1">
       <div
         data-component="session-new-design"
         class="relative flex-1 min-h-0 overflow-hidden rounded-[10px] bg-v2-background-bg-deep"
       >
-        <div class="absolute inset-x-0 top-[25.375%] flex justify-center px-6">
+        <div class="absolute inset-x-0 bottom-0 top-[25.375%] flex justify-center overflow-y-auto px-6 pb-8 no-scrollbar">
           <div class={NEW_SESSION_CONTENT_WIDTH}>
             <WordmarkV2 class="h-auto w-full text-v2-background-bg-inverse" />
-            <div class="mt-8 flex flex-col gap-8">
+            <div class="mt-8 flex flex-col gap-6">
               <PromptInputV2Composer controller={props.input} />
+              <div class="grid grid-cols-2 gap-2 md:grid-cols-3 lg:grid-cols-4">
+                <For each={QUICK_ACTIONS}>
+                  {(action, index) => (
+                    <button
+                      type="button"
+                      data-component="new-session-quick-action"
+                      data-action={action.id}
+                      class={`anim-rise home-qa-card group flex h-9 items-center gap-2.5 rounded-lg px-3 text-left ${TILE_SURFACE}`}
+                      style={{ "animation-delay": `${Math.min(index(), 7) * 45}ms` }}
+                      onClick={() => start(action)}
+                    >
+                      <Icon name={action.icon} size="small" class="shrink-0 text-v2-icon-icon-muted" />
+                      <span class="min-w-0 truncate text-[13px] font-[530] text-v2-text-text-base">
+                        {language.t(action.labelKey)}
+                      </span>
+                    </button>
+                  )}
+                </For>
+              </div>
+              <div
+                data-component="new-session-superskills"
+                class={`flex h-9 items-center gap-3 rounded-lg px-3 ${TILE_SURFACE}`}
+              >
+                <Icon name="dot-grid" size="small" class="shrink-0 text-v2-icon-icon-muted" />
+                <span class="min-w-0 flex-1 truncate text-[13px] text-v2-text-text-muted">
+                  {language.t("work.home.superskills")}
+                </span>
+                <span class="text-[13px] font-[530] text-v2-text-text-base">
+                  {superskills() === undefined ? "—" : superskills()!.length}
+                </span>
+                <ButtonV2 variant="neutral" size="small" onClick={openSettings}>
+                  {language.t("work.home.superskills.manage")}
+                </ButtonV2>
+              </div>
               <Show when={props.project.empty()}>
                 <PromptProjectAddButton controller={props.project} />
               </Show>
