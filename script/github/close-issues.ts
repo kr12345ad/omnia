@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 
-const repo = "anomalyco/opencode"
+// Same as close-prs: the workflow targets the repository it runs in, so a copy
+// of the repo cannot be drowned by 403s from writing to upstream.
+const repo = process.env.GITHUB_REPOSITORY ?? "anomalyco/opencode"
 const days = 60
 const msg = `To stay organized issues are automatically closed after ${days} days of no activity. If the issue is still relevant please open a new one.`
 

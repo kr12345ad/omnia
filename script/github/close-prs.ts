@@ -2,7 +2,10 @@
 
 import { parseArgs } from "util"
 
-const defaultRepo = "anomalyco/opencode"
+// The workflow passes no --repo, so the cleanup follows the repository that is
+// running it and never tries to write to upstream with a token scoped to a
+// single copy of the repo.
+const defaultRepo = process.env.GITHUB_REPOSITORY ?? "anomalyco/opencode"
 const defaultAgeMonths = 1
 const defaultThreshold = 2
 const defaultSleepMs = 20_000
