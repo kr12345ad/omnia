@@ -4,7 +4,7 @@ import { homedir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { redactText } from "../security/redaction"
 
-export const CREDENTIAL_KINDS = ["password", "username_password", "token"] as const
+export const CREDENTIAL_KINDS = ["password", "username_password", "token", "chat_platform"] as const
 
 export type CredentialKind = (typeof CREDENTIAL_KINDS)[number]
 
@@ -26,6 +26,7 @@ export interface ComputerCredential {
   readonly secret: string
   readonly rules: readonly CredentialRule[]
   readonly description?: string
+  readonly metadata?: Readonly<Record<string, string>>
   readonly enabled: boolean
   readonly createdAt: number
   readonly updatedAt: number
@@ -42,6 +43,7 @@ export interface CredentialInput {
   readonly secret?: string
   readonly rules?: readonly CredentialRule[]
   readonly description?: string
+  readonly metadata?: Readonly<Record<string, string>>
   readonly enabled?: boolean
 }
 
@@ -101,12 +103,12 @@ export function credentialEnv(credential: ComputerCredential): Record<string, st
 export function redactSecrets(text: string, secrets: readonly string[]): string {
   let value = text
   for (const secret of secrets) {
-    // Short secrets must be redacted too; only an empty string is skipped
-    // because splitting on it would corrupt the text.
     if (secret.length === 0) continue
     value = value.split(secret).join("[redacted]")
   }
-  return redactText(value, { replacement: "[redacted]" })
+  // Pattern-based redaction catches Bearer/Basic tokens, JWTs, keys, etc.
+  // that the naive split above would miss.
+  return redactText(value, { replacement: "[redacted]", keys: [...secrets] })
 }
 
 // Matching is word-bounded so a short rule such as "rm" or "gh" cannot inject
@@ -209,6 +211,9 @@ function parseCredential(value: unknown): ComputerCredential | undefined {
     secret: record.secret,
     rules,
     ...(typeof record.description === "string" ? { description: record.description } : {}),
+    ...(typeof record.metadata === "object" && record.metadata !== null
+        ? { metadata: record.metadata as Record<string, string> }
+        : {}),
     enabled: record.enabled !== false,
     createdAt: typeof record.createdAt === "number" ? record.createdAt : Date.now(),
     updatedAt: typeof record.updatedAt === "number" ? record.updatedAt : Date.now(),
@@ -300,12 +305,10 @@ export class CredentialStore {
     // for one machine can be spent by any other. Wildcards stay inert unless
     // the operator explicitly opts in.
     const wildcard = process.env.OMNIA_ALLOW_WILDCARD_CREDENTIALS === "1"
-    return this.credentials.filter(
-      (credential) =>
-        computerId === undefined ||
-        credential.computerId === computerId ||
-        (wildcard && credential.computerId === "*"),
-    )
+    return this.credentials.filter((credential) => {
+      if (credential.computerId === "*") return wildcard
+      return computerId === undefined || credential.computerId === computerId
+    })
   }
 
   summaries(computerId?: string): readonly ComputerCredentialSummary[] {
@@ -321,6 +324,7 @@ export class CredentialStore {
     const timestamp = this.now()
     const username = input.username ?? existing?.username
     const description = input.description ?? existing?.description
+    const metadata = input.metadata ?? existing?.metadata
     const credential: ComputerCredential = {
       id: existing?.id ?? randomUUID(),
       computerId: input.computerId,
@@ -330,6 +334,7 @@ export class CredentialStore {
       secret: input.secret ?? existing?.secret ?? "",
       rules: input.rules ?? existing?.rules ?? [],
       ...(description === undefined ? {} : { description }),
+      ...(metadata === undefined ? {} : { metadata }),
       enabled: input.enabled ?? existing?.enabled ?? true,
       createdAt: existing?.createdAt ?? timestamp,
       updatedAt: timestamp,

@@ -31,6 +31,7 @@ import {
   setDefaultServerUrl,
   spawnLocalServer,
   type SidecarListener,
+  type SpawnLocalServerOptions,
 } from "./server"
 import { setupAutoUpdater, showUpdaterDialog } from "./updater"
 import { safeWebContentsURL } from "./window-state"
@@ -58,6 +59,8 @@ import {
   setRemoteBrowserHandler,
 } from "./omnia/remote-agent"
 import { registerWslIpcHandlers } from "./wsl/ipc"
+import { controlPlaneFingerprint } from "./omnia/control-plane"
+import { watchControlPlaneSession, type ControlPlaneSessionWatch } from "./omnia/control-plane-session"
 import { spawnWslSidecar } from "./wsl/sidecar"
 import { migrate } from "./migrate"
 import { cleanupStoreFiles } from "./store-cleanup"
@@ -80,6 +83,24 @@ const jsCallStackFeature = "DocumentPolicyIncludeJSCallStacksInCrashReports"
 
 let logger: ReturnType<typeof initLogging>
 let server: SidecarListener | null = null
+let sidecarTarget: SidecarTarget | null = null
+let controlPlaneSession: ControlPlaneSessionWatch | null = null
+
+// The sidecar is forked with the control-plane credentials the Omnia computer
+// tools need (see createSidecarEnv) and nothing re-reads them, so a sign-in that
+// lands while the app is already running has to re-fork it. The restart reuses
+// the same port and password so the renderer keeps the ServerReadyData it
+// resolved, and the reload is what makes its event stream reconnect to the new
+// process.
+const CONTROL_PLANE_SESSION_POLL_MS = 5_000
+const SIDECAR_RESTART_HEALTH_TIMEOUT_MS = 30_000
+
+type SidecarTarget = {
+  hostname: string
+  port: number
+  password: string
+  options: SpawnLocalServerOptions
+}
 
 const pendingDeepLinks: string[] = []
 
@@ -106,6 +127,22 @@ async function killSidecar() {
   // retried instead of leaking the child process.
   await current.stop()
   server = null
+}
+
+async function restartSidecar() {
+  const target = sidecarTarget
+  if (target === null) return
+  logger.log("restarting sidecar for the control-plane session", { port: target.port })
+  const previous = server
+  server = null
+  await previous?.stop()
+  const { listener, health } = await spawnLocalServer(target.hostname, target.port, target.password, target.options)
+  server = listener
+  await Promise.race([
+    health.wait.catch((error) => logger.error("restarted sidecar never became healthy", error)),
+    new Promise((resolve) => setTimeout(resolve, SIDECAR_RESTART_HEALTH_TIMEOUT_MS)),
+  ])
+  for (const window of BrowserWindow.getAllWindows()) window.reload()
 }
 
 function ensureLoopbackNoProxy() {
@@ -185,6 +222,10 @@ const main = Effect.gen(function* () {
   // unhandled rejection instead of the intended shutdown.
   const stopSidecars = async () => {
     try {
+      controlPlaneSession?.stop()
+      controlPlaneSession = null
+      // A tick must never re-fork the sidecar while the app is shutting down.
+      sidecarTarget = null
       await killSidecar()
       wslServers.stopAll()
     } catch (error) {
@@ -221,6 +262,26 @@ const main = Effect.gen(function* () {
   app.commandLine.appendSwitch("disable-background-timer-throttling")
   app.commandLine.appendSwitch("disable-backgrounding-occluded-windows")
   app.commandLine.appendSwitch("disable-ipc-flooding-protection")
+  // macOS composites the window through the GPU, but Chromium can still have the
+  // machine's GPU on its blocklist and raster every layer on the CPU: on a Retina
+  // display that turns each animation (a full-width surface like the sidebar's
+  // collapse included) into hand-painted full-screen work, which is what makes
+  // them stutter. Ignore the blocklist and keep rasterization on the GPU.
+  if (process.platform === "darwin") {
+    app.commandLine.appendSwitch("ignore-gpu-blocklist")
+    app.commandLine.appendSwitch("enable-gpu-rasterization")
+    // Which renderer this machine actually got belongs in the log: a machine that
+    // fell back to software raster has to be visible there, not guessed at.
+    app.on("gpu-info-update", () => {
+      const status = app.getGPUFeatureStatus()
+      logger.log("gpu feature status", {
+        gpu_compositing: status.gpu_compositing,
+        rasterization: status.rasterization,
+        "2d_canvas": status["2d_canvas"],
+        webgl: status.webgl,
+      })
+    })
+  }
   // Chromium's background services (component updater, domain reliability,
   // metrics) are pure startup noise for a locally hosted desktop app.
   app.commandLine.appendSwitch("disable-background-networking")
@@ -449,15 +510,21 @@ const main = Effect.gen(function* () {
     const password = randomUUID()
 
     logger.log("spawning sidecar", { url })
-    const { listener, health } = yield* Effect.promise(() =>
-      spawnLocalServer(hostname, port, password, {
-        userDataPath: app.getPath("userData"),
-        onStdout: (message) => writeLog("server", "stdout", { message }),
-        onStderr: (message) => writeLog("server", "stderr", { message }, "warn"),
-        onExit: (code) => writeLog("utility", "sidecar exited", { code }, "warn"),
-      }),
-    )
+    const options = {
+      userDataPath: app.getPath("userData"),
+      onStdout: (message: string) => writeLog("server", "stdout", { message }),
+      onStderr: (message: string) => writeLog("server", "stderr", { message }, "warn"),
+      onExit: (code: number) => writeLog("utility", "sidecar exited", { code }, "warn"),
+    }
+    const { listener, health } = yield* Effect.promise(() => spawnLocalServer(hostname, port, password, options))
     server = listener
+    sidecarTarget = { hostname, port, password, options }
+    controlPlaneSession = watchControlPlaneSession({
+      fingerprint: controlPlaneFingerprint,
+      restart: restartSidecar,
+      intervalMs: CONTROL_PLANE_SESSION_POLL_MS,
+      onError: (error) => logger.error("failed to restart the sidecar after the control-plane session changed", error),
+    })
     yield* Deferred.succeed(serverReady, {
       url,
       username: "opencode",

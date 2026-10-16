@@ -52,6 +52,7 @@ export type Capability =
   | "sso"
   | "self_hosted"
   | "custom_specialists"
+  | "chat_channels"
 
 export interface CapabilityRule {
   /** `hard` means the request is refused once the limit is spent. */
@@ -106,6 +107,7 @@ const BUSINESS: Readonly<Record<Capability, CapabilityRule>> = {
   sso: UNLIMITED,
   self_hosted: NEVER,
   custom_specialists: UNLIMITED,
+  chat_channels: UNLIMITED,
 }
 
 /**
@@ -166,6 +168,9 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
       // Free keeps the four built-in discussion specialists; renaming and
       // refocusing them is what Pro adds.
       custom_specialists: NEVER,
+      // Chat channels (Slack/Telegram/Teams/Google Chat) are a Pro capability.
+      // Free users see the Accounts tab with an upgrade CTA only.
+      chat_channels: NEVER,
     },
   },
   pro: {
@@ -195,6 +200,7 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
       sso: NEVER,
       self_hosted: NEVER,
       custom_specialists: UNLIMITED,
+      chat_channels: UNLIMITED,
     },
   },
   business: {

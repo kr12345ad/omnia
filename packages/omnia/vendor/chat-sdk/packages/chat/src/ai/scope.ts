@@ -1,0 +1,106 @@
+import { activeConversation, inHandler } from "../context";
+import type { ChatBinding } from "./types";
+
+/**
+ * The conversation a toolset is confined to. Pass the `Thread` or
+ * `Channel` the agent is running in, or a raw thread/channel id.
+ */
+export type ReadScope = string | { id: string };
+
+export type ScopeGuard = (id: string) => void;
+
+function channelOf(chat: ChatBinding, id: string): string {
+  const prefix = id.split(":")[0];
+  const adapter = prefix ? chat.getAdapter(prefix) : undefined;
+  return (
+    adapter?.channelIdFromThreadId?.(id) ?? id.split(":").slice(0, 2).join(":")
+  );
+}
+
+/**
+ * Build the guard tools call before touching the platform. Read tools and
+ * thread/channel-targeting write tools both run it on their target id.
+ *
+ * The scope resolves per call: an explicit one wins, and a toolset built
+ * without one inherits the conversation currently being handled. Returns
+ * `undefined` only when the caller opted out with `scope: false`.
+ *
+ * By default a call is allowed when it resolves to the same channel as the
+ * scoped conversation, so a thread scope still permits sibling threads in its
+ * channel. Pass `strict` to confine a thread scope to that thread alone,
+ * rejecting sibling threads and the parent channel; a channel scope is
+ * unaffected and still allows any thread within it.
+ *
+ * When no scope resolves inside a handler that has no conversation (an action
+ * in App Home or inside a modal, options load, a modal opened outside a
+ * thread), tools reject the call.
+ * Outside any handler (e.g. a cron job or queued work), tools run
+ * workspace-wide but warn once.
+ */
+export function createScopeGuard(
+  chat: ChatBinding,
+  scope: ReadScope | false | undefined,
+  strict = false
+): ScopeGuard | undefined {
+  if (scope === false) {
+    return;
+  }
+
+  let explicit: string | undefined;
+  let explicitChannel: string | undefined;
+  if (scope !== undefined) {
+    explicit = typeof scope === "string" ? scope : scope.id;
+    if (!explicit) {
+      throw new Error(
+        "Invalid tool scope: `scope` is an empty id. Pass a thread or channel id, or `scope: false` to allow workspace-wide access."
+      );
+    }
+  }
+
+  let warnedUnscoped = false;
+
+  return (id: string) => {
+    const active = explicit ?? activeConversation();
+    if (!active) {
+      if (inHandler()) {
+        throw new Error(
+          "Tool call blocked: no conversation scope is available in this handler. Set `scope` to a thread or channel, or `scope: false` to allow workspace-wide access."
+        );
+      }
+      if (!warnedUnscoped) {
+        warnedUnscoped = true;
+        chat
+          .getLogger()
+          .warn(
+            `Agent tool ran unscoped: "${id}" was accessed workspace-wide because no conversation is being handled and no \`scope\` was set. Pass \`scope\` to confine tools.`
+          );
+      }
+      return;
+    }
+
+    let activeChannel: string;
+    if (explicit) {
+      explicitChannel ??= channelOf(chat, explicit);
+      activeChannel = explicitChannel;
+    } else {
+      activeChannel = channelOf(chat, active);
+    }
+    const targetChannel = channelOf(chat, id);
+
+    // Same channel is always required. Under strict a thread scope additionally
+    // requires the exact scoped conversation, so both sibling threads and the
+    // parent channel are rejected: on per-thread-ACL platforms the channel is
+    // the widest surface available (a GitHub channel is the whole repo), so
+    // allowing it would defeat the point of confining to one thread. A channel
+    // scope is unaffected and still permits anything within it.
+    const sameChannel = targetChannel === activeChannel;
+    const scopeIsChannel = active === activeChannel;
+    const inScope = sameChannel && (!strict || scopeIsChannel || id === active);
+
+    if (!inScope) {
+      throw new Error(
+        `Tool call blocked: tools are scoped to "${active}", but "${id}" resolves outside it.`
+      );
+    }
+  };
+}

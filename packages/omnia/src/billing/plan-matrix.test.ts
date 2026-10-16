@@ -73,6 +73,7 @@ const FREE_MATRIX = {
   sso: { limit: 0, metering: "hard" },
   self_hosted: { limit: 0, metering: "hard" },
   custom_specialists: { limit: 0, metering: "hard" },
+  chat_channels: { limit: 0, metering: "hard" },
 } satisfies Record<Capability, Row>
 
 /** The same contract for the paid plan sold by self-service checkout. */
@@ -96,6 +97,7 @@ const PRO_MATRIX = {
   sso: { limit: 0, metering: "hard" },
   self_hosted: { limit: 0, metering: "hard" },
   custom_specialists: { limit: UNLIMITED, metering: "soft" },
+  chat_channels: { limit: UNLIMITED, metering: "soft" },
 } satisfies Record<Capability, Row>
 
 const COMPUTERS: Readonly<Record<PlanId, number>> = { free: 3, pro: 5, business: Number.POSITIVE_INFINITY, enterprise: Number.POSITIVE_INFINITY }

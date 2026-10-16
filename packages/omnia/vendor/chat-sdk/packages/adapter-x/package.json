@@ -1,0 +1,90 @@
+{
+  "name": "@chat-adapter/x",
+  "version": "4.42.0",
+  "description": "X (Twitter) adapter for Chat SDK: reply to mentions, send direct messages, and post from your bot account with the X API v2, plus encrypted XChat conversations from the @chat-adapter/x/chat subpath",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./chat": {
+      "types": "./dist/chat/index.d.ts",
+      "import": "./dist/chat/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@chat-adapter/shared": "workspace:*",
+    "chat": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.2",
+    "@xdevplatform/chat-xdk": "^0.4.3",
+    "@xdevplatform/xdk": "^0.6.6",
+    "juicebox-sdk": "^0.3.6",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vercel/chat.git",
+    "directory": "packages/adapter-x"
+  },
+  "homepage": "https://chat-sdk.dev/adapters/official/x",
+  "bugs": {
+    "url": "https://github.com/vercel/chat/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "chat",
+    "chat-sdk",
+    "chatbot",
+    "x",
+    "twitter",
+    "x-api",
+    "bot",
+    "adapter",
+    "messaging",
+    "ai-agent",
+    "ai-sdk",
+    "vercel",
+    "xchat"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@xdevplatform/chat-xdk": "^0.4.3",
+    "@xdevplatform/xdk": "^0.6.6",
+    "juicebox-sdk": "^0.3.6"
+  },
+  "peerDependenciesMeta": {
+    "@xdevplatform/chat-xdk": {
+      "optional": true
+    },
+    "@xdevplatform/xdk": {
+      "optional": true
+    },
+    "juicebox-sdk": {
+      "optional": true
+    }
+  }
+}

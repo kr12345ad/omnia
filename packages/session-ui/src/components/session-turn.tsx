@@ -428,6 +428,7 @@ export function SessionTurn(
                       class="session-turn-thinking-heading"
                       travel={25}
                       duration={700}
+                      swapHold={900}
                     />
                   </Show>
                 </div>

@@ -140,7 +140,13 @@ function TimelineThinkingRow(props: { reasoningHeading?: string; showReasoningSu
       <ThinkingAnimation />
       <TextShimmer text={language.t("ui.sessionTurn.status.thinking")} />
       <Show when={!props.showReasoningSummaries}>
-        <TextReveal text={props.reasoningHeading} class="session-turn-thinking-heading" travel={25} duration={700} />
+        <TextReveal
+          text={props.reasoningHeading}
+          class="session-turn-thinking-heading"
+          travel={25}
+          duration={700}
+          swapHold={900}
+        />
       </Show>
     </div>
   )
@@ -258,7 +264,6 @@ export function MessageTimeline(props: {
   anchor: (id: string) => string
   setRevealMessage?: (fn: (id: string) => void) => void
   setScrollToEnd?: (fn: () => void) => void
-  setHistoryAnchor?: (handlers: { capture: () => void; restore: (done: boolean) => void }) => void
 }) {
   let touchGesture: number | undefined
 
@@ -353,109 +358,6 @@ export function MessageTimeline(props: {
   const timelineRowByKey = projection.rowByKey
   const timelineRows = projection.rows
 
-  let prependAnchor: { key: string; top: number } | undefined
-  let prependAnchorElement: HTMLElement | undefined
-  let prependAnchorFrame: number | undefined
-  let prependMeasureFrame: number | undefined
-  let prependLoading = false
-  const clearPrependAnchor = () => {
-    prependLoading = false
-    prependAnchor = undefined
-    prependAnchorElement = undefined
-    if (prependAnchorFrame !== undefined) cancelAnimationFrame(prependAnchorFrame)
-    prependAnchorFrame = undefined
-    if (prependMeasureFrame !== undefined) cancelAnimationFrame(prependMeasureFrame)
-    prependMeasureFrame = undefined
-  }
-  // The anchor is the first row still inside the viewport, so the scan stops at
-  // that row instead of measuring (and sorting) every rendered row, and the
-  // element is cached so later measurements cost a single rect.
-  const pickPrependAnchor = (view: DOMRect) => {
-    const root = listRoot()
-    if (!root) return undefined
-    const element = [...root.querySelectorAll<HTMLElement>("[data-timeline-key]")].find((row) => {
-      const rect = row.getBoundingClientRect()
-      return rect.bottom > view.top && rect.top < view.bottom
-    })
-    const key = element?.dataset.timelineKey
-    if (!element || !key) return undefined
-    prependAnchorElement = element
-    // Document-space top: invariant under the user's own scrolling, so the
-    // correction below only compensates content growth above the anchor and
-    // never fights an active scroll gesture.
-    return { key, top: element.getBoundingClientRect().top - view.top + root.scrollTop }
-  }
-  const measurePrependAnchor = () => {
-    const root = listRoot()
-    if (!root) return
-    const view = root.getBoundingClientRect()
-    const cached = prependAnchorElement
-    const rect = cached?.isConnected ? cached.getBoundingClientRect() : undefined
-    if (cached && rect && cached.dataset.timelineKey && rect.bottom > view.top && rect.top < view.bottom) {
-      prependAnchor = { key: cached.dataset.timelineKey, top: rect.top - view.top + root.scrollTop }
-      return
-    }
-    // The cached row scrolled away (or the virtualizer recycled the node):
-    // re-pick the first visible row once.
-    const picked = pickPrependAnchor(view)
-    if (!picked) return
-    prependAnchor = picked
-  }
-  const capturePrependAnchor = () => {
-    prependLoading = true
-    measurePrependAnchor()
-  }
-  // Scroll ticks arrive far denser than frames, so coalesce them into at most
-  // one measurement per frame.
-  const updatePrependAnchor = () => {
-    if (prependMeasureFrame !== undefined) return
-    prependMeasureFrame = requestAnimationFrame(() => {
-      prependMeasureFrame = undefined
-      measurePrependAnchor()
-    })
-  }
-  const restorePrependAnchor = (done: boolean) => {
-    if (done) prependLoading = false
-    applyPrependAnchor()
-  }
-  const applyPrependAnchor = () => {
-    const root = listRoot()
-    if (!root || !prependAnchor) return
-    if (prependAnchorFrame !== undefined) cancelAnimationFrame(prependAnchorFrame)
-    let frames = 0
-    let stable = 0
-    const apply = () => {
-      prependAnchorFrame = undefined
-      const anchor = prependAnchor
-      if (!anchor) return
-      const element = root.querySelector<HTMLElement>(`[data-timeline-key="${CSS.escape(anchor.key)}"]`)
-      const currentTop = element
-        ? element.getBoundingClientRect().top - root.getBoundingClientRect().top + root.scrollTop
-        : undefined
-      if (currentTop !== undefined && Math.abs(currentTop - anchor.top) > 0.5) {
-        root.scrollTop += currentTop - anchor.top
-        // Consume the correction so the same growth is never applied twice and
-        // user scrolling (which does not change the document top) stays free.
-        prependAnchor = { key: anchor.key, top: currentTop }
-        stable = 0
-      } else {
-        stable += 1
-      }
-      frames += 1
-      // Correcting only matters while rows keep arriving above the anchor: a
-      // quiet stretch during a prepend means it stalled (the next restore
-      // restarts this loop), and once prepending is done a short quiet window
-      // absorbs trailing measurements. Every frame here forces a reflow, so
-      // stop instead of burning the whole budget.
-      if (stable >= (prependLoading ? 12 : 4) || frames >= 45) {
-        if (!prependLoading) prependAnchor = undefined
-        return
-      }
-      prependAnchorFrame = requestAnimationFrame(apply)
-    }
-    prependAnchorFrame = requestAnimationFrame(apply)
-  }
-
   const [toolOpen, setToolOpen] = createStore<Record<string, boolean | undefined>>(cached?.toolOpen ?? {})
   const [renderOverscan, setRenderOverscan] = createSignal(initialMeasurements?.length || coldBottomMount ? 6 : 20)
   let resizePinnedIndexes: number[] = []
@@ -502,6 +404,13 @@ export function MessageTimeline(props: {
       )
     },
   })
+  // Pinning goes through the virtualizer, never a second writer easing its own
+  // target. The virtualizer already compensates a measured size change by exactly
+  // the content it added, so the end stays glued by itself; an extra eased glide
+  // to the same end lands somewhere else in the same frame and, worse, moves the
+  // scroller without the virtualizer's own offset knowing, which turns its next
+  // compensation into a write backwards — the view jerking up and down for the
+  // whole reply.
   const resizeItem = virtualizer.resizeItem
   let resizeAnchorScheduled = false
   const anchorResizedBottom = () => {
@@ -510,7 +419,7 @@ export function MessageTimeline(props: {
     queueMicrotask(() => {
       resizeAnchorScheduled = false
       if (!props.shouldAnchorBottom() || props.hasScrollGesture()) return
-      smoothScroll.toEnd()
+      virtualizer.scrollToEnd()
     })
   }
   virtualizer.resizeItem = (index, size) => {
@@ -536,10 +445,17 @@ export function MessageTimeline(props: {
     resizeItem(index, size)
     if (root && props.shouldAnchorBottom()) anchorResizedBottom()
   }
+  // Compensate every resize of a row that sits entirely above the viewport,
+  // whichever direction the last scroll went. The library's own default skips
+  // re-measured rows while scrolling up to avoid a cascade, but those rows are
+  // exactly the content a history prepend measures late: skipping them leaves
+  // the viewport short of the rows it is holding and the whole timeline drifts
+  // up by the difference.
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item) => {
     if (props.shouldAnchorBottom()) return false
-    const first = virtualizer.range?.startIndex
-    return first !== undefined && item.index < first
+    const offset = listRoot()?.scrollTop
+    if (offset === undefined) return false
+    return item.end - virtualizer.options.scrollMargin <= offset
   }
   const virtualItemByKey = createMemo(
     () => new Map(virtualizer.getVirtualItems().map((item) => [item.key, item] as const)),
@@ -552,7 +468,6 @@ export function MessageTimeline(props: {
       virtualizer.scrollToIndex(index, { align: "center" })
     })
     props.setScrollToEnd?.(() => smoothScroll.toEnd())
-    props.setHistoryAnchor?.({ capture: capturePrependAnchor, restore: restorePrependAnchor })
   })
 
   onCleanup(() => smoothScroll.cancel())
@@ -573,8 +488,7 @@ export function MessageTimeline(props: {
     if (timelineRows().length === 0) return
     if (!props.shouldAnchorBottom() || props.hasScrollGesture()) return
     if (resizePinFrame !== undefined) cancelAnimationFrame(resizePinFrame)
-    clearPrependAnchor()
-    smoothScroll.toEnd()
+    virtualizer.scrollToEnd()
   }
 
   let measuredSessionKey = sessionKey()
@@ -589,7 +503,6 @@ export function MessageTimeline(props: {
   })
 
   onCleanup(() => {
-    clearPrependAnchor()
     timelineCache.delete(ownerSessionKey)
     timelineCache.set(ownerSessionKey, { measurements: virtualizer.takeSnapshot(), toolOpen: { ...toolOpen } })
     while (timelineCache.size > 16) timelineCache.delete(timelineCache.keys().next().value!)
@@ -597,7 +510,6 @@ export function MessageTimeline(props: {
     if (overscanFrame !== undefined) cancelAnimationFrame(overscanFrame)
     props.setRevealMessage?.(() => {})
     props.setScrollToEnd?.(() => {})
-    props.setHistoryAnchor?.({ capture: () => {}, restore: () => {} })
   })
 
   const [title, setTitle] = createStore({
@@ -622,7 +534,6 @@ export function MessageTimeline(props: {
   }
 
   const handleListWheel = (event: WheelEvent & { currentTarget: HTMLDivElement }) => {
-    if (!prependLoading) clearPrependAnchor()
     const root = event.currentTarget
     const delta = normalizeWheelDelta({
       deltaY: event.deltaY,
@@ -634,7 +545,6 @@ export function MessageTimeline(props: {
   }
 
   const handleListTouchStart = (event: TouchEvent) => {
-    if (!prependLoading) clearPrependAnchor()
     touchGesture = event.touches[0]?.clientY
   }
 
@@ -660,7 +570,6 @@ export function MessageTimeline(props: {
   }
 
   const handleListPointerDown = (event: PointerEvent & { currentTarget: HTMLDivElement }) => {
-    if (!prependLoading) clearPrependAnchor()
     props.onMarkScrollGesture(event.target)
   }
 
@@ -674,12 +583,10 @@ export function MessageTimeline(props: {
     if (!key) return
     if (!isScrollKeyTarget(event.target, key)) return
     if (scrollKeyOwner(event.currentTarget, event.target, key) !== event.currentTarget) return
-    if (!prependLoading) clearPrependAnchor()
     props.onMarkScrollGesture(event.currentTarget)
   }
 
   const handleListScroll = (event: Event & { currentTarget: HTMLDivElement }) => {
-    if (prependLoading) updatePrependAnchor()
     props.onScheduleScrollState(event.currentTarget)
     props.onHistoryScroll()
     if (!props.hasScrollGesture()) return

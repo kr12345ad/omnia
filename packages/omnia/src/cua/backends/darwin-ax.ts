@@ -121,7 +121,7 @@ func axFocusPoint(_ element: AXUIElement, _ values: [CFTypeRef?]) -> [String: In
     var range = CFRange(location: 0, length: 0)
     guard AXValueGetValue(rangeValue, .cfRange, &range) else { return nil }
     var rectRef: CFTypeRef?
-    guard AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeAttribute as CFString, rangeRef, &rectRef) == .success,
+    guard AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString, rangeRef, &rectRef) == .success,
           let rectRef else { return nil }
     var rect = CGRect.zero
     guard AXValueGetValue(unsafeBitCast(rectRef, to: AXValue.self), .cgRect, &rect) else { return nil }

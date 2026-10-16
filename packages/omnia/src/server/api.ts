@@ -1195,8 +1195,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       const body = renderCatalogText()
       response.writeHead(200, {
         "content-type": "text/plain; charset=utf-8",
-        "access-control-allow-origin": "*",
-        "cache-control": "no-store",
+            "cache-control": "no-store",
       })
       response.end(body)
       return true

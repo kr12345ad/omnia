@@ -1,0 +1,565 @@
+/**
+ * Teams Adaptive Card converter for cross-platform cards.
+ *
+ * Converts CardElement to Microsoft Adaptive Cards format.
+ * @see https://adaptivecards.io/
+ */
+
+import {
+  createEmojiConverter,
+  mapButtonStyle,
+  cardToFallbackText as sharedCardToFallbackText,
+  ValidationError,
+} from "@chat-adapter/shared";
+import type {
+  ActionArray,
+  ActionStyle,
+  CardElementArray,
+  ChoiceSetInputOptions,
+  HorizontalAlignment,
+  OpenUrlActionOptions,
+  SubmitActionOptions,
+  TextBlockOptions,
+  TextInputOptions,
+  VerticalAlignment,
+} from "@microsoft/teams.cards";
+import {
+  AdaptiveCard,
+  Image as AdaptiveImage,
+  Choice,
+  ChoiceSetInput,
+  ColumnDefinition,
+  Container,
+  Fact,
+  FactSet,
+  OpenUrlAction,
+  SubmitAction,
+  Table,
+  TableCell,
+  TableRow,
+  TextBlock,
+  TextInput,
+} from "@microsoft/teams.cards";
+import type {
+  ActionsElement,
+  ButtonElement,
+  CardChild,
+  CardElement,
+  DividerElement,
+  FieldsElement,
+  ImageElement,
+  LinkButtonElement,
+  RadioSelectElement,
+  SectionElement,
+  SelectElement,
+  TableAlignment,
+  TableElement,
+  TableVerticalAlignment,
+  TextElement,
+  TextInputElement,
+} from "chat";
+import { cardChildToFallbackText } from "chat";
+
+/**
+ * Convert emoji placeholders in text to Teams format.
+ */
+const convertEmoji = createEmojiConverter("teams");
+
+const ADAPTIVE_CARD_SCHEMA =
+  "http://adaptivecards.io/schemas/adaptive-card.json";
+const ADAPTIVE_CARD_VERSION = "1.5" as const;
+
+/**
+ * Sentinel action ID for auto-injected submit buttons.
+ * Used when a card has select/radio_select inputs but no submit button.
+ */
+export const AUTO_SUBMIT_ACTION_ID = "__auto_submit";
+
+/**
+ * Keys a button puts on its `Action.Submit` data (see `convertButtonToAction`):
+ * `actionId` and `value` from the button, `msteams` as the task/fetch hint on
+ * dialog buttons. Teams merges the card's inputs into the same flat object, so
+ * a reader of a button click skips these to find the inputs.
+ */
+export const BUTTON_SUBMIT_KEYS: ReadonlySet<string> = new Set([
+  "actionId",
+  "msteams",
+  "value",
+]);
+
+/**
+ * Keys on the auto-injected submit's data. It never carries a button `value`,
+ * so an input with that ID is a real input here and must not be skipped.
+ */
+export const AUTO_SUBMIT_KEYS: ReadonlySet<string> = new Set([
+  "actionId",
+  "msteams",
+]);
+
+/**
+ * The card's input values out of an Action.Submit payload, keyed by input id,
+ * or `undefined` when the card carried none.
+ *
+ * Numbers are stringified the way `parseDialogSubmitValues` does, so a card
+ * action and a dialog submit report the same shape.
+ */
+export function cardInputValues(
+  data: object | undefined,
+  reservedKeys: ReadonlySet<string>
+): Record<string, string> | undefined {
+  if (!data) {
+    return undefined;
+  }
+
+  const values: Record<string, string> = {};
+  for (const [key, value] of Object.entries(data) as [string, unknown][]) {
+    if (reservedKeys.has(key)) {
+      continue;
+    }
+    const text = submitValueToString(value);
+    if (text !== undefined) {
+      values[key] = text;
+    }
+  }
+
+  return Object.keys(values).length > 0 ? values : undefined;
+}
+
+/**
+ * A single submitted input value as a string, or `undefined` for anything
+ * other than a string or number.
+ */
+export function submitValueToString(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return String(value);
+  }
+  return undefined;
+}
+
+/**
+ * Convert a CardElement to a Teams Adaptive Card.
+ */
+export function cardToAdaptiveCard(card: CardElement): AdaptiveCard {
+  const body: CardElementArray = [];
+  const actions: ActionArray = [];
+
+  // Add title as TextBlock
+  if (card.title) {
+    body.push(
+      new TextBlock(convertEmoji(card.title), {
+        weight: "Bolder",
+        size: "Large",
+        wrap: true,
+      })
+    );
+  }
+
+  // Add subtitle as TextBlock
+  if (card.subtitle) {
+    body.push(
+      new TextBlock(convertEmoji(card.subtitle), {
+        isSubtle: true,
+        wrap: true,
+      })
+    );
+  }
+
+  // Add header image if present
+  if (card.imageUrl) {
+    body.push(new AdaptiveImage(card.imageUrl, { size: "Stretch" }));
+  }
+
+  // Convert children
+  for (const child of card.children) {
+    const result = convertChildToAdaptive(child);
+    body.push(...result.elements);
+    actions.push(...result.actions);
+  }
+
+  const adaptiveCard = new AdaptiveCard(...body).withOptions({
+    $schema: ADAPTIVE_CARD_SCHEMA,
+    version: ADAPTIVE_CARD_VERSION,
+    ...(card.width === "full" ? { msteams: { width: "full" } } : {}),
+  });
+
+  if (actions.length > 0) {
+    adaptiveCard.withActions(...actions);
+  }
+
+  return adaptiveCard;
+}
+
+interface ConvertResult {
+  actions: ActionArray;
+  elements: CardElementArray;
+}
+
+/**
+ * Convert a card child element to Adaptive Card elements.
+ */
+function convertChildToAdaptive(child: CardChild): ConvertResult {
+  switch (child.type) {
+    case "text":
+      return { elements: [convertTextToElement(child)], actions: [] };
+    case "image":
+      return { elements: [convertImageToElement(child)], actions: [] };
+    case "divider":
+      return { elements: [convertDividerToElement(child)], actions: [] };
+    case "actions":
+      return convertActionsToElements(child);
+    case "section":
+      return convertSectionToElements(child);
+    case "fields":
+      return { elements: [convertFieldsToElement(child)], actions: [] };
+    case "link":
+      return {
+        elements: [
+          new TextBlock(`[${convertEmoji(child.label)}](${child.url})`, {
+            wrap: true,
+          }),
+        ],
+        actions: [],
+      };
+    case "table":
+      return { elements: convertTableToElements(child), actions: [] };
+    case "text_input":
+      // Card-only: a modal's submit data doesn't carry a button's actionId or value.
+      if (BUTTON_SUBMIT_KEYS.has(child.id)) {
+        throw new ValidationError(
+          "teams",
+          `A card TextInput can't use the ID "${child.id}", which the adapter reserves for the button's own submit data`
+        );
+      }
+      return { elements: [textInputToAdaptive(child)], actions: [] };
+    default: {
+      const text = cardChildToFallbackText(child);
+      if (text) {
+        return {
+          elements: [new TextBlock(text, { wrap: true })],
+          actions: [],
+        };
+      }
+      return { elements: [], actions: [] };
+    }
+  }
+}
+
+function convertTextToElement(element: TextElement): TextBlock {
+  const options: { wrap: boolean; weight?: "Bolder"; isSubtle?: boolean } = {
+    wrap: true,
+  };
+
+  if (element.style === "bold") {
+    options.weight = "Bolder";
+  } else if (element.style === "muted") {
+    options.isSubtle = true;
+  }
+
+  return new TextBlock(convertEmoji(element.content), options);
+}
+
+/**
+ * Map a Chat SDK `TextInput` onto an Adaptive Card `Input.Text`.
+ *
+ * Exported because `modals.ts` renders the same element into a Task Module and
+ * both surfaces have to map it the same way — a card that asks for a comment
+ * should look like the dialog that asks for one.
+ *
+ * An input is required unless `optional` is set. Teams validates every input on
+ * the surface before it lets an `Action.Submit` through, so on a card a
+ * required input also gates the buttons beside it, except a dialog button,
+ * which sets `associatedInputs: "none"`.
+ */
+export function textInputToAdaptive(element: TextInputElement): TextInput {
+  const options: TextInputOptions = {
+    id: element.id,
+    label: convertEmoji(element.label),
+    isMultiline: element.multiline ?? false,
+    isRequired: !(element.optional ?? false),
+    placeholder: element.placeholder,
+    value: element.initialValue,
+    maxLength: element.maxLength,
+  };
+
+  return new TextInput(options);
+}
+
+function convertImageToElement(element: ImageElement): AdaptiveImage {
+  return new AdaptiveImage(element.url, {
+    altText: element.alt || "Image",
+    size: "Auto",
+  });
+}
+
+function convertDividerToElement(_element: DividerElement): Container {
+  // Adaptive Cards don't have a native divider, use a separator container
+  return new Container().withSeparator(true);
+}
+
+function convertActionsToElements(element: ActionsElement): ConvertResult {
+  const actions: ActionArray = [];
+  const elements: CardElementArray = [];
+  let hasButtons = false;
+  let hasInputs = false;
+
+  for (const child of element.children) {
+    switch (child.type) {
+      case "button":
+        hasButtons = true;
+        actions.push(convertButtonToAction(child));
+        break;
+      case "link-button":
+        actions.push(convertLinkButtonToAction(child));
+        break;
+      case "select":
+        hasInputs = true;
+        elements.push(convertSelectToElement(child));
+        break;
+      case "radio_select":
+        hasInputs = true;
+        elements.push(convertRadioSelectToElement(child));
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Auto-inject a submit button when there are inputs but no buttons.
+  // Teams inputs don't auto-submit like Slack — they need an Action.Submit.
+  if (hasInputs && !hasButtons) {
+    actions.push(
+      new SubmitAction({
+        title: "Submit",
+        data: { actionId: AUTO_SUBMIT_ACTION_ID },
+      })
+    );
+  }
+
+  return { elements, actions };
+}
+
+function convertSelectToElement(select: SelectElement): ChoiceSetInput {
+  const choices = select.options.map(
+    (opt) => new Choice({ title: convertEmoji(opt.label), value: opt.value })
+  );
+
+  const options: ChoiceSetInputOptions = {
+    id: select.id,
+    label: convertEmoji(select.label),
+    style: "compact",
+    isRequired: !(select.optional ?? false),
+    placeholder: select.placeholder,
+    value: select.initialOption,
+  };
+
+  return new ChoiceSetInput(...choices).withOptions(options);
+}
+
+function convertRadioSelectToElement(
+  radioSelect: RadioSelectElement
+): ChoiceSetInput {
+  const choices = radioSelect.options.map(
+    (opt) => new Choice({ title: convertEmoji(opt.label), value: opt.value })
+  );
+
+  const options: ChoiceSetInputOptions = {
+    id: radioSelect.id,
+    label: convertEmoji(radioSelect.label),
+    style: "expanded",
+    isRequired: !(radioSelect.optional ?? false),
+    value: radioSelect.initialOption,
+  };
+
+  return new ChoiceSetInput(...choices).withOptions(options);
+}
+
+/**
+ * Options shared by Action.Submit and Action.OpenUrl: title, style, tooltip.
+ */
+function actionOptions(
+  button: ButtonElement | LinkButtonElement
+): Pick<SubmitActionOptions, "title" | "style" | "tooltip"> {
+  const options: Pick<SubmitActionOptions, "title" | "style" | "tooltip"> = {
+    title: convertEmoji(button.label),
+  };
+
+  const style = mapButtonStyle(button.style, "teams") as
+    | ActionStyle
+    | undefined;
+  if (style) {
+    options.style = style;
+  }
+  if (button.tooltip) {
+    options.tooltip = convertEmoji(button.tooltip);
+  }
+
+  return options;
+}
+
+function convertButtonToAction(button: ButtonElement): SubmitAction {
+  const data: Record<string, unknown> = {
+    actionId: button.id,
+    value: button.value,
+  };
+
+  // Add task/fetch hint for dialog-opening buttons
+  if (button.actionType === "modal") {
+    data.msteams = { type: "task/fetch" };
+  }
+
+  const options: SubmitActionOptions = { ...actionOptions(button), data };
+  // Teams validates every input on the card before a submit goes through, so
+  // without this a required TextInput would stop the button opening its dialog.
+  // The dialog collects its own input, so the card's inputs aren't sent either.
+  if (button.actionType === "modal") {
+    options.associatedInputs = "none";
+  }
+  return new SubmitAction(options);
+}
+
+function convertLinkButtonToAction(button: LinkButtonElement): OpenUrlAction {
+  const options: OpenUrlActionOptions = actionOptions(button);
+  return new OpenUrlAction(button.url, options);
+}
+
+function convertSectionToElements(element: SectionElement): ConvertResult {
+  const elements: CardElementArray = [];
+  const actions: ActionArray = [];
+
+  // Wrap section in a container
+  const containerItems: CardElementArray = [];
+
+  for (const child of element.children) {
+    const result = convertChildToAdaptive(child);
+    containerItems.push(...result.elements);
+    actions.push(...result.actions);
+  }
+
+  if (containerItems.length > 0) {
+    elements.push(new Container(...containerItems));
+  }
+
+  return { elements, actions };
+}
+
+const TABLE_HORIZONTAL_ALIGNMENT: Record<TableAlignment, HorizontalAlignment> =
+  {
+    left: "Left",
+    center: "Center",
+    right: "Right",
+  };
+
+const TABLE_VERTICAL_ALIGNMENT: Record<
+  TableVerticalAlignment,
+  VerticalAlignment
+> = {
+  top: "Top",
+  center: "Center",
+  bottom: "Bottom",
+};
+
+// Adaptive Cards treats a column width as a relative weight only when it is a
+// positive integer; Teams desktop and mobile disagree on anything else, so an
+// invalid weight falls back to the default instead of reaching the wire.
+function columnWeight(width: number | undefined): number {
+  return width !== undefined && Number.isInteger(width) && width > 0
+    ? width
+    : 1;
+}
+
+// The widest row sets the column count, so a short row is padded with empty
+// cells instead of shifting the grid. Accumulated in a loop rather than
+// `Math.max(...rows.map(...))`, which spreads one argument per row and blows
+// the call-argument limit on a large table.
+function tableColumnCount(headers: string[], rows: string[][]): number {
+  let count = headers.length;
+  for (const row of rows) {
+    if (row.length > count) {
+      count = row.length;
+    }
+  }
+  return count;
+}
+
+// Returns an array so "no columns means nothing to draw" needs no null check at
+// the call site, matching what the empty ASCII fallback says.
+function convertTableToElements(element: TableElement): Table[] {
+  const columnCount = tableColumnCount(element.headers, element.rows);
+  if (columnCount === 0) {
+    return [];
+  }
+
+  const columns = Array.from({ length: columnCount }, (_, index) => {
+    const align = element.align?.[index];
+    return new ColumnDefinition({
+      width: columnWeight(element.widths?.[index]),
+      horizontalCellContentAlignment: align
+        ? TABLE_HORIZONTAL_ALIGNMENT[align]
+        : undefined,
+    });
+  });
+
+  const toRow = (cells: string[], textOptions: TextBlockOptions = {}) =>
+    new TableRow({
+      cells: Array.from(
+        { length: columnCount },
+        (_, index) =>
+          new TableCell(
+            new TextBlock(convertEmoji(cells[index] ?? ""), {
+              wrap: true,
+              ...textOptions,
+            })
+          )
+      ),
+    });
+
+  const hasHeader = element.headers.length > 0;
+  const rows = element.rows.map((row) => toRow(row));
+  if (hasHeader) {
+    rows.unshift(toRow(element.headers, { weight: "Bolder" }));
+  }
+
+  return [
+    new Table({
+      columns,
+      // Adaptive Cards spells this `firstRowAsHeaders`: that is the name
+      // `@microsoft/teams.cards` declares (default `true`) and the name every
+      // sample on Microsoft's own Table reference page uses. The prose property
+      // table on that page says `firstRowAsHeader`, singular; the plural is what
+      // renderers read. Do not "correct" it — because the property defaults to
+      // `true` when absent, a headerless table would silently regain a header
+      // row. The plain-object converter in `cards-primitives/` says the same.
+      firstRowAsHeaders: hasHeader,
+      rows,
+      showGridLines: element.gridLines ?? true,
+      gridStyle: element.gridStyle,
+      verticalCellContentAlignment: element.verticalAlign
+        ? TABLE_VERTICAL_ALIGNMENT[element.verticalAlign]
+        : undefined,
+    }),
+  ];
+}
+
+function convertFieldsToElement(element: FieldsElement): FactSet {
+  // Use FactSet for key-value pairs
+  const facts = element.children.map(
+    (field) => new Fact(convertEmoji(field.label), convertEmoji(field.value))
+  );
+
+  return new FactSet(...facts);
+}
+
+/**
+ * Generate fallback text from a card element.
+ * Used when adaptive cards aren't supported.
+ */
+export function cardToFallbackText(card: CardElement): string {
+  return sharedCardToFallbackText(card, {
+    boldFormat: "**",
+    lineBreak: "\n\n",
+    platform: "teams",
+  });
+}

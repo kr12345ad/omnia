@@ -153,7 +153,41 @@ describe("session.system", () => {
     expect(OPENUI_EXTENSION_PROMPT).toContain(OPENUI_EXTENSION_SIGNATURES.Html)
     expect(OPENUI_EXTENSION_PROMPT).toContain(OPENUI_EXTENSION_SIGNATURES.Svg)
     expect(OPENUI_EXTENSION_PROMPT).toContain("sandboxed frame with scripts enabled")
+    // The last resort is a card that runs JavaScript, for the graphics no
+    // vocabulary can express — and the prompt has to name the runtime it gets.
+    expect(OPENUI_EXTENSION_PROMPT).toContain(OPENUI_EXTENSION_SIGNATURES.JsCard)
+    expect(OPENUI_EXTENSION_PROMPT).toContain("Rules for JsCard:")
+    expect(OPENUI_EXTENSION_PROMPT).toContain("setHeight(pixels)")
     expect(OPENUI_EXTENSION_PROMPT).toContain("Prefer the built-in charts above when they fit.")
+  })
+
+  test("the generated-UI prompt routes the drawing through the tool instead of a fence", () => {
+    const prompt = SystemPrompt.renderUI().join("\n")
+
+    // The fence streams the program through the transcript as markup before the
+    // client draws it. The tool carries the same program in its arguments, so the
+    // reply stays prose — which only happens if the model is told to prefer it.
+    expect(prompt).toContain("`visualize`")
+    expect(prompt).toContain("Do not put a fenced openui-lang block in your reply")
+    // The fence is still the fallback, not an error: a run without the tool, or a
+    // client that has not been taught the row, has to keep working.
+    expect(prompt).toContain("Fall back to a fenced block only when the tool is unavailable")
+  })
+
+  test("the generated-UI prompt keeps prose the default, so a normal answer is not a card", () => {
+    const prompt = SystemPrompt.renderUI().join("\n")
+
+    // A catalogue of components reads as an instruction to use them: without
+    // this restraint the model answers "what can you do" with a Card, and then
+    // answers "stop using openui" with another Card.
+    expect(prompt).toContain("Answer in plain markdown by default.")
+    expect(prompt).toContain("Most replies need no drawing at all")
+    expect(prompt).toContain("a list of what you can do")
+    // The two cases the restraint exists for, stated as prohibitions.
+    expect(prompt).toContain("Never wrap a prose answer in a component to make it look designed")
+    expect(prompt).toContain("never answer a question about yourself, your capabilities, or the format of your replies with a component")
+    expect(prompt).toContain("never make a drawing your entire reply")
+    expect(prompt).toContain("At most one drawing per reply.")
   })
 
   it.effect("skills output is sorted by name and stable across calls", () =>

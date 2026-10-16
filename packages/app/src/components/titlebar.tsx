@@ -402,10 +402,13 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
               >
                 {/* The reveal control for the conversation column owns the
                     window's top-left corner, so it never moves between the
-                    expanded column and the rail. The channel tag that used to
-                    sit here is gone from this shell; the palette command above
-                    still reaches the developer tools. */}
-                <Show when={!mobile()}>
+                    expanded column and the rail. macOS is the exception: the
+                    traffic lights already own that corner, so the column carries
+                    its own toggle as its first row (shell-sidebar.tsx). The
+                    channel tag that used to sit here is gone from this shell;
+                    the palette command above still reaches the developer
+                    tools. */}
+                <Show when={!mobile() && !mac()}>
                   <TooltipV2 placement="bottom" value={language.t("sidebar.menu.toggle")} class="shrink-0">
                     {/* One square of the sidebar's grid: 32px at x=12 in both
                         states, its icon centred on the same 16px column as

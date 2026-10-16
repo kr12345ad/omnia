@@ -1,0 +1,183 @@
+import { z } from "zod";
+import type { PostableMarkdown, PostableRaw } from "../../types";
+import type { ChatBinding, ToolSpecOptions } from "../types";
+import type { ChatToolSpec } from "./spec";
+
+const POSTABLE_INPUT = z
+  .union([
+    z.string().describe("Plain text body"),
+    z
+      .object({ markdown: z.string() })
+      .describe("Markdown body, converted to the platform's native format"),
+    z
+      .object({ raw: z.string() })
+      .describe("Raw body, passed through to the platform untouched"),
+  ])
+  .describe("Message body");
+
+type PostableInput = z.infer<typeof POSTABLE_INPUT>;
+
+// Spec factories carry explicit `ChatToolSpec<Input, Output>` return types so
+// the framework wrappers (AI SDK, TanStack AI) inherit precise input and output
+// types without surfacing framework internals in the emitted declarations.
+
+const POST_MESSAGE_INPUT = z.object({
+  threadId: z.string().describe("Full thread id including adapter prefix"),
+  message: POSTABLE_INPUT,
+});
+
+export const postMessageSpec = (
+  chat: ChatBinding,
+  { needsApproval = true, guard }: ToolSpecOptions = {}
+): ChatToolSpec<
+  z.infer<typeof POST_MESSAGE_INPUT>,
+  { messageId: string; threadId: string }
+> => ({
+  name: "postMessage",
+  description:
+    "Post a message inside an existing thread. Use this to reply within a conversation the bot already has context for. The threadId is the full id (e.g. 'slack:C123:1234567890.123456').",
+  needsApproval,
+  inputSchema: POST_MESSAGE_INPUT,
+  execute: async ({ threadId, message }) => {
+    guard?.(threadId);
+    const thread = chat.thread(threadId);
+    const sent = await thread.post(toPostable(message));
+    return {
+      messageId: sent.id,
+      threadId: sent.threadId,
+    };
+  },
+});
+
+const POST_CHANNEL_MESSAGE_INPUT = z.object({
+  channelId: z.string().describe("Full channel id including adapter prefix"),
+  message: POSTABLE_INPUT,
+});
+
+export const postChannelMessageSpec = (
+  chat: ChatBinding,
+  { needsApproval = true, guard }: ToolSpecOptions = {}
+): ChatToolSpec<
+  z.infer<typeof POST_CHANNEL_MESSAGE_INPUT>,
+  { messageId: string; threadId: string }
+> => ({
+  name: "postChannelMessage",
+  description:
+    "Post a top-level message to a channel (not threaded under an existing message). The channelId is the full id (e.g. 'slack:C123ABC').",
+  needsApproval,
+  inputSchema: POST_CHANNEL_MESSAGE_INPUT,
+  execute: async ({ channelId, message }) => {
+    guard?.(channelId);
+    const channel = chat.channel(channelId);
+    const sent = await channel.post(toPostable(message));
+    return {
+      messageId: sent.id,
+      threadId: sent.threadId,
+    };
+  },
+});
+
+const SEND_DIRECT_MESSAGE_INPUT = z.object({
+  userId: z
+    .string()
+    .describe("Platform-specific user id; the adapter is auto-detected"),
+  message: POSTABLE_INPUT,
+});
+
+export const sendDirectMessageSpec = (
+  chat: ChatBinding,
+  { needsApproval = true }: ToolSpecOptions = {}
+): ChatToolSpec<
+  z.infer<typeof SEND_DIRECT_MESSAGE_INPUT>,
+  { messageId: string; threadId: string }
+> => ({
+  name: "sendDirectMessage",
+  description:
+    "Open (or reuse) a 1:1 direct-message conversation with a user and post a message in it. The userId format is platform-specific (e.g. 'U123456' for Slack, 'users/123' for Google Chat).",
+  needsApproval,
+  inputSchema: SEND_DIRECT_MESSAGE_INPUT,
+  execute: async ({ userId, message }) => {
+    const dm = await chat.openDM(userId);
+    const sent = await dm.post(toPostable(message));
+    return {
+      messageId: sent.id,
+      threadId: sent.threadId,
+    };
+  },
+});
+
+const EDIT_MESSAGE_INPUT = z.object({
+  threadId: z.string().describe("Full thread id"),
+  messageId: z
+    .string()
+    .describe("Platform-specific message id of the message to edit"),
+  message: POSTABLE_INPUT,
+});
+
+export const editMessageSpec = (
+  chat: ChatBinding,
+  { needsApproval = true, guard }: ToolSpecOptions = {}
+): ChatToolSpec<
+  z.infer<typeof EDIT_MESSAGE_INPUT>,
+  { messageId: string; threadId: string }
+> => ({
+  name: "editMessage",
+  description:
+    "Edit a previously posted message in a thread. Replaces the existing message body. Only messages the bot itself authored can be edited on most platforms.",
+  needsApproval,
+  inputSchema: EDIT_MESSAGE_INPUT,
+  execute: async ({ threadId, messageId, message }) => {
+    guard?.(threadId);
+    const thread = chat.thread(threadId);
+    const result = await thread.adapter.editMessage(
+      threadId,
+      messageId,
+      toPostable(message)
+    );
+    return { messageId: result.id, threadId: result.threadId };
+  },
+});
+
+const DELETE_MESSAGE_INPUT = z.object({
+  threadId: z.string().describe("Full thread id"),
+  messageId: z
+    .string()
+    .describe("Platform-specific message id of the message to delete"),
+});
+
+export const deleteMessageSpec = (
+  chat: ChatBinding,
+  { needsApproval = true, guard }: ToolSpecOptions = {}
+): ChatToolSpec<
+  z.infer<typeof DELETE_MESSAGE_INPUT>,
+  { deleted: boolean; messageId: string; threadId: string }
+> => ({
+  name: "deleteMessage",
+  description:
+    "Delete a message from a thread. Only messages the bot itself authored can be deleted on most platforms.",
+  needsApproval,
+  inputSchema: DELETE_MESSAGE_INPUT,
+  execute: async ({
+    threadId,
+    messageId,
+  }): Promise<{ deleted: boolean; messageId: string; threadId: string }> => {
+    guard?.(threadId);
+    const thread = chat.thread(threadId);
+    await thread.adapter.deleteMessage(threadId, messageId);
+    return { deleted: true, messageId, threadId };
+  },
+});
+
+// Plain strings stay unlabeled: wrapping them in an object would change how
+// some adapters render them.
+function toPostable(
+  input: PostableInput
+): string | PostableMarkdown | PostableRaw {
+  if (typeof input === "string") {
+    return input;
+  }
+  if ("markdown" in input) {
+    return { markdown: input.markdown, aiGenerated: true };
+  }
+  return { raw: input.raw, aiGenerated: true };
+}

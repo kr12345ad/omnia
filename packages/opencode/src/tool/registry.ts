@@ -14,6 +14,7 @@ import { DiscussionRoomTool } from "./discussion"
 import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
+import { VisualizeTool } from "./visualize"
 import { WriteTool } from "./write"
 import { InvalidTool } from "./invalid"
 import { SkillTool } from "./skill"
@@ -150,6 +151,7 @@ const layer = Layer.effect(
     const computerVisual = yield* ComputerVisualTool
     const superskill = yield* SuperskillTool
     const memory = yield* MemoryTool
+    const visualize = yield* VisualizeTool
     const agent = yield* Agent.Service
     const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
     const codeModeTool = codeMode ? yield* codeMode.CodeModeTool : undefined
@@ -272,6 +274,7 @@ const layer = Layer.effect(
           computerVisual: Tool.init(computerVisual),
           superskill: Tool.init(superskill),
           memory: Tool.init(memory),
+          visualize: Tool.init(visualize),
           patch: Tool.init(patchtool),
           question: Tool.init(question),
           lsp: Tool.init(lsptool),
@@ -313,6 +316,7 @@ const layer = Layer.effect(
             tool.computerVisual,
             tool.superskill,
             tool.memory,
+            tool.visualize,
             ...(tool.execute ? [tool.execute] : []),
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),

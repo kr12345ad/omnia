@@ -1,0 +1,28 @@
+Draws one interactive visualization or UI panel inside the conversation.
+
+## When to use
+Only when a visual or interactive answer is genuinely clearer than prose — the user asked for a visual, or the answer is data with shape:
+- charts of data you already have (bar, line, area, pie, radar, scatter)
+- a table or dashboard comparing rows of real data
+- a small form, filter, or set of tabs the user needs to fill in or toggle
+- a graphic no built-in component can express — a 3D scene, a force-directed graph, a map, an animated simulation, a custom interactive card — drawn by hand with `JsCard`
+
+## When not to use
+Most turns need no drawing at all. Do not call this tool for:
+- greetings, thanks, small talk, or a question back to the user
+- explanations, plans, summaries, option lists, or anything you would otherwise say in a sentence or two
+- questions about yourself, your capabilities, this conversation, or the format of your replies
+- code, file contents, or command output — those belong in markdown code fences in your reply
+- a single number, a short list, or anything that already fits on one line
+
+## Arguments
+- `code` — one openui-lang program, the same language as an ```openui-lang block. It must define `root`, for example `root = Card([TextContent("Done")])`, and may build charts, tables, forms and layouts. Prefer referencing values on their own line before using them. When the vocabulary cannot express the visual, the program draws it itself: `JsCard` runs JavaScript you write in a sandboxed card, and `Html` / `Svg` render markup you write.
+- `title` — optional short heading shown above the drawing.
+
+## Rules
+- Never print the program in your reply, and never repeat it as text. The program is carried by this tool call, so the chat keeps only your prose.
+- At most one call per reply, and never as your entire reply. The sentence you write is what the user reads; the drawing supports it.
+- Never wrap a normal answer in a container (Card, Stack) just to make it look designed. A component is the answer only when it carries data or takes input.
+- Write the reply around the drawing: a short sentence of what it shows and what the user can do with it. Do not repeat the data as prose or as markdown tables, since the visualization already carries it.
+- Make the drawing self-contained. The numbers live in the program; only the `JsCard` and `Html` scripts can reach the network, and they must still draw from data you put there rather than from a request.
+- Rendering is local and read-only: it changes no files and needs no permission.

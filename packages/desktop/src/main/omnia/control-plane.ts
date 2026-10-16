@@ -22,6 +22,15 @@ export function isReady(): boolean {
   return controlPlaneAuth() !== undefined
 }
 
+/**
+ * A value that changes with the signed-in session, so a caller can tell "the same
+ * sign-in" apart from "signed in, signed out, or a different token".
+ */
+export function controlPlaneFingerprint(): string | undefined {
+  const auth = controlPlaneAuth()
+  return auth === undefined ? undefined : `${auth.url}\n${auth.clientToken}`
+}
+
 export async function fetchControlPlane(path: string, init: RequestInit = {}): Promise<Response> {
   const auth = controlPlaneAuth()
   if (auth === undefined) throw new Error(CONTROL_PLANE_SIGNED_OUT_MESSAGE)

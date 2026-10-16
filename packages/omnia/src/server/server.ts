@@ -529,13 +529,6 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     }
     const bound = server.address() as AddressInfo | null
     const port = bound === null ? 0 : bound.port
-    const host = options.host
-    if (host !== undefined && host !== "127.0.0.1" && host !== "localhost") {
-      const lan = Object.values(networkInterfaces())
-        .flat()
-        .find((entry) => entry !== undefined && entry.family === "IPv4" && entry.internal === false)
-      if (lan !== undefined) return `http://${lan.address}:${port}`
-    }
     return `http://127.0.0.1:${port}`
   }
 

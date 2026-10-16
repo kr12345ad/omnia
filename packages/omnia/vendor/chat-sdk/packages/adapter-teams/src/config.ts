@@ -1,0 +1,51 @@
+import type { AppOptions, IPlugin } from "@microsoft/teams.apps";
+import type { TeamsAdapterConfig } from "./types";
+
+/**
+ * Convert TeamsAdapterConfig (public API) to the Teams SDK AppOptions.
+ *
+ * Historically, TeamsAdapterConfig was built with BotFramework, which is now deprecated.
+ *
+ */
+export function toAppOptions(
+  config: Omit<TeamsAdapterConfig, "appId"> & { appId?: string }
+): Omit<AppOptions<IPlugin>, "httpServerAdapter"> {
+  if (config.certificate) {
+    throw new Error(
+      "Certificate-based authentication is not yet supported by the Teams SDK adapter. " +
+        "Use appPassword (client secret), federated (workload identity), or token (custom token factory) authentication instead."
+    );
+  }
+
+  const clientId = config.appId ?? process.env.TEAMS_APP_ID;
+  const clientSecret =
+    config.federated || config.token
+      ? undefined
+      : (config.appPassword ?? process.env.TEAMS_APP_PASSWORD);
+
+  // For SingleTenant, tenantId is required. For MultiTenant, omit it.
+  const tenantId =
+    config.appType === "MultiTenant"
+      ? undefined
+      : (config.appTenantId ?? process.env.TEAMS_APP_TENANT_ID);
+
+  if (config.federated?.clientAudience) {
+    config.logger?.warn(
+      "federated.clientAudience is not supported by the Teams SDK and will be ignored."
+    );
+  }
+
+  const managedIdentityClientId = config.federated?.clientId;
+  const serviceUrl = config.apiUrl ?? process.env.TEAMS_API_URL;
+
+  return {
+    ...(clientId ? { clientId } : {}),
+    ...(clientSecret ? { clientSecret } : {}),
+    // Empty string suppresses the SDK's generic CLIENT_SECRET env fallback.
+    ...(config.token ? { clientSecret: "" } : {}),
+    ...(tenantId ? { tenantId } : {}),
+    ...(managedIdentityClientId ? { managedIdentityClientId } : {}),
+    ...(config.token ? { token: config.token } : {}),
+    ...(serviceUrl ? { serviceUrl } : {}),
+  };
+}

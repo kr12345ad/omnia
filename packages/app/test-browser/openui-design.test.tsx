@@ -3,6 +3,7 @@ import { createRequire } from "node:module"
 import { realpathSync } from "node:fs"
 import { describe, expect, test } from "bun:test"
 import { createComponent, render } from "solid-js/web"
+import { dict as uiEn } from "@opencode-ai/ui/i18n/en"
 
 if (typeof document === "undefined") {
   const { GlobalRegistrator } = await import("@happy-dom/global-registrator")
@@ -234,6 +235,220 @@ describe("openui design foundation", () => {
     expect(srcdoc).toContain("html,body{margin:0")
     expect(srcdoc.indexOf("data-openui-theme")).toBeLessThan(srcdoc.indexOf("<canvas"))
     expect(host.querySelector('[data-slot="openui-html-title"]')!.textContent).toBe("Orbit")
+  })
+
+  // The component with no vocabulary behind it: the model writes JavaScript and
+  // the card runs it. What it can draw comes from the runtime it is handed, and
+  // what it cannot reach comes from the frame it cannot escape.
+  test("a JS card runs the model's script in a frame it cannot escape", async () => {
+    // A card colors itself from the app's palette, so one token is set here to
+    // prove it travels into the frame under the name the prompt promises.
+    document.documentElement.style.setProperty("--v2-text-text-base", "rgb(1, 2, 3)")
+    const host = mount(
+      [
+        "root = Stack([card])",
+        'card = JsCard("root.replaceChildren()\\nconst box = canvas().fit()\\nsetHeight(box.height)", "Orbit", 320, 60)',
+      ].join("\n"),
+    )
+
+    // Like Html: the script is mounted once the code stops arriving, because a
+    // frame re-mounts on every streaming delta and would restart a half-written
+    // program on each one.
+    expect(host.querySelector('[data-slot="openui-js-card-loading"]')).not.toBeNull()
+    await Bun.sleep(700)
+
+    const frame = host.querySelector<HTMLIFrameElement>('[data-slot="openui-js-card-frame"]')
+    expect(frame).not.toBeNull()
+    expect(frame!.getAttribute("sandbox")).toBe("allow-scripts")
+    expect(frame!.style.height).toBe("320px")
+
+    const srcdoc = frame!.getAttribute("srcdoc") ?? ""
+    // The model's code is carried into the frame as an escaped string, and the
+    // runtime it is called with is injected ahead of it rather than shipped as
+    // a dependency.
+    expect(srcdoc).toContain("root.replaceChildren()")
+    expect(srcdoc).toContain("openui-js-root")
+    expect(srcdoc).toContain("new Function")
+    // The height channel is how a card that draws to fit asks for a taller box,
+    // and the observer is how it measures the box it was given.
+    expect(srcdoc).toContain("openui-js-card-height")
+    expect(srcdoc).toContain("ResizeObserver")
+    // The bridge has to be declared before the script runs: the runtime reads the
+    // app's tokens straight off the root element's custom properties.
+    expect(srcdoc).toContain("data-openui-theme")
+    expect(srcdoc.indexOf("data-openui-theme")).toBeLessThan(srcdoc.indexOf("new Function"))
+    // The palette reaches the script as an object, not as a lookup it has to do
+    // itself: `--v2-text-text-base` is `theme.textTextBase`.
+    expect(srcdoc).toContain('"textTextBase":"rgb(1, 2, 3)"')
+
+    // The card owns its box: a height in pixels, and a width as a share of the
+    // answer instead of a pixel count the answer column cannot honor.
+    const card = host.querySelector<HTMLElement>('[data-component="openui-js-card"]')
+    expect(card!.style.width).toBe("60%")
+    expect(host.querySelector('[data-slot="openui-js-card-title"]')!.textContent).toBe("Orbit")
+
+    // Neither the program nor the script inside it leaks into the answer as text.
+    expect(host.textContent).not.toContain("const box = canvas().fit()")
+    expect(host.textContent).not.toContain("new Function")
+
+    document.documentElement.style.removeProperty("--v2-text-text-base")
+  })
+
+  // An embedded document owns every gesture over its box, and a wheel inside a
+  // frame never chains to the page, so a card that captured the pointer froze
+  // the answer: scrolling past it, and scrolling up, stopped working. The frame
+  // stays inert until it is deliberately entered.
+  test("a drawn frame only takes the pointer when it is clicked into", async () => {
+    const host = mount(
+      [
+        "root = Stack([card])",
+        'card = JsCard("root.replaceChildren()", "Orbit")',
+      ].join("\n"),
+    )
+    await Bun.sleep(700)
+
+    const gate = host.querySelector<HTMLElement>('[data-slot="openui-js-card-pointer-gate"]')
+    const frame = host.querySelector<HTMLIFrameElement>('[data-slot="openui-js-card-frame"]')
+    expect(gate).not.toBeNull()
+    // Inert by default: the wheel and the cursor reach the answer underneath, so
+    // the transcript keeps scrolling while the pointer is over the drawing.
+    expect(frame!.classList.contains("pointer-events-none")).toBe(true)
+    expect(gate!.classList.contains("cursor-pointer")).toBe(true)
+
+    gate!.click()
+    expect(frame!.classList.contains("pointer-events-none")).toBe(false)
+    // The active card is outlined, so it is visible which surface has the pointer.
+    expect(gate!.classList.contains("ring-1")).toBe(true)
+
+    // Escape hands it back, and so does a click anywhere outside the card.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }))
+    expect(frame!.classList.contains("pointer-events-none")).toBe(true)
+    gate!.click()
+    expect(frame!.classList.contains("pointer-events-none")).toBe(false)
+    document.body.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }))
+    expect(frame!.classList.contains("pointer-events-none")).toBe(true)
+  })
+
+  // The card scrolls its own overflow through the app, which is the other half
+  // of keeping its scrolling separate from the answer's.
+  test("a JS card's frame owns one scroll box and reports it", async () => {
+    const host = mount(
+      [
+        "root = Stack([card])",
+        'card = JsCard("root.replaceChildren()", "Orbit")',
+      ].join("\n"),
+    )
+    await Bun.sleep(700)
+
+    const srcdoc = host.querySelector<HTMLIFrameElement>('[data-slot="openui-js-card-frame"]')!.getAttribute("srcdoc") ?? ""
+    // One box, and it is the body: a frame that scrolled its viewport as well
+    // would have the reader's gesture and the app's forwarded one fighting over
+    // the same offset.
+    expect(srcdoc).toContain("overflow:auto")
+    expect(srcdoc).toContain("overflow:hidden")
+    expect(srcdoc).toContain("overscroll-behavior:contain")
+    // The channels the two halves agree on, and the hand-off the frame needs a
+    // non-passive listener for.
+    expect(srcdoc).toContain("openui-js-card-scroll-state")
+    expect(srcdoc).toContain("openui-js-card-scroll-overflow")
+    expect(srcdoc).toContain("{passive:false}")
+  })
+
+  // The gate is inert, so the frame never sees the reader's wheel. The app takes
+  // it instead whenever the box the frame reported can still move that way, and
+  // leaves it to the answer when it cannot.
+  test("a wheel over an inert frame is taken only while the frame can scroll", async () => {
+    const host = mount(
+      [
+        "root = Stack([card])",
+        'card = JsCard("root.replaceChildren()", "Orbit")',
+      ].join("\n"),
+    )
+    await Bun.sleep(700)
+
+    const gate = host.querySelector<HTMLElement>('[data-slot="openui-js-card-pointer-gate"]')!
+    const frame = host.querySelector<HTMLIFrameElement>('[data-slot="openui-js-card-frame"]')!
+    const asked: unknown[] = []
+    frame.contentWindow!.postMessage = ((message: unknown) => asked.push(message)) as never
+
+    // The frame reports a box with room below the reader's position.
+    const report = (scrollTop: number) =>
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "openui-js-card-scroll-state", scrollTop, scrollHeight: 900, clientHeight: 300 },
+          source: frame.contentWindow as Window,
+        }),
+      )
+    const wheel = (deltaY: number) => {
+      const event = new WheelEvent("wheel", { deltaY, bubbles: true, cancelable: true })
+      gate.dispatchEvent(event)
+      return event
+    }
+
+    report(0)
+    // Scrolling down is the card's, and the answer is stopped from taking it.
+    expect(wheel(120).defaultPrevented).toBe(true)
+    expect(asked).toContainEqual({ type: "openui-js-card-scroll", delta: 120 })
+    // Scrolling up is the answer's: the card has nothing above its first pixel.
+    expect(wheel(-120).defaultPrevented).toBe(false)
+
+    // At the end of its box the card hands the gesture back the same way.
+    report(600)
+    expect(wheel(120).defaultPrevented).toBe(false)
+    expect(asked).toHaveLength(1)
+  })
+
+  // The code is compiled before the card is given a frame. Code the engine cannot
+  // compile is the answer's failure to report — in the reader's language, with
+  // the engine's own message — instead of a stack trace printed inside a small
+  // frame under the drawing it could not make.
+  test("a JS card whose code does not compile is reported instead of run", async () => {
+    const host = mount(
+      [
+        "root = Stack([card])",
+        // The shape that reached the reader as "The card's script failed:
+        // Unexpected identifier 'cv'": a token the expression cannot continue
+        // from, on the same line.
+        'card = JsCard("const cv = canvas()\\nconst at = 1 cv", "Orbit", 320)',
+      ].join("\n"),
+    )
+    await Bun.sleep(700)
+
+    // Nothing was handed a frame, so nothing ran.
+    expect(host.querySelector('[data-slot="openui-js-card-frame"]')).toBeNull()
+    expect(host.querySelector('[data-slot="openui-js-card-pointer-gate"]')).toBeNull()
+
+    // The notice is the app's own surface, in the app's own words, carrying the
+    // engine's message verbatim so the code can be fixed.
+    const notice = host.querySelector<HTMLElement>('[data-slot="openui-js-card-error"]')
+    expect(notice).not.toBeNull()
+    expect(notice!.textContent).toContain(uiEn["ui.jsCard.invalid.title"])
+    expect(notice!.textContent).toContain("cv")
+    // The card keeps its identity: the reader still sees which drawing failed.
+    expect(host.querySelector('[data-slot="openui-js-card-title"]')!.textContent).toBe("Orbit")
+  })
+
+  // The frame has an opaque origin, so `postMessage` is the only way a script that
+  // throws while running can reach the app — the same channel the height request
+  // arrives on.
+  test("a script that throws while running is reported by the app", async () => {
+    const host = mount(["root = Stack([card])", 'card = JsCard("root.replaceChildren()", "Orbit")'].join("\n"))
+    await Bun.sleep(700)
+
+    const frame = host.querySelector<HTMLIFrameElement>('[data-slot="openui-js-card-frame"]')
+    expect(frame).not.toBeNull()
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "openui-js-card-failed", message: "canvas is not defined" },
+        source: frame!.contentWindow as Window,
+      }),
+    )
+
+    // The failed card is replaced by the notice rather than left as a blank box.
+    expect(host.querySelector('[data-slot="openui-js-card-frame"]')).toBeNull()
+    const notice = host.querySelector<HTMLElement>('[data-slot="openui-js-card-error"]')
+    expect(notice!.textContent).toContain(uiEn["ui.jsCard.failed.title"])
+    expect(notice!.textContent).toContain("canvas is not defined")
   })
 
   test("a hand-drawn Svg stays a drawing: executable markup goes, height is clamped", async () => {

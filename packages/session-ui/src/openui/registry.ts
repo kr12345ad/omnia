@@ -3,6 +3,7 @@ import { actionRenderers } from "./components/actions"
 import { contentRenderers } from "./components/content"
 import { dataRenderers } from "./components/data"
 import { formRenderers } from "./components/forms"
+import { jsCardRenderers } from "./components/js-card"
 import { layoutRenderers } from "./components/layout"
 import { visualRenderers } from "./components/visual"
 import type { OpenUIComponentRenderer, OpenUIRendererMap } from "./types"
@@ -32,6 +33,6 @@ export const openuiRenderers = {
  * Kept out of the `satisfies` map above on purpose: that contract is about the
  * generated library, and these names are deliberately not part of it.
  */
-export const openuiExtensionRenderers: OpenUIRendererMap = { ...visualRenderers }
+export const openuiExtensionRenderers: OpenUIRendererMap = { ...visualRenderers, ...jsCardRenderers }
 
 export { OPENUI_ROOT }

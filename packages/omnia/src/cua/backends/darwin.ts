@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process"
-import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { ROLES } from "../../protocol"
@@ -1222,7 +1222,16 @@ class DarwinCuaBackend implements CuaBackend {
         const temporary = `${binary}.tmp-${process.pid}`
         try {
           mkdirSync(dir, { recursive: true })
-          const current = existsSync(binary) && existsSync(source) ? statSync(binary).mtimeMs >= statSync(source).mtimeMs : false
+          // The cached binary is reusable only while the cached source still
+          // matches the helper this build ships. Timestamps alone cannot see a
+          // newer helper: nothing rewrites the cached .swift, so it keeps the
+          // same mtime as its binary and every later build silently keeps
+          // running the old helper.
+          const current =
+            existsSync(binary) &&
+            existsSync(source) &&
+            statSync(binary).mtimeMs >= statSync(source).mtimeMs &&
+            readFileSync(source, "utf8") === DARWIN_AX_HELPER
           if (current) return binary
           writeFileSync(source, DARWIN_AX_HELPER)
           await new Promise<void>((resolve, reject) => {

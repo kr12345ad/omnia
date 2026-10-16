@@ -1,0 +1,537 @@
+# @chat-adapter/shared
+
+## 4.42.0
+
+### Patch Changes
+
+- Updated dependencies [2f1cfa2]
+- Updated dependencies [daaa0ac]
+- Updated dependencies [fd291b8]
+- Updated dependencies [19c7aa2]
+- Updated dependencies [08081fa]
+- Updated dependencies [19c7aa2]
+- Updated dependencies [80e7bae]
+- Updated dependencies [08081fa]
+- Updated dependencies [7b7d73c]
+- Updated dependencies [f8527b2]
+- Updated dependencies [9a83b22]
+- Updated dependencies [8178fdb]
+- Updated dependencies [f635dbe]
+  - chat@4.42.0
+
+## 4.41.1
+
+### Patch Changes
+
+- Updated dependencies [6f17495]
+  - chat@4.41.1
+
+## 4.41.0
+
+### Patch Changes
+
+- 6adca36: Enforce the guarded download deadline inside `downloadAttachment` itself, for both the wait for response headers and the body read. A late response is destroyed, so the timeout holds even when a custom transport ignores the supplied signal.
+- 683eadc: Add `maskCodeSpans`, which blanks inline code spans and fenced code blocks using the same scanner as `replaceBareMentions`, so adapters can classify a mention token while ignoring the ones inside code.
+- Updated dependencies [f233ffe]
+- Updated dependencies [ad90432]
+- Updated dependencies [dc2a777]
+- Updated dependencies [139d337]
+- Updated dependencies [2e2426d]
+- Updated dependencies [8421953]
+- Updated dependencies [91683e5]
+- Updated dependencies [056d883]
+- Updated dependencies [c21ccbc]
+- Updated dependencies [fcdc1c9]
+  - chat@4.41.0
+
+## 4.40.0
+
+### Patch Changes
+
+- Updated dependencies [f485255]
+- Updated dependencies [b7c9316]
+- Updated dependencies [4a0b5c0]
+  - chat@4.40.0
+
+## 4.39.0
+
+### Minor Changes
+
+- 153bd96: guard Messenger attachment downloads against SSRF and oversized responses
+
+  `downloadAttachment` in `@chat-adapter/shared` accepts an optional `hosts` allowlist that restricts downloads, including redirect targets, to the given hosts and their subdomains. The Messenger adapter uses it to download attachment media only from Meta's `fbsbx.com` and `fbcdn.net` hosts, with the shared SSRF guard, 25 MB size cap, and 30 second timeout. External fallback and link-share URLs are rejected before any network request.
+
+- bb92688: secure anonymous attachment downloads against SSRF and oversized responses
+
+  `@chat-adapter/shared` gains `downloadAttachment`, a guarded downloader that refuses private and internal addresses (as URL literals, through DNS resolution, and after redirects), decodes compressed responses, caps the body size at 25 MB, and bounds the whole download with a 30 second timeout. All of these are configurable, including the transport for proxied deployments.
+
+  The Teams adapter uses it for anonymous attachment downloads. HTTPS attachments on any public host keep working, plain-HTTP URLs are refused, and the Bot Framework Emulator's loopback connector now uses bot authentication so local development keeps working.
+
+- e71bfea: Add `normalizeCodeFences` to `@chat-adapter/shared`: a code-fence normalizer for platforms whose triple-backtick fences treat the text after the opening fence as code rather than a CommonMark info string. Only paired fences become code blocks (unpaired fences, fences inside inline code, and fences on quoted lines stay literal text), text following a closing fence cannot be promoted to a block construct, and per-segment callbacks keep text-level rewrites out of code content.
+
+  The WhatsApp adapter now uses it when parsing incoming messages: the first line of a code block is preserved in message text and formatted content, and bold/strikethrough rewriting no longer corrupts fenced code.
+
+- b6fa24c: guard attachment downloads across the remaining adapters
+
+  Slack, Discord, and WhatsApp attachment downloads now go through the shared guarded downloader: private and internal addresses are refused (as URL literals, through DNS resolution, and after redirects), responses are capped at 25 MB, and downloads time out after 30 seconds. Slack sends the bot token only on hops to trusted Slack origins, and WhatsApp keeps its access token on Meta's media hosts and the configured Graph origin. Telegram enforces the same size cap and timeout with the Web Fetch API so downloads keep working in runtimes like Cloudflare Workers.
+
+  `downloadAttachment` in `@chat-adapter/shared` now resolves `headers` per hop (pass a function to control what each redirect target receives), forwards the resolved headers to custom transports, and accepts an `onResponse` hook to reject unexpected final responses before the body is read.
+
+### Patch Changes
+
+- Updated dependencies [2ce2be0]
+- Updated dependencies [16ea171]
+- Updated dependencies [169788b]
+- Updated dependencies [eddcd7e]
+- Updated dependencies [5b538f6]
+- Updated dependencies [929878b]
+- Updated dependencies [500b7e6]
+  - chat@4.39.0
+
+## 4.38.1
+
+### Patch Changes
+
+- Updated dependencies [6cb933e]
+- Updated dependencies [764e475]
+  - chat@4.38.1
+
+## 4.38.0
+
+### Patch Changes
+
+- Updated dependencies [0f24cc3]
+- Updated dependencies [bdeb2bf]
+- Updated dependencies [a0cba02]
+- Updated dependencies [83ede7e]
+- Updated dependencies [18d4a23]
+  - chat@4.38.0
+
+## 4.37.0
+
+### Patch Changes
+
+- Updated dependencies [2a2b2c5]
+- Updated dependencies [4ac0455]
+- Updated dependencies [0ec6a73]
+- Updated dependencies [85e3d22]
+  - chat@4.37.0
+
+## 4.36.0
+
+### Patch Changes
+
+- Updated dependencies [257a32d]
+- Updated dependencies [c5d86b1]
+- Updated dependencies [0153a39]
+- Updated dependencies [b547f45]
+- Updated dependencies [caa6325]
+  - chat@4.36.0
+
+## 4.35.0
+
+### Patch Changes
+
+- Updated dependencies [80def3a]
+- Updated dependencies [4cb7e5d]
+- Updated dependencies [46681f5]
+- Updated dependencies [93a58af]
+- Updated dependencies [25f3099]
+  - chat@4.35.0
+
+## 4.34.0
+
+### Patch Changes
+
+- Updated dependencies [5c926f1]
+- Updated dependencies [2531a42]
+- Updated dependencies [1721fa0]
+- Updated dependencies [4717a38]
+- Updated dependencies [6714efc]
+  - chat@4.34.0
+
+## 4.33.0
+
+### Minor Changes
+
+- d4c52ca: add `replaceBareMentions`, a context-aware bare-`@mention` resolver that skips code spans, URLs, schemeless hosts, and existing angle-bracket tokens before handing each real `@name` to a platform-specific replacer
+
+### Patch Changes
+
+- Updated dependencies [3abdc69]
+- Updated dependencies [0b63791]
+- Updated dependencies [0c761f1]
+- Updated dependencies [ef2542c]
+- Updated dependencies [24a04d5]
+- Updated dependencies [076fe5d]
+  - chat@4.33.0
+
+## 4.32.0
+
+### Patch Changes
+
+- Updated dependencies [eccc6b9]
+- Updated dependencies [438f551]
+- Updated dependencies [d034b8b]
+- Updated dependencies [06af3e1]
+- Updated dependencies [2e47351]
+- Updated dependencies [efa9610]
+  - chat@4.32.0
+
+## 4.31.0
+
+### Patch Changes
+
+- Updated dependencies [778ae69]
+- Updated dependencies [171657a]
+  - chat@4.31.0
+
+## 4.30.0
+
+### Patch Changes
+
+- Updated dependencies [5461ea9]
+  - chat@4.30.0
+
+## 4.29.0
+
+### Minor Changes
+
+- add2730: support typed Telegram attachment uploads
+
+### Patch Changes
+
+- e60bc8c: chore: set supported Node versions in engines
+- Updated dependencies [ac8a207]
+- Updated dependencies [e60bc8c]
+- Updated dependencies [b75eedb]
+  - chat@4.29.0
+
+## 4.28.1
+
+### Patch Changes
+
+- Updated dependencies [0cc3d06]
+  - chat@4.28.1
+
+## 4.28.0
+
+### Minor Changes
+
+- 9824d33: Security fixes for HIGH-severity findings:
+
+  - **adapter-slack**: Replace timing-unsafe `!==` with `crypto.timingSafeEqual` when validating the `x-slack-socket-token` header on forwarded socket-mode events.
+  - **adapter-github**: In multi-tenant App mode, eagerly auto-detect the bot user ID on the first installation client / first webhook so `isMe` checks work and self-reply loops are prevented. Falls back to `apps.getAuthenticated` + `users.getByUsername` when `users.getAuthenticated` is unavailable for installation tokens.
+  - **adapter-linear**: Add optional `encryptionKey` config (or `LINEAR_ENCRYPTION_KEY` env var) that AES-256-GCM-encrypts `accessToken` and `refreshToken` at rest in the state store. Tolerates plaintext records for zero-downtime rollout.
+  - **adapter-gchat**: Fail-closed by default — the constructor now throws `ValidationError` if neither `googleChatProjectNumber` nor `pubsubAudience` is configured. To accept unverified webhooks (development only), set the new `disableSignatureVerification: true` flag (or `GOOGLE_CHAT_DISABLE_SIGNATURE_VERIFICATION=true`). Mirrors the Slack adapter's signing-secret requirement.
+  - **adapter-shared**: New `decodeKey` / `encryptToken` / `decryptToken` / `isEncryptedTokenData` utilities (AES-256-GCM, hex or base64 32-byte keys), shared by Slack and Linear.
+
+### Patch Changes
+
+- Updated dependencies [eb5f94a]
+- Updated dependencies [c1cd9b5]
+- Updated dependencies [9824d33]
+- Updated dependencies [46d183b]
+- Updated dependencies [46d183b]
+- Updated dependencies [3490a8c]
+  - chat@4.28.0
+
+## 4.27.0
+
+### Patch Changes
+
+- Updated dependencies [8a0c7b3]
+- Updated dependencies [1e7c551]
+- Updated dependencies [b0ab804]
+- Updated dependencies [d630e6c]
+- Updated dependencies [b9a1961]
+- Updated dependencies [a520797]
+- Updated dependencies [70281dc]
+- Updated dependencies [9093292]
+- Updated dependencies [7e90d9c]
+- Updated dependencies [bca4792]
+- Updated dependencies [37dbb4a]
+- Updated dependencies [608d5f0]
+- Updated dependencies [a179b29]
+- Updated dependencies [a8f2aab]
+  - chat@4.27.0
+
+## 4.26.0
+
+### Patch Changes
+
+- Updated dependencies [2235c16]
+- Updated dependencies [ddb084b]
+  - chat@4.26.0
+
+## 4.25.0
+
+### Patch Changes
+
+- Updated dependencies [2700ce8]
+  - chat@4.25.0
+
+## 4.24.0
+
+### Patch Changes
+
+- 8d89274: fix: disable source maps in published packages
+- Updated dependencies [8d89274]
+- Updated dependencies [4f5d200]
+- Updated dependencies [27b34e1]
+  - chat@4.24.0
+
+## 4.23.0
+
+### Patch Changes
+
+- Updated dependencies [4166e09]
+  - chat@4.23.0
+
+## 4.22.0
+
+### Patch Changes
+
+- Updated dependencies [f2d8957]
+  - chat@4.22.0
+
+## 4.21.0
+
+### Patch Changes
+
+- Updated dependencies [e45a67f]
+- Updated dependencies [13ba1c7]
+- Updated dependencies [95fd8ce]
+  - chat@4.21.0
+
+## 4.20.2
+
+### Patch Changes
+
+- chat@4.20.2
+
+## 4.20.1
+
+### Patch Changes
+
+- Updated dependencies [e206371]
+- Updated dependencies [8d88b8c]
+  - chat@4.20.1
+
+## 4.20.0
+
+### Patch Changes
+
+- chat@4.20.0
+
+## 4.19.0
+
+### Patch Changes
+
+- Updated dependencies [eb49b2a]
+- Updated dependencies [5b41f08]
+- Updated dependencies [c4b0e69]
+  - chat@4.19.0
+
+## 4.18.0
+
+### Patch Changes
+
+- Updated dependencies [a3cfc1a]
+  - chat@4.18.0
+
+## 4.17.0
+
+### Patch Changes
+
+- Updated dependencies [cc65dc3]
+  - chat@4.17.0
+
+## 4.16.1
+
+### Patch Changes
+
+- Updated dependencies [130e780]
+- Updated dependencies [ff954f9]
+- Updated dependencies [f27c89b]
+  - chat@4.16.1
+
+## 4.16.0
+
+### Minor Changes
+
+- 02e7ef6: Implements table markdown rendering, and fully streaming markdown rendering including for Slack which has native streaming. Overhauls adapters to have better fallback-render behavior
+
+### Patch Changes
+
+- Updated dependencies [02e7ef6]
+- Updated dependencies [9522b04]
+- Updated dependencies [f5a75c9]
+- Updated dependencies [f0c7050]
+- Updated dependencies [73de82d]
+  - chat@4.16.0
+
+## 4.15.0
+
+### Minor Changes
+
+- 5b3090a: Add CardLink element
+
+### Patch Changes
+
+- Updated dependencies [0f85031]
+- Updated dependencies [5b3090a]
+  - chat@4.15.0
+
+## 4.14.0
+
+### Patch Changes
+
+- Updated dependencies [90dc325]
+  - chat@4.14.0
+
+## 4.13.4
+
+### Patch Changes
+
+- Updated dependencies [716ce2a]
+  - chat@4.13.4
+
+## 4.13.3
+
+### Patch Changes
+
+- Updated dependencies [ce33270]
+  - chat@4.13.3
+
+## 4.13.2
+
+### Patch Changes
+
+- Updated dependencies [7d00feb]
+  - chat@4.13.2
+
+## 4.13.1
+
+### Patch Changes
+
+- chat@4.13.1
+
+## 4.13.0
+
+### Patch Changes
+
+- Updated dependencies [f371c0d]
+  - chat@4.13.0
+
+## 4.12.0
+
+### Patch Changes
+
+- Updated dependencies [8c50252]
+  - chat@4.12.0
+
+## 4.11.0
+
+### Patch Changes
+
+- Updated dependencies [417374b]
+  - chat@4.11.0
+
+## 4.10.1
+
+### Patch Changes
+
+- Updated dependencies [c99b183]
+  - chat@4.10.1
+
+## 4.10.0
+
+### Patch Changes
+
+- Updated dependencies [c7d51cb]
+  - chat@4.10.0
+
+## 4.9.1
+
+### Patch Changes
+
+- 18ce1d0: Exclude action buttons from card fallback text so they no longer appear in Slack notification previews
+  - chat@4.9.1
+
+## 4.9.0
+
+### Patch Changes
+
+- chat@4.9.0
+
+## 4.8.0
+
+### Patch Changes
+
+- Updated dependencies [cca9867]
+  - chat@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- chat@4.7.2
+
+## 4.7.1
+
+### Patch Changes
+
+- Updated dependencies [160f1f7]
+  - chat@4.7.1
+
+## 4.7.0
+
+### Patch Changes
+
+- Updated dependencies [a13f43e]
+  - chat@4.7.0
+
+## 4.6.0
+
+### Patch Changes
+
+- Updated dependencies [68e3f74]
+  - chat@4.6.0
+
+## 4.5.0
+
+### Patch Changes
+
+- Updated dependencies [efa6b36]
+  - chat@4.5.0
+
+## 4.4.1
+
+### Patch Changes
+
+- 9e8f9e7: Serde support
+- Updated dependencies [1882732]
+- Updated dependencies [b5826c2]
+- Updated dependencies [9e8f9e7]
+  - chat@4.4.1
+
+## 4.4.0
+
+### Patch Changes
+
+- Updated dependencies [8ca6371]
+  - chat@4.4.0
+
+## 4.3.0
+
+### Minor Changes
+
+- 498eb04: Discord support
+
+### Patch Changes
+
+- d80ea3f: Refactor
+- Updated dependencies [498eb04]
+- Updated dependencies [d80ea3f]
+  - chat@4.3.0

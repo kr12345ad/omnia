@@ -210,6 +210,11 @@ export const AUDIT_TRAIL_LIMIT = 1000
 
 export class AuditTrail {
   #events: AuditEvent[] = []
+  #clearedAt: number | undefined
+
+  get clearedAt(): number | undefined {
+    return this.#clearedAt
+  }
 
   record(event: AuditEvent): AuditEvent {
     const safe = createAuditEvent({
@@ -238,6 +243,12 @@ export class AuditTrail {
     return Object.freeze([...this.#events])
   }
 
+  // A clear leaves a detectable gap: the timestamp is recorded so callers can
+  // tell the trail was wiped rather than simply empty from the start.
+  clear(): void {
+    this.#clearedAt = Date.now()
+    this.#events = []
+  }
 }
 
 export const audit = createAuditEvent

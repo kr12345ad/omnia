@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { app, ipcMain } from "electron"
 import { decryptString, encryptString, writeSecretFile } from "./secret-storage"
 import { Browser, Daemon, Pairing, Remote } from "@opencode-ai/omnia"
-import { controlPlaneAuth, fetchControlPlane } from "./control-plane"
+import { controlPlaneAuth, controlPlaneFingerprint, fetchControlPlane } from "./control-plane"
 import { readAuthSession } from "./auth-session"
 import { createControlPlaneDriver } from "./control-plane-driver"
 import type { AgentActivityEvent } from "./agent-state"
@@ -591,12 +591,6 @@ function requireString(value: unknown, label: string): string {
   return value
 }
 
-function authFingerprint(): string | undefined {
-  const auth = controlPlaneAuth()
-  if (auth === undefined) return undefined
-  return `${auth.url}\n${auth.clientToken}`
-}
-
 // Only a 401 from an /v1/auth/* call can retire the stored session. Any other
 // endpoint (registration, pairing) rejecting a request must leave the session
 // alone, otherwise a transient 401 signs the user out mid-session.
@@ -684,7 +678,7 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
 
 export async function syncControlPlaneRegistration(): Promise<void> {
   if (config !== undefined) return
-  const fingerprint = authFingerprint()
+  const fingerprint = controlPlaneFingerprint()
   if (fingerprint === undefined || fingerprint === suppressedFingerprint) {
     if (fingerprint === undefined) stopControlPlaneRuntime()
     return
@@ -791,7 +785,7 @@ export function registerRemoteAgentIpcHandlers(): void {
 
   ipcMain.handle("computers-pair-leave", async () => {
     const current = config
-    suppressedFingerprint = authFingerprint()
+    suppressedFingerprint = controlPlaneFingerprint()
     agent?.stop()
     agent = undefined
     activeDriver?.dispose?.()

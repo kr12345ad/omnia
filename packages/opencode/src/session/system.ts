@@ -34,12 +34,34 @@ import { OPENUI_SYSTEM_PROMPT } from "@opencode-ai/core/openui/prompt"
 // before editing, verify before claiming, and report what actually ran.
 export const chatMode = () => [PROMPT_CHAT_MODE]
 
+// The generated prompt documents the language for a fenced block, which the
+// client turns into components — but a fence is prose first: the program streams
+// through the transcript as raw markup before it is drawn. The `visualize` tool
+// carries the same program in its arguments, so the reply stays prose and only
+// the drawing appears. The tool description says this too; repeating it here
+// settles the conflict with the generated prompt's "keep it in one fenced block".
+//
+// The rest of the section is the restraint the generated library prompt cannot
+// state: it is a catalogue of components, and a catalogue of components reads as
+// an instruction to use them. Left to itself the model answers "what can you do"
+// with a Card, and then answers "stop using openui" with another Card.
+const PROMPT_RENDER_UI_TOOL = [
+  "### Answering in this app",
+  "",
+  "Answer in plain markdown by default. Most replies need no drawing at all: a greeting, an explanation, a plan, a status update, a question you were asked, a list of what you can do, or a question back to the user is prose and nothing else.",
+  "",
+  "When a drawing genuinely answers better than words — a chart, a table, a dashboard, a form — make it through the `visualize` tool: pass the openui-lang program as its `code` argument. Do not put a fenced openui-lang block in your reply: the fence streams into the transcript as markup, while a tool call is drawn by the client from the call's own arguments. Fall back to a fenced block only when the tool is unavailable.",
+  "",
+  "Never wrap a prose answer in a component to make it look designed, never answer a question about yourself, your capabilities, or the format of your replies with a component, and never make a drawing your entire reply: your words stand on their own and the drawing supports them. At most one drawing per reply.",
+].join("\n")
+
 // Generated from the same OpenUI component library the client renders
 // (packages/core/src/openui), so the model is only ever told about components
-// this build can actually draw, plus the hand-written section for the graphics
-// this build adds on top of that library (Html/Svg, see extensions.ts). Inline
-// mode keeps an answer conversational unless UI genuinely helps.
-export const renderUI = () => [OPENUI_SYSTEM_PROMPT, OPENUI_EXTENSION_PROMPT]
+// this build can actually draw, plus the hand-written sections for the graphics
+// this build adds on top of that library (Html/Svg, see extensions.ts) and for
+// the tool that carries a program (see above). Inline mode keeps an answer
+// conversational unless UI genuinely helps.
+export const renderUI = () => [OPENUI_SYSTEM_PROMPT, OPENUI_EXTENSION_PROMPT, PROMPT_RENDER_UI_TOOL]
 
 export function provider(model: Provider.Model) {
   if (model.api.id.includes("muse")) {

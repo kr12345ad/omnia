@@ -23,7 +23,7 @@ const SIDECAR_SERVICE_NAME = "opencode server"
 const SIDECAR_START_STALL_TIMEOUT = 60_000
 const SIDECAR_STOP_TIMEOUT = 6_000
 
-type SpawnLocalServerOptions = {
+export type SpawnLocalServerOptions = {
   userDataPath: string
   onStdout?: (message: string) => void
   onStderr?: (message: string) => void

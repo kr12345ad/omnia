@@ -1,0 +1,292 @@
+/**
+ * Slack adapter types.
+ */
+
+import type { AttachmentTransport } from "@chat-adapter/shared";
+import type { WebClientOptions } from "@slack/web-api";
+import type { AppContextEntity, Logger, RawMessage } from "chat";
+import type { SlackFetch } from "./fetch";
+import type { SlackWebhookVerifier } from "./webhook/index";
+
+export type SlackAdapterMode = "webhook" | "socket";
+
+/**
+ * Bot token configuration. Can be a static string, or a function that returns
+ * a token (optionally asynchronously). The function is invoked each time a
+ * token is needed, enabling rotation or lazy retrieval from a secret manager.
+ */
+export type SlackBotToken = string | (() => string | Promise<string>);
+
+/** Data stored per Slack workspace installation */
+export interface SlackInstallation {
+  botToken: string;
+  botUserId?: string;
+  /** Enterprise Grid org ID, when the workspace belongs to (or the app is installed org-wide on) a Grid org */
+  enterpriseId?: string;
+  /** True when this is an Enterprise Grid org-wide installation (stored under the enterprise ID) */
+  isEnterpriseInstall?: boolean;
+  teamName?: string;
+}
+
+/** Options for the feedback buttons appended to streamed replies. */
+export interface SlackFeedbackButtonsOptions {
+  /**
+   * `action_id` dispatched to `bot.onAction` when a button is clicked.
+   * Defaults to "message_feedback".
+   */
+  actionId?: string;
+  /** Label for the negative button. Defaults to "Bad response". */
+  negativeLabel?: string;
+  /** Action value dispatched for negative clicks. Defaults to "negative". */
+  negativeValue?: string;
+  /** Label for the positive button. Defaults to "Good response". */
+  positiveLabel?: string;
+  /** Action value dispatched for positive clicks. Defaults to "positive". */
+  positiveValue?: string;
+}
+
+/** A single suggested prompt shown in an assistant/agent thread. */
+export interface SlackSuggestedPrompt {
+  /** Full prompt text sent as the user's message when the prompt is clicked. */
+  message: string;
+  /** Short label shown on the prompt button. */
+  title: string;
+}
+
+/** Suggested prompts payload applied when an assistant/agent thread opens. */
+export interface SlackSuggestedPromptsOptions {
+  /** The prompts to display. Slack shows at most 4. */
+  prompts: SlackSuggestedPrompt[];
+  /** Optional heading shown above the prompts. */
+  title?: string;
+}
+
+/** Context passed to a dynamic `suggestedPrompts` resolver. */
+export interface SlackSuggestedPromptsContext {
+  /** The DM channel the assistant/agent thread lives in. */
+  channelId: string;
+  /** Enterprise the user opened the thread from (legacy assistant_view). */
+  enterpriseId?: string;
+  /** Active-view context entities (agent_view, when Slack folds context in). */
+  entities?: AppContextEntity[];
+  /** Team the user opened the conversation from. */
+  teamId?: string;
+  /** Assistant thread root (legacy assistant_view; absent under agent_view). */
+  threadTs?: string;
+  /** The user who opened the thread. */
+  userId: string;
+}
+
+/**
+ * Suggested prompts configuration: a static payload, or a resolver invoked
+ * each time an assistant/agent thread opens. Return null/undefined from the
+ * resolver to skip setting prompts for that thread.
+ */
+export type SlackSuggestedPrompts =
+  | SlackSuggestedPromptsOptions
+  | ((
+      context: SlackSuggestedPromptsContext
+    ) =>
+      | SlackSuggestedPromptsOptions
+      | null
+      | undefined
+      | Promise<SlackSuggestedPromptsOptions | null | undefined>);
+
+/**
+ * Result of `SlackAdapter.stream()`. A reply that streams longer than
+ * `streamSegmentMaxAgeMs` is split into several Slack messages; `id` is the
+ * last one and `messageIds` lists all of them in order, ending with `id`.
+ */
+export interface SlackStreamResult extends RawMessage<unknown> {
+  messageIds: string[];
+}
+
+/** Context passed to a dynamic agent-session title resolver. */
+export interface SlackSessionTitleContext {
+  channelId: string;
+  text: string;
+  threadTs: string;
+  userId: string;
+}
+
+/**
+ * Automatic agent-session title configuration. `true` uses the first line of
+ * the root message, `false` disables automatic titles, and a resolver can
+ * provide a custom title or return null to skip it.
+ */
+export type SlackSessionTitle =
+  | boolean
+  | ((
+      context: SlackSessionTitleContext
+    ) => string | null | Promise<string | null>);
+
+export interface SlackAdapterConfig {
+  /**
+   * Enable Slack's Agent messaging experience (`agent_view` manifest mode).
+   * When true, `app_home_opened` is treated as the DM-open signal regardless of
+   * tab and folded active-view context is surfaced. Defaults to false (legacy
+   * `assistant_view`).
+   */
+  agentView?: boolean;
+  /** Override the Slack API base URL (e.g. "https://slack-gov.com/api/" for GovSlack). Defaults to SLACK_API_URL env var. */
+  apiUrl?: string;
+  /** App-level token (xapp-...). Required for socket mode. */
+  appToken?: string;
+  /**
+   * Bot token (xoxb-...). Required for single-workspace mode. Omit for multi-workspace.
+   * May be a string, or a function returning a string or Promise<string> (called
+   * on each use to support rotation or deferred resolution).
+   */
+  botToken?: SlackBotToken;
+  /** Bot user ID (will be fetched if not provided) */
+  botUserId?: string;
+  /** Slack app client ID (required for OAuth / multi-workspace) */
+  clientId?: string;
+  /** Slack app client secret (required for OAuth / multi-workspace) */
+  clientSecret?: string;
+  /**
+   * Base64-encoded 32-byte AES-256-GCM encryption key.
+   * If provided, bot tokens stored via setInstallation() will be encrypted at rest.
+   */
+  encryptionKey?: string;
+  /**
+   * Append Slack's native feedback buttons (a `context_actions` block with a
+   * `feedback_buttons` element) to every streamed reply, attached when the
+   * stream finishes. Clicks dispatch to `bot.onAction` with the configured
+   * `actionId` and a positive/negative value. Pass `true` for defaults, or an
+   * options object to customize labels, values, and the action id. Skipped
+   * when a stream falls back to post-and-edit.
+   */
+  feedbackButtons?: boolean | SlackFeedbackButtonsOptions;
+  /**
+   * Fetch implementation for response_url requests and Socket Mode webhook
+   * forwarding. Defaults to globalThis.fetch at request time. Does not affect
+   * Web API clients, Socket Mode connections, files, or standalone /api helpers.
+   */
+  fetch?: SlackFetch;
+  /**
+   * Transport for lazy and rehydrated file downloads. Replaces the default
+   * DNS-pinned HTTPS transport, which is the only place resolved addresses
+   * are checked against the private-range blocklist, so the transport or
+   * egress proxy must reject internal destination addresses and DNS
+   * rebinding. Return the raw response without following redirects, and
+   * honor the supplied AbortSignal. The downloader still validates URLs,
+   * limits redirects, scopes credentials, destroys the response at the
+   * deadline, and caps the body size. Subclass createFileTransport()
+   * overrides take precedence.
+   */
+  fileTransport?: AttachmentTransport;
+  /**
+   * Prefix for the state key used to store workspace installations.
+   * Defaults to `slack:installation`. The full key will be `{prefix}:{teamId}`.
+   */
+  installationKeyPrefix?: string;
+  /**
+   * External installation provider for multi-workspace apps using external
+   * token management (e.g., Vercel Connect). When set, the adapter bypasses
+   * internal StateAdapter storage for token lookups.
+   *
+   * For Enterprise Grid org-wide installs, `installationId` will be the
+   * enterprise ID; otherwise it will be the team ID.
+   */
+  installationProvider?: {
+    getInstallation: (
+      installationId: string,
+      isEnterpriseInstall: boolean
+    ) => Promise<SlackInstallation | null>;
+  };
+  /**
+   * Default rotating loading messages for the assistant thinking indicator
+   * (`assistant.threads.setStatus` `loading_messages`). Used by `startTyping`
+   * and `setAssistantStatus` when no explicit status/messages are passed.
+   */
+  loadingMessages?: string[];
+  /** Logger instance for error reporting. Defaults to ConsoleLogger. */
+  logger?: Logger;
+  /** Connection mode: "webhook" (default) or "socket" */
+  mode?: SlackAdapterMode;
+  /**
+   * Use Slack's native streaming API (`chat.startStream` / `chat.appendStream`
+   * / `chat.stopStream`) for streamed posts. Defaults to true. Set false on
+   * Slack flavours without the streaming methods (e.g. GovSlack) to always
+   * stream via post-and-edit; the adapter also falls back automatically when
+   * the workspace rejects the first native call.
+   */
+  nativeStreaming?: boolean;
+  /**
+   * Automatically title new agent sessions from their root user message.
+   * Defaults to true when `agentView` is enabled. Pass false to disable or a
+   * resolver to customize the title.
+   */
+  sessionTitle?: SlackSessionTitle;
+  /** Signing secret for webhook verification. Defaults to SLACK_SIGNING_SECRET env var. */
+  signingSecret?: string;
+  /** Shared secret for authenticating forwarded socket mode events. Auto-detected from SLACK_SOCKET_FORWARDING_SECRET. Falls back to appToken if not set. */
+  socketForwardingSecret?: string;
+  /**
+   * Maximum lifetime of one native Slack stream segment before the adapter
+   * finalizes it and continues in a new segment. Defaults to 240 seconds,
+   * safely below Slack's roughly five-minute stream expiry.
+   */
+  streamSegmentMaxAgeMs?: number;
+  /**
+   * Suggested prompts to pin automatically when an assistant/agent thread
+   * opens. Applied on `assistant_thread_started` (legacy `assistant_view`)
+   * and on Messages-tab `app_home_opened` (with `agentView` enabled, where
+   * prompts sit at the top of the agent conversation). Pass a static payload
+   * or a resolver that receives the thread context (user, channel,
+   * active-view entities) and returns prompts per thread.
+   */
+  suggestedPrompts?: SlackSuggestedPrompts;
+  /** Override bot username (optional) */
+  userName?: string;
+  /**
+   * Options forwarded to the underlying `@slack/web-api` `WebClient` instances, both the
+   * default client and the per-token clients used for multi-workspace requests.
+   *
+   * Use this to tune Web API behavior the adapter does not otherwise expose, most
+   * notably `retryConfig` and `timeout`. By default the WebClient retries rate-limited
+   * (429) requests with `retryPolicies.tenRetriesInAboutThirtyMinutes`, so a single
+   * `chat.update`/`chat.postMessage` can block for ~30 minutes under sustained rate
+   * limiting. Callers that stream frequent edits (where a hung call can stall a whole
+   * turn) will typically want a bounded policy and/or a timeout. `timeout` applies to
+   * each HTTP request attempt, not the total retry period. Set
+   * `rejectRateLimitedCalls` to reject 429 responses without waiting for `Retry-After`.
+   *
+   * ```ts
+   * import { retryPolicies } from "@slack/web-api";
+   * createSlackAdapter({
+   *   signingSecret,
+   *   webClientOptions: { retryConfig: retryPolicies.fiveRetriesInFiveMinutes, timeout: 15_000 },
+   * });
+   * ```
+   *
+   * `agent` also configures Socket Mode, both its HTTP calls and its
+   * WebSocket. `tls` and `apiUrl` reach only Socket Mode's HTTP calls; the
+   * SDK opens the WebSocket with the agent alone, so a custom CA or other
+   * TLS settings for that connection belong on the agent. None of these
+   * configure `fetch` or `fileTransport`. Other options apply only to Web
+   * API clients. Use `apiUrl` to override the Slack Web API base URL.
+   */
+  webClientOptions?: Omit<WebClientOptions, "slackApiUrl">;
+  /**
+   * Custom webhook verifier. Used in place of `signingSecret`.
+   * Receives the incoming `Request` and the raw body text already
+   * read by the adapter. To reject the request, either
+   * return a falsy value (sync or async) or throw/reject; the adapter will
+   * respond with `401 Invalid signature`. Any truthy return value is treated
+   * as a successful verification. If a string is returned, it replaces the
+   * raw body for downstream parsing — useful when the verifier needs to
+   * canonicalize or substitute the verified payload.
+   *
+   * `webhookVerifier` takes precedence over `signingSecret` and the
+   * `SLACK_SIGNING_SECRET` env var; when it is set, those are ignored.
+   *
+   * SECURITY: When this is used in place of `signingSecret`, the built-in
+   * Slack timestamp tolerance check is NOT performed. Implementations are
+   * responsible for verifying the `x-slack-request-timestamp` header (or an
+   * equivalent freshness signal) to prevent replay of captured signed
+   * requests.
+   */
+  webhookVerifier?: SlackWebhookVerifier;
+}

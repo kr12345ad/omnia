@@ -1,0 +1,81 @@
+{
+  "name": "@chat-adapter/gmail",
+  "version": "4.42.0",
+  "description": "Gmail adapter for Chat SDK with authenticated mailbox notifications and threaded email replies",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./api": {
+      "types": "./dist/api.d.ts",
+      "import": "./dist/api.js"
+    },
+    "./format": {
+      "types": "./dist/format.d.ts",
+      "import": "./dist/format.js"
+    },
+    "./webhook": {
+      "types": "./dist/webhook.d.ts",
+      "import": "./dist/webhook.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@chat-adapter/shared": "workspace:*",
+    "chat": "workspace:*",
+    "html-to-text": "^9.0.5",
+    "jose": "^6.2.3",
+    "mimetext": "^3.0.28",
+    "postal-mime": "^3.0.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@chat-adapter/state-memory": "workspace:*",
+    "@chat-adapter/tests": "workspace:*",
+    "@types/node": "^25.3.2",
+    "@types/html-to-text": "^9.0.4",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^5.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vercel/chat.git",
+    "directory": "packages/adapter-gmail"
+  },
+  "homepage": "https://chat-sdk.dev/adapters/official/gmail",
+  "bugs": {
+    "url": "https://github.com/vercel/chat/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "chat",
+    "chat-sdk",
+    "gmail",
+    "email",
+    "google",
+    "pubsub",
+    "typescript",
+    "vercel"
+  ],
+  "license": "MIT"
+}

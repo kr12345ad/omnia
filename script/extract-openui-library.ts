@@ -107,12 +107,29 @@ const COMPONENTS = [
 ]
 
 /**
+ * The upstream prompt is written for a UI-generation app: its opening line says
+ * the model's ENTIRE response must be openui-lang, and `inlineMode` does not
+ * soften it. In chat that persona wins over the inline-mode rules further down,
+ * so every answer — even "what can you do" — comes back as a card. Replace it
+ * with a chat-first persona instead. Applied to the generated text so a
+ * regeneration cannot reintroduce it.
+ */
+const UPSTREAM_PERSONA =
+  "You are an AI assistant that responds using openui-lang, a declarative UI language. Your ENTIRE response must be valid openui-lang code — no markdown, no explanations, just openui-lang."
+
+const CHAT_PERSONA =
+  "You are a helpful assistant having a conversation, and you answer in plain markdown by default. Most replies need no drawing at all: a greeting, an explanation, a plan, a question you were asked, a status update, or a list of what you can do is prose and nothing else. When — and only when — a visual or interactive answer is genuinely clearer than prose (a chart, a table, a dashboard, a form) you include one fenced openui-lang block built from the language below. A drawing is never the whole reply: your words stand on their own and the block supports them. The rules below describe that language for when you do draw."
+
+/**
  * Extra rules appended to the generated prompt. The generated prompt is written
  * for a UI-generation app where every answer is openui-lang; Omnia is a chat
  * first, so the model is told when not to reach for UI at all.
  */
 const ADDITIONAL_RULES = [
   "Only render these components when a visual or interactive answer is genuinely clearer than prose. For a normal question or explanation, answer in plain markdown text with no openui-lang block at all.",
+  "Never wrap prose in Card, Stack or any other container just to make an answer look designed. A component is the answer only when it carries data or accepts input — a chart, a table, a dashboard, a form — never a decorated restatement of a sentence.",
+  "Never answer a question about yourself, your capabilities, this conversation, or the format of your replies with a component. Those answers are plain text.",
+  "At most one fenced openui-lang block per reply, and never a second one that repeats what the first already shows.",
   "Never repeat data in prose that you have already rendered as a component, and never leave a component empty.",
   "Prefer Table for comparisons, charts for trends, Callout for warnings, and Form only when the user needs to submit structured input.",
   "When you render UI, keep it in one fenced ```openui-lang block. Text outside the block is shown as chat to the user.",
@@ -201,7 +218,9 @@ const library: LibrarySpec = {
 const prompt = generateSystemPrompt({
   library,
   promptOptions: { tools: [], examples: [], inlineMode: true, additionalRules: ADDITIONAL_RULES },
-})
+}).replace(UPSTREAM_PERSONA, CHAT_PERSONA)
+
+if (prompt.includes(UPSTREAM_PERSONA)) throw new Error("the generated prompt still opens with the UI-generation persona")
 
 const banner = `// GENERATED FILE — do not edit by hand.
 // Source: thesysdev/openui @openuidev/react-ui openuiLibrary, pruned to the

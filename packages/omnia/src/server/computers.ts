@@ -526,6 +526,8 @@ export interface BatchResult {
 }
 
 const AMBIGUITY_GAP = 0.08
+const OMNIA_STRICT_JAIL = process.env.OMNIA_STRICT_JAIL !== "0"
+const workspaceRoot = process.env.OMNIA_WORKSPACE_ROOT ?? process.cwd()
 
 export interface TypeSlice {
   readonly text: string
@@ -2822,6 +2824,29 @@ export class ComputerManager {
     return { credential, value: credential.secret, required: resolution.required }
   }
 
+  private assertCwd(cwd: string | undefined): string | undefined {
+    if (cwd === undefined) return undefined
+    if (!OMNIA_STRICT_JAIL) return cwd
+    const { resolve, relative, isAbsolute } = require("node:path") as typeof import("node:path")
+    const root = resolve(workspaceRoot)
+    const target = resolve(root, cwd)
+    const rel = relative(root, target)
+    if (rel.startsWith("..") || isAbsolute(rel)) return undefined
+    return target
+  }
+
+  private assertEnv(env: Readonly<Record<string, string>> | undefined): Record<string, string> | undefined {
+    if (env === undefined) return undefined
+    if (!OMNIA_STRICT_JAIL) return { ...env }
+    const denied = ["LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "PYTHONSTARTUP", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH", "NODE_OPTIONS"]
+    const result: Record<string, string> = {}
+    for (const [key, value] of Object.entries(env)) {
+      if (denied.includes(key.toUpperCase())) continue
+      result[key] = value
+    }
+    return result
+  }
+
   private async executeCommand(computer: ManagedComputer, request: ServerActionRequest): Promise<ExecuteOutcome> {
     const id = computer.id
     if (!computer.driver.runCommand) {
@@ -2937,11 +2962,13 @@ export class ComputerManager {
       },
     })
 
+    const safeCwd = this.assertCwd(request.cwd)
+    const safeEnv = this.assertEnv(env)
     const executed = await computer.driver.runCommand({
       command: effectiveCommand,
-      ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+      ...(safeCwd === undefined ? {} : { cwd: safeCwd }),
       ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
-      ...(env === undefined ? {} : { env }),
+      ...(safeEnv === undefined ? {} : { env: safeEnv }),
       ...(stdin === undefined ? {} : { stdin }),
     })
     const secrets = credential === undefined ? [] : [credential.secret]

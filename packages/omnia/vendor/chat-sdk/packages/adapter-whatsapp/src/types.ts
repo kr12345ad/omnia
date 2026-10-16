@@ -1,0 +1,520 @@
+/**
+ * Type definitions for the WhatsApp adapter.
+ *
+ * Based on the WhatsApp Business Cloud API (Meta Graph API).
+ * @see https://developers.facebook.com/docs/whatsapp/cloud-api
+ */
+
+import type { Logger } from "chat";
+
+// =============================================================================
+// Configuration
+// =============================================================================
+
+/**
+ * WhatsApp adapter configuration.
+ *
+ * Requires a System User access token for API calls and an App Secret
+ * for webhook signature verification.
+ *
+ * @see https://developers.facebook.com/docs/whatsapp/cloud-api/get-started
+ */
+export interface WhatsAppAdapterConfig {
+  /** Access token (System User token) for WhatsApp Cloud API calls. Defaults to WHATSAPP_ACCESS_TOKEN env var. */
+  accessToken?: string;
+  /** Override the Meta Graph API base URL (e.g. for on-premise deployments). Defaults to "https://graph.facebook.com". */
+  apiUrl?: string;
+  /** Meta Graph API version (default: "v25.0") */
+  apiVersion?: string;
+  /** Meta App Secret for webhook HMAC-SHA256 signature verification. Defaults to WHATSAPP_APP_SECRET env var. */
+  appSecret?: string;
+  /** Logger instance for error reporting */
+  logger?: Logger;
+  /** WhatsApp Business phone number ID (not the phone number itself). Defaults to WHATSAPP_PHONE_NUMBER_ID env var. */
+  phoneNumberId?: string;
+  /** Bot display name used for identification */
+  userName?: string;
+  /** Verify token for webhook challenge-response verification. Defaults to WHATSAPP_VERIFY_TOKEN env var. */
+  verifyToken?: string;
+}
+
+// =============================================================================
+// Thread ID
+// =============================================================================
+
+/**
+ * Decoded thread ID for WhatsApp.
+ *
+ * WhatsApp conversations are always 1:1 between a business phone number
+ * and a user. There is no concept of threads or channels.
+ *
+ * Format: whatsapp:{phoneNumberId}:{userWaId}
+ */
+export interface WhatsAppThreadId {
+  /** Business phone number ID */
+  phoneNumberId: string;
+  /** User routing identifier, which may be a phone number or BSUID */
+  userWaId: string;
+}
+
+// =============================================================================
+// Webhook Payloads
+// =============================================================================
+
+/**
+ * Top-level webhook notification envelope from Meta.
+ *
+ * @see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/components
+ */
+export interface WhatsAppWebhookPayload {
+  entry: WhatsAppWebhookEntry[];
+  object: "whatsapp_business_account";
+}
+
+/**
+ * A single entry in the webhook notification.
+ */
+export interface WhatsAppWebhookEntry {
+  changes: WhatsAppWebhookChange[];
+  id: string;
+}
+
+/**
+ * A change object containing the actual event data.
+ *
+ * Only `messages` and `user_id_update` changes are consumed by the
+ * adapter; other subscription fields are ignored.
+ */
+export interface WhatsAppWebhookChange {
+  field: string;
+  value: WhatsAppWebhookValue;
+}
+
+/**
+ * The value payload containing messages, contacts, and statuses.
+ */
+export interface WhatsAppWebhookValue {
+  contacts?: WhatsAppContact[];
+  messages?: WhatsAppInboundMessage[];
+  messaging_product: "whatsapp";
+  metadata: {
+    display_phone_number: string;
+    phone_number_id: string;
+  };
+  statuses?: WhatsAppStatus[];
+  user_id_update?: WhatsAppUserIdUpdate[];
+}
+
+/**
+ * A business-scoped user ID rotation delivered under
+ * `field: "user_id_update"`. Meta sends it when a phone number change
+ * regenerates a user's BSUID, carrying the previous and current values
+ * so existing records can be re-linked.
+ *
+ * @see https://developers.facebook.com/documentation/business-messaging/whatsapp/business-scoped-user-ids
+ */
+export interface WhatsAppUserIdUpdate {
+  /** Human-readable description of the update */
+  detail?: string;
+  /** Previous and current parent BSUID, when parent BSUIDs are enabled */
+  parent_user_id?: { current?: string; previous?: string };
+  timestamp?: string;
+  /** Previous and current BSUID */
+  user_id?: { current?: string; previous?: string };
+  /** User's phone number, omitted when sharing conditions aren't met */
+  wa_id?: string;
+}
+
+/**
+ * Contact information from an inbound message.
+ */
+export interface WhatsAppContact {
+  parent_user_id?: string;
+  profile: { name: string; username?: string };
+  user_id?: string;
+  wa_id?: string;
+}
+
+/**
+ * Inbound message from a user.
+ *
+ * @see https://developers.facebook.com/docs/whatsapp/cloud-api/webhooks/payload-examples
+ */
+export interface WhatsAppInboundMessage {
+  /** Audio message content */
+  audio?: {
+    id: string;
+    mime_type: string;
+    sha256: string;
+    voice?: boolean;
+  };
+  /** Legacy button response (from template quick replies) */
+  button?: {
+    payload: string;
+    text: string;
+  };
+  /**
+   * Context accompanying quoted replies, forwarded messages, and catalog
+   * product inquiries. The shape depends on the message origin: replies (and
+   * interactions with a business message) carry `from` and `id`, forwarded
+   * messages carry only `forwarded` or `frequently_forwarded`, and catalog
+   * product inquiries add `referred_product`. No field is present in every
+   * variant.
+   *
+   * @see https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/text
+   */
+  context?: {
+    /** True when the message was forwarded five or fewer times; forwards only */
+    forwarded?: boolean;
+    /** True when the message was forwarded more than five times; forwards only */
+    frequently_forwarded?: boolean;
+    /**
+     * Sender of the quoted message on a reply, or the business display phone
+     * number when the message came from a "Message business" button. Absent on
+     * forwards.
+     */
+    from?: string;
+    /**
+     * ID of the quoted message on a reply, or of the message the user tapped
+     * "Message business" from. Absent on forwards.
+     */
+    id?: string;
+    /** Product the customer is asking about; catalog inquiries only */
+    referred_product?: {
+      catalog_id: string;
+      product_retailer_id: string;
+    };
+  };
+  /** Document message content */
+  document?: {
+    caption?: string;
+    filename?: string;
+    id: string;
+    mime_type: string;
+    sha256: string;
+  };
+  /** Sender's WhatsApp ID */
+  from?: string;
+  from_parent_user_id?: string;
+  from_user_id?: string;
+  /** Unique message ID */
+  id: string;
+  /** Image message content */
+  image?: {
+    caption?: string;
+    id: string;
+    mime_type: string;
+    sha256: string;
+  };
+  /** Interactive message reply */
+  interactive?: {
+    button_reply?: {
+      id: string;
+      title: string;
+    };
+    list_reply?: {
+      description?: string;
+      id: string;
+      title: string;
+    };
+    type: "button_reply" | "list_reply";
+  };
+  /** Location message content */
+  location?: {
+    address?: string;
+    latitude: number;
+    longitude: number;
+    name?: string;
+    url?: string;
+  };
+  /** Reaction to a message */
+  reaction?: {
+    emoji: string;
+    message_id: string;
+  };
+  /** Sticker message content */
+  sticker?: {
+    animated: boolean;
+    id: string;
+    mime_type: string;
+    sha256: string;
+  };
+  system?: {
+    body: string;
+    parent_user_id?: string;
+    type: "user_changed_number" | "user_changed_user_id";
+    user_id: string;
+    wa_id?: string;
+  };
+  /** Text message content */
+  text?: {
+    body: string;
+  };
+  /** Unix timestamp string */
+  timestamp: string;
+  /** Message type */
+  type:
+    | "text"
+    | "image"
+    | "document"
+    | "audio"
+    | "video"
+    | "voice"
+    | "sticker"
+    | "location"
+    | "contacts"
+    | "interactive"
+    | "button"
+    | "reaction"
+    | "order"
+    | "system"
+    | "template";
+  /** Video message content */
+  video?: {
+    caption?: string;
+    id: string;
+    mime_type: string;
+    sha256: string;
+  };
+  /** Voice message content */
+  voice?: {
+    id: string;
+    mime_type: string;
+    sha256: string;
+  };
+}
+
+/**
+ * Response from the media URL endpoint.
+ *
+ * @see https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media#get-media-url
+ */
+export interface WhatsAppMediaResponse {
+  file_size: number;
+  id: string;
+  messaging_product: "whatsapp";
+  mime_type: string;
+  sha256: string;
+  url: string;
+}
+
+/**
+ * Response from uploading media via the Cloud API.
+ *
+ * @see https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media#upload-media
+ */
+export interface WhatsAppMediaUploadResponse {
+  id: string;
+}
+
+/**
+ * Message delivery/read status update.
+ */
+export interface WhatsAppStatus {
+  conversation?: {
+    expiration_timestamp?: string;
+    id: string;
+    origin: { type: string };
+  };
+  id: string;
+  pricing?: {
+    billable: boolean;
+    category: string;
+    pricing_model: string;
+  };
+  recipient_id?: string;
+  recipient_parent_user_id?: string;
+  recipient_user_id?: string;
+  status: "sent" | "delivered" | "read" | "failed";
+  timestamp: string;
+}
+
+// =============================================================================
+// API Response Types
+// =============================================================================
+
+/**
+ * Response from sending a message via the Cloud API.
+ */
+export interface WhatsAppSendResponse {
+  contacts: Array<{ input: string; user_id?: string; wa_id?: string }>;
+  messages: Array<{ id: string }>;
+  messaging_product: "whatsapp";
+}
+
+/**
+ * Response from sending a typing indicator via the Cloud API.
+ */
+export interface WhatsAppTypingIndicatorResponse {
+  success: boolean;
+}
+
+/**
+ * Error object returned by the Meta Graph API on a failed request.
+ *
+ * @see https://developers.facebook.com/documentation/business-messaging/whatsapp/support/error-codes/
+ */
+export interface WhatsAppGraphError {
+  code?: number;
+  error_data?: {
+    details?: string;
+    messaging_product?: string;
+  };
+  /** Optional and deprecated in the Cloud API. */
+  error_subcode?: number;
+  fbtrace_id?: string;
+  message?: string;
+  type?: string;
+}
+
+/**
+ * Body of a failed Meta Graph API response.
+ */
+export interface WhatsAppGraphErrorBody {
+  error?: WhatsAppGraphError;
+}
+
+/**
+ * Fields shared by every interactive message shape.
+ */
+interface WhatsAppInteractiveBase {
+  body: { text: string };
+  footer?: { text: string };
+  header?: {
+    text: string;
+    type: "text";
+  };
+}
+
+/**
+ * Interactive message payload for sending buttons, lists, or CTA URLs.
+ *
+ * Discriminated on `type` so each interactive shape can only carry its
+ * legal action — a `button` message with a `cta_url` action is a Cloud
+ * API 400, and this union makes it a compile error instead.
+ */
+export type WhatsAppInteractiveMessage =
+  | (WhatsAppInteractiveBase & {
+      action: {
+        buttons: Array<{
+          reply: {
+            id: string;
+            title: string;
+          };
+          type: "reply";
+        }>;
+      };
+      type: "button";
+    })
+  | (WhatsAppInteractiveBase & {
+      action: {
+        button: string;
+        sections: Array<{
+          rows: Array<{
+            description?: string;
+            id: string;
+            title: string;
+          }>;
+          title: string;
+        }>;
+      };
+      type: "list";
+    })
+  | (WhatsAppInteractiveBase & {
+      action: {
+        name: "cta_url";
+        parameters: {
+          display_text: string;
+          url: string;
+        };
+      };
+      type: "cta_url";
+    });
+
+// =============================================================================
+// Template Messages
+// =============================================================================
+
+/**
+ * Parameter for a template header or body component.
+ *
+ * @see https://developers.facebook.com/docs/whatsapp/cloud-api/reference/messages#parameter-object
+ */
+export type WhatsAppTemplateParameter =
+  | { text: string; type: "text" }
+  | {
+      currency: {
+        amount_1000: number;
+        code: string;
+        fallback_value: string;
+      };
+      type: "currency";
+    }
+  | {
+      date_time: { fallback_value: string };
+      type: "date_time";
+    }
+  | { image: { id?: string; link?: string }; type: "image" }
+  | {
+      document: { filename?: string; id?: string; link?: string };
+      type: "document";
+    }
+  | { type: "video"; video: { id?: string; link?: string } };
+
+/**
+ * Parameter for a template button component.
+ *
+ * URL buttons take a text parameter substituted into the button's URL;
+ * quick reply buttons take a payload echoed back in the button response.
+ */
+export type WhatsAppTemplateButtonParameter =
+  | { text: string; type: "text" }
+  | { payload: string; type: "payload" };
+
+/**
+ * A component of a template message carrying variable substitutions.
+ */
+export type WhatsAppTemplateComponent =
+  | { parameters: WhatsAppTemplateParameter[]; type: "header" }
+  | { parameters: WhatsAppTemplateParameter[]; type: "body" }
+  | {
+      index: number;
+      parameters: WhatsAppTemplateButtonParameter[];
+      sub_type: "url" | "quick_reply";
+      type: "button";
+    };
+
+/**
+ * A pre-approved template message.
+ *
+ * Templates are the only message type the Cloud API accepts outside the
+ * 24-hour customer service window, so they are required for
+ * business-initiated conversations.
+ *
+ * @see https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-message-templates
+ */
+export interface WhatsAppTemplateMessage {
+  /** Variable substitutions for the template's components. Omit for templates without variables. */
+  components?: WhatsAppTemplateComponent[];
+  /** Template language code (e.g. "en", "en_US") */
+  language: string;
+  /** Name of the approved template */
+  name: string;
+}
+
+// =============================================================================
+// Raw Message Type
+// =============================================================================
+
+/**
+ * Platform-specific raw message type for WhatsApp.
+ */
+export interface WhatsAppRawMessage {
+  /** Contact info from the webhook */
+  contact?: WhatsAppContact;
+  /** The raw inbound message data */
+  message: WhatsAppInboundMessage;
+  /** Phone number ID that received the message */
+  phoneNumberId: string;
+  userId?: string;
+}

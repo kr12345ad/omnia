@@ -250,7 +250,7 @@ export class PermissionManager {
         reason: `Approval required for: ${reserved.join(", ")}`,
       }
     }
-    if (this.policy === "fully_autonomous") {
+    if (this.policy === "fully_autonomous" && deniedRequired.length === 0) {
       return { allowed: true, status: "granted", required, missing: [] }
     }
     return {

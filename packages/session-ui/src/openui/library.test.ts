@@ -34,6 +34,18 @@ describe("openui library", () => {
     expect(OPENUI_SYSTEM_PROMPT).toContain("```openui-lang")
   })
 
+  test("the prompt is chat-first, so a plain question stays a plain answer", () => {
+    // The upstream generator opens by telling the model its ENTIRE response must
+    // be openui-lang, and inline mode does not soften that: the persona won, every
+    // answer came back as a card, and a reply about not using cards came back as a
+    // card. The provider prompt is replaced rather than merely followed by
+    // restraint rules, which is what this guards.
+    expect(OPENUI_SYSTEM_PROMPT).not.toContain("Your ENTIRE response must be valid openui-lang")
+    expect(OPENUI_SYSTEM_PROMPT).toContain("you answer in plain markdown by default")
+    expect(OPENUI_SYSTEM_PROMPT).toContain("Most replies need no drawing at all")
+    expect(OPENUI_SYSTEM_PROMPT).toContain("A drawing is never the whole reply")
+  })
+
   test("a report program parses into the components the client renders", () => {
     const result = parse(
       [
@@ -130,6 +142,29 @@ describe("openui library", () => {
     expect(result.meta.errors).toEqual([])
     const children = (result.root?.props.children ?? []) as unknown[]
     expect(children.flatMap((child) => (isOpenUIElement(child) ? [child.typeName] : []))).toEqual(["Svg"])
+  })
+
+  test("a JS card carries its program through escaping, size and all", () => {
+    const merged = mergeOpenUISchema(OPENUI_SCHEMA) as unknown as ParserSchema
+    // A JS card is JavaScript inside a string inside a program, so the escaping
+    // rule is the whole contract: what the model writes is exactly what runs.
+    const result = createParser(merged, "Stack").parse(
+      [
+        "root = Stack([card])",
+        'card = JsCard("root.replaceChildren()\\nconst box = canvas().fit()\\nconst at = \\"noon\\"", "Orbit", 320, 60)',
+      ].join("\n"),
+    )
+
+    expect(result.meta.errors).toEqual([])
+    const children = (result.root?.props.children ?? []) as unknown[]
+    expect(children.flatMap((child) => (isOpenUIElement(child) ? [child.typeName] : []))).toEqual(["JsCard"])
+
+    const card = children[0]
+    if (!isOpenUIElement(card)) throw new Error("JsCard did not parse into an element")
+    expect(card.props.code).toBe('root.replaceChildren()\nconst box = canvas().fit()\nconst at = "noon"')
+    expect(card.props.title).toBe("Orbit")
+    expect(card.props.height).toBe(320)
+    expect(card.props.width).toBe(60)
   })
 
   test("streaming reveals the shell first and fills children in as they arrive", () => {

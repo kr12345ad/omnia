@@ -430,6 +430,22 @@ describe("control-plane client", () => {
     await expect(controlPlane.controlPlaneCall("/v1/computers", "GET")).rejects.toThrow("Sign in")
   })
 
+  // The sidecar is re-forked when this value changes, so a rotated token has to
+  // read as a different session even though the URL is unchanged.
+  test("fingerprints the stored session, not just its URL", () => {
+    expect(controlPlane.controlPlaneFingerprint()).toBeUndefined()
+    writeFileSync(sessionPath, JSON.stringify({ url: "https://cp.example.com", clientToken: "client-token" }), {
+      mode: 0o600,
+    })
+    expect(controlPlane.controlPlaneFingerprint()).toBe("https://cp.example.com\nclient-token")
+    writeFileSync(sessionPath, JSON.stringify({ url: "https://cp.example.com", clientToken: "rotated-token" }), {
+      mode: 0o600,
+    })
+    expect(controlPlane.controlPlaneFingerprint()).toBe("https://cp.example.com\nrotated-token")
+    rmSync(sessionPath, { force: true })
+    expect(controlPlane.controlPlaneFingerprint()).toBeUndefined()
+  })
+
   test("adds the stored client token to the configured control plane", async () => {
     const requests: Array<{ url: string; authorization: string | null }> = []
     const server = Bun.serve({

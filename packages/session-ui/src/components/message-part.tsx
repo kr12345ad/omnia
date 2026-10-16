@@ -348,25 +348,38 @@ function PacedMarkdown(props: { text: string; cacheKey: string; streaming: boole
   // highlighting and copy affordances, an OpenUI block is parsed to components.
   const segments = createMemo(() => splitOpenUISegments(value() ?? "", props.streaming))
 
+  // Keyed by position, not by the segment object: the splitter builds a fresh
+  // object for every tick, so `<For>` would tear the renderer down and mount a
+  // new one on each one. A fresh renderer has no parsed projection yet, so it
+  // draws the raw text as a single pending block — taller than the blocks it is
+  // replaced by a moment later — and a streaming row that grows and shrinks by
+  // that difference drags a bottom-anchored viewport up and down with it.
   return (
-    <For each={segments()}>
-      {(segment, index) => (
-        <Show when={segment.kind === "markdown" ? segment.text : segment.code}>
-          <Show
-            when={segment.kind === "openui"}
-            fallback={
-              <Markdown
-                text={segment.kind === "markdown" ? segment.text : ""}
-                cacheKey={`${props.cacheKey}:${index()}`}
-                streaming={props.streaming}
-              />
-            }
-          >
-            <OpenUIRender code={segment.kind === "openui" ? segment.code : ""} streaming={props.streaming} />
+    <Index each={segments()}>
+      {(segment, index) => {
+        const content = createMemo(() => {
+          const value = segment()
+          return value.kind === "markdown" ? { markdown: value.text, code: "" } : { markdown: "", code: value.code }
+        })
+
+        return (
+          <Show when={content().markdown || content().code}>
+            <Show
+              when={!!content().code}
+              fallback={
+                <Markdown
+                  text={content().markdown}
+                  cacheKey={`${props.cacheKey}:${index}`}
+                  streaming={props.streaming}
+                />
+              }
+            >
+              <OpenUIRender code={content().code} streaming={props.streaming} />
+            </Show>
           </Show>
-        </Show>
-      )}
-    </For>
+        )
+      }}
+    </Index>
   )
 }
 
@@ -1802,6 +1815,34 @@ PART_MAPPING["reasoning"] = function ReasoningPartDisplay(props) {
     </Show>
   )
 }
+
+// The program is carried in the call's own arguments, so the drawing comes from
+// `input.code` rather than from a fenced block in the reply: the transcript keeps
+// prose, and the raw markup never streams through it as text.
+ToolRegistry.register({
+  name: "visualize",
+  render(props) {
+    const code = createMemo(() => (typeof props.input.code === "string" ? props.input.code : ""))
+    const title = createMemo(() => {
+      const value = props.input.title
+      if (typeof value !== "string") return undefined
+      return value.trim() || undefined
+    })
+
+    return (
+      <Show when={code()}>
+        <div data-component="visualize-part">
+          <Show when={title()}>
+            <div data-slot="visualize-part-title" class="text-13-regular text-text-weak">
+              {title()}
+            </div>
+          </Show>
+          <OpenUIRender code={code()} streaming={props.status === "pending" || props.status === "running"} />
+        </div>
+      </Show>
+    )
+  },
+})
 
 ToolRegistry.register({
   name: "read",

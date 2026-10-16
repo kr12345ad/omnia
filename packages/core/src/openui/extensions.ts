@@ -20,7 +20,7 @@ import type { OpenUILibrarySchema, OpenUIJSONSchema } from "./types"
  * The three stay in one file on purpose: the failure this format is built to
  * avoid is the prompt advertising something the client cannot render.
  */
-export const OPENUI_EXTENSION_COMPONENTS = ["Html", "Svg"] as const
+export const OPENUI_EXTENSION_COMPONENTS = ["JsCard", "Html", "Svg"] as const
 
 export type OpenUIExtensionComponent = (typeof OPENUI_EXTENSION_COMPONENTS)[number]
 
@@ -32,6 +32,7 @@ export type OpenUIExtensionComponent = (typeof OPENUI_EXTENSION_COMPONENTS)[numb
 export const OPENUI_EXTENSION_SIGNATURES: Record<OpenUIExtensionComponent, string> = {
   Html: "Html(title: string, code: string, height?: number)",
   Svg: "Svg(markup: string, title?: string, height?: number)",
+  JsCard: "JsCard(code: string, title?: string, height?: number, width?: number)",
 }
 
 /**
@@ -43,6 +44,7 @@ const HTML_DESCRIPTION =
   `${OPENUI_EXTENSION_SIGNATURES.Html} — Renders one complete HTML document you write, in a sandboxed frame with scripts enabled. code is the entire document: <!doctype html>, its own <style> and <script>, and a closing </html>.`
 const SVG_DESCRIPTION =
   `${OPENUI_EXTENSION_SIGNATURES.Svg} — Inline SVG markup drawn in the answer itself, for static vector art — a schematic, a diagram, a custom 2D plot. Scripts, foreignObject and external references are stripped, so it stays a drawing.`
+const JS_CARD_DESCRIPTION = `${OPENUI_EXTENSION_SIGNATURES.JsCard} — Renders one card whose contents are JavaScript you write, executed in a sandboxed frame and assembled as the answer streams. In scope: root (the element to draw into, already sized), theme (the app's palette by token name without the versioning prefix and without dashes, so --v2-text-text-base is theme.textTextBase and --v2-state-fg-success is theme.stateFgSuccess, plus theme.scheme for light or dark), size ({ width, height } in CSS pixels, kept current), dpr (the capped device pixel ratio), onResize(callback) (called on every resize), canvas() (appends and fits a device-pixel-ratio-correct 2D canvas, returned as { canvas, ctx, fit }), setHeight(pixels) (ask the card to grow to what you drew), and await import("https://esm.sh/...") for any library you need. The escape hatch for what no component above can express: 3D scenes, point clouds, force-directed graphs, maps, phase portraits, animated simulations, and interactive cards with their own layout, controls and tooltips.`
 
 const refer = (name: string) => `#/$defs/${name}`
 
@@ -72,10 +74,28 @@ const SVG: OpenUIJSONSchema = {
   description: SVG_DESCRIPTION,
 }
 
+const JS_CARD: OpenUIJSONSchema = {
+  type: "object",
+  properties: {
+    code: { type: "string" },
+    title: { type: "string" },
+    height: { type: "number" },
+    width: { type: "number" },
+  },
+  required: ["code"],
+  additionalProperties: false,
+  id: "JsCard",
+  description: JS_CARD_DESCRIPTION,
+}
+
 /** The extension's schema fragment, in the same shape the generated library uses. */
 export const OPENUI_EXTENSION_SCHEMA: OpenUILibrarySchema = {
-  properties: { Html: { $ref: refer("Html") }, Svg: { $ref: refer("Svg") } },
-  $defs: { Html: HTML, Svg: SVG },
+  properties: {
+    Html: { $ref: refer("Html") },
+    Svg: { $ref: refer("Svg") },
+    JsCard: { $ref: refer("JsCard") },
+  },
+  $defs: { Html: HTML, Svg: SVG, JsCard: JS_CARD },
 }
 
 /**
@@ -92,6 +112,21 @@ export const OPENUI_EXTENSION_PROMPT = [
   "",
   "The charts above cover standard 2D business charts. Everything below is for the graphics those cannot express — a 3D surface or point cloud, a phase portrait, a network or Sankey diagram, a map, an animated simulation, or an interactive plot with zoom, brushing and tooltips. Draw it instead of simplifying the answer:",
   "",
+  JS_CARD_DESCRIPTION,
+  "",
+  "Rules for JsCard:",
+  "- Write JavaScript, not a document: the card brings its own frame, head and sizing. Reach for Html when the answer is a whole page, and Svg when it is static vector art.",
+  "- The code is one string inside the program, so escape it like one: write a newline as a backslash followed by n, a literal double quote as a backslash followed by a quote, and a literal backslash as two backslashes. Backticks and ${...} are not available there — build any dynamic markup by concatenating strings.",
+  "- Rebuild rather than add to: begin with root.replaceChildren(), then draw from your data. The script runs again whenever the card is redrawn, so it must never depend on what a previous run left behind.",
+  "- Size the card honestly: height is the box in pixels (default 420, allowed 160–1200) and width is a share of the answer's width (default 100, allowed 25–100). When the drawing knows its own height, call setHeight(pixels) instead of guessing.",
+  "- It runs in a sandboxed frame with an opaque origin: network imports and fetch work, but the app, its storage, its cookies and its parent window are unreachable. Never try to reach the parent — setHeight is the only channel out.",
+  "- Color with theme.*, never a literal: a token loses its --v2- prefix and its dashes (--v2-text-text-base is theme.textTextBase), theme.scheme is light or dark, and the frame's background is transparent.",
+  "- Draw the real thing: axis labels with units, a legend when there is more than one series, a sensible aspect ratio, type no smaller than 11px, and no placeholder data left in.",
+  "- The card is inert until the reader clicks into it — that is what keeps the answer scrolling while the pointer rests on the drawing — so do not make a first paint that depends on hover. A click hands the pointer to the card, and a card that draws past its box scrolls inside itself; Escape or a click outside hands the pointer back.",
+  "- Keep the cost bounded: thousands of marks are fine, a million are not. Draw through canvas() for a crisp result, coalesce animation frames, and cancel timers, observers and animation loops you no longer need.",
+  "- A thrown error replaces the drawing with the failure, so a card that cannot draw has failed the answer.",
+  "- Prefer the built-in charts and components when they fit. Reach for JsCard when the shape of the visual is the answer — a 3D scene, a force-directed graph, a map, or a custom interactive card.",
+  "",
   HTML_DESCRIPTION,
   SVG_DESCRIPTION,
   "",
@@ -103,6 +138,7 @@ export const OPENUI_EXTENSION_PROMPT = [
   "- Aim for a real graphic, not a demo: axis labels with units, a legend when there is more than one series, a sensible aspect ratio, type no smaller than 11px, and no placeholder data left in.",
   "- Keep the drawing cost bounded: thousands of marks are fine, a million are not. Prefer instancing or a coarse mesh for 3D, and cap the device pixel ratio at 2.",
   "- Never ship a black-on-transparent plot: read the seeded tokens or the color-scheme variable so the drawing is readable in both themes.",
+  "- The frame is inert until the reader clicks into it, so the answer keeps scrolling while the pointer rests on the document; a click hands it the pointer, and Escape or a click outside hands it back. Do not make a first paint that depends on hover.",
   "- Prefer the built-in charts above when they fit. Reach for Html when the shape of the visual is the answer.",
 ].join("\n")
 

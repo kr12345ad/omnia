@@ -1,0 +1,105 @@
+# message log
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","context_team_id":"T00FAKE00AA","context_enterprise_id":null,"api_app_id":"A00FAKEAPP01","event":{"type":"message","user":"U00FAKEUSER1","ts":"1766458026.240809","client_msg_id":"66cc9473-12a2-4934-bd57-301917883ae3","text":"<@U00FAKEBOT01> 1","team":"T00FAKE00AA","blocks":[{"type":"rich_text","block_id":"jEztr","elements":[{"type":"rich_text_section","elements":[{"type":"user","user_id":"U00FAKEBOT01"},{"type":"text","text":" 1"}]}]}],"channel":"C00FAKECHAN1","event_ts":"1766458026.240809","channel_type":"channel"},"type":"event_callback","event_id":"Ev0A4QA0FC8P","event_time":1766458026,"authorizations":[{"enterprise_id":null,"team_id":"T00FAKE00AA","user_id":"U00FAKEBOT01","is_bot":true,"is_enterprise_install":false}],"is_ext_shared_channel":false,"event_context":"4-eyJldCI6Im1lc3NhZ2UiLCJ0aWQiOiJUMDNTSDdHMDFHVSIsImFpZCI6IkEwQTVGVVhQMUVEIiwiY2lkIjoiQzBBNTExTUJDVVcifQ"}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","api_app_id":"A00FAKEAPP01","event":{"type":"app_mention","user":"U00FAKEUSER1","ts":"1766458026.240809","client_msg_id":"66cc9473-12a2-4934-bd57-301917883ae3","text":"<@U00FAKEBOT01> 1","team":"T00FAKE00AA","blocks":[{"type":"rich_text","block_id":"jEztr","elements":[{"type":"rich_text_section","elements":[{"type":"user","user_id":"U00FAKEBOT01"},{"type":"text","text":" 1"}]}]}],"channel":"C00FAKECHAN1","event_ts":"1766458026.240809"},"type":"event_callback","event_id":"Ev0A602NNCQG","event_time":1766458026,"authorizations":[{"enterprise_id":null,"team_id":"T00FAKE00AA","user_id":"U00FAKEBOT01","is_bot":true,"is_enterprise_install":false}],"is_ext_shared_channel":false,"event_context":"4-eyJldCI6ImFwcF9tZW50aW9uIiwidGlkIjoiVDAzU0g3RzAxR1UiLCJhaWQiOiJBMEE1RlVYUDFFRCIsImNpZCI6IkMwQTUxMU1CQ1VXIn0"}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: `{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","context_team_id":"T00FAKE00AA","context_enterprise_id":null,"api_app_id":"A00FAKEAPP01","event":{"type":"message","user":"U00FAKEBOT01","ts":"1766458029.244159","bot_id":"B00FAKEBOT01","app_id":"A00FAKEAPP01","text":"Thanks for mentioning me! I'm now listening to this thread.\\n\\n_Connected via slack_","team":"T00FAKE00AA","bot_profile":{"id":"B00FAKEBOT01","deleted":false,"name":"Chat SDK ExampleBot","updated":1766422444,"app_id":"A00FAKEAPP01","user_id":"U00FAKEBOT01","icons":{"image_36":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_36.png","image_48":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_48.png","image_72":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/service_72.png"},"team_id":"T00FAKE00AA"},"thread_ts":"1766458026.240809","parent_user_id":"U00FAKEUSER1","blocks":[{"type":"rich_text","block_id":"X+Z","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"Thanks for mentioning me! I'm now listening to this thread.\\n\\n"},{"type":"text","text":"Connected via slack","style":{"italic":true}}]}]}],"channel":"C00FAKECHAN1","event_ts":"1766458029.244159","channel_type":"channel"},"type":"event_callback","event_id":"Ev0A52AALLMB","event_time":1766458029,"authorizations":[{"enterprise_id":null,"team_id":"T00FAKE00AA","user_id":"U00FAKEBOT01","is_bot":true,"is_enterprise_install":false}],"is_ext_shared_channel":false,"event_context":"4-eyJldCI6Im1lc3NhZ2UiLCJ0aWQiOiJUMDNTSDdHMDFHVSIsImFpZCI6IkEwQTVGVVhQMUVEIiwiY2lkIjoiQzBBNTExTUJDVVcifQ"}`
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","context_team_id":"T00FAKE00AA","context_enterprise_id":null,"api_app_id":"A00FAKEAPP01","event":{"type":"message","user":"U00FAKEUSER1","ts":"1766458031.859009","client_msg_id":"5c2a0202-609a-4fcb-ad51-926b1d18c012","text":"2","team":"T00FAKE00AA","thread_ts":"1766458026.240809","parent_user_id":"U00FAKEUSER1","blocks":[{"type":"rich_text","block_id":"HiD03","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"2"}]}]}],"channel":"C00FAKECHAN1","event_ts":"1766458031.859009","channel_type":"channel"},"type":"event_callback","event_id":"Ev0A55NTKU2W","event_time":1766458031,"authorizations":[{"enterprise_id":null,"team_id":"T00FAKE00AA","user_id":"U00FAKEBOT01","is_bot":true,"is_enterprise_install":false}],"is_ext_shared_channel":false,"event_context":"4-eyJldCI6Im1lc3NhZ2UiLCJ0aWQiOiJUMDNTSDdHMDFHVSIsImFpZCI6IkEwQTVGVVhQMUVEIiwiY2lkIjoiQzBBNTExTUJDVVcifQ"}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","context_team_id":"T00FAKE00AA","context_enterprise_id":null,"api_app_id":"A00FAKEAPP01","event":{"type":"message","user":"U00FAKEBOT01","ts":"1766458031.632339","bot_id":"B00FAKEBOT01","app_id":"A00FAKEAPP01","text":"Processing...","team":"T00FAKE00AA","bot_profile":{"id":"B00FAKEBOT01","deleted":false,"name":"Chat SDK ExampleBot","updated":1766422444,"app_id":"A00FAKEAPP01","user_id":"U00FAKEBOT01","icons":{"image_36":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_36.png","image_48":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_48.png","image_72":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/service_72.png"},"team_id":"T00FAKE00AA"},"thread_ts":"1766458026.240809","parent_user_id":"U00FAKEUSER1","blocks":[{"type":"rich_text","block_id":"OR9","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"Processing..."}]}]}],"channel":"C00FAKECHAN1","event_ts":"1766458031.632339","channel_type":"channel"},"type":"event_callback","event_id":"Ev0A55NTR8M8","event_time":1766458031,"authorizations":[{"enterprise_id":null,"team_id":"T00FAKE00AA","user_id":"U00FAKEBOT01","is_bot":true,"is_enterprise_install":false}],"is_ext_shared_channel":false,"event_context":"4-eyJldCI6Im1lc3NhZ2UiLCJ0aWQiOiJUMDNTSDdHMDFHVSIsImFpZCI6IkEwQTVGVVhQMUVEIiwiY2lkIjoiQzBBNTExTUJDVVcifQ"}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","context_team_id":"T00FAKE00AA","context_enterprise_id":null,"api_app_id":"A00FAKEAPP01","event":{"type":"message","subtype":"message_changed","message":{"user":"U00FAKEBOT01","type":"message","edited":{"user":"B00FAKEBOT01","ts":"1766458033.000000"},"bot_id":"B00FAKEBOT01","app_id":"A00FAKEAPP01","text":"Just a little bit...","team":"T00FAKE00AA","bot_profile":{"id":"B00FAKEBOT01","app_id":"A00FAKEAPP01","user_id":"U00FAKEBOT01","name":"Chat SDK ExampleBot","icons":{"image_36":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_36.png","image_48":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_48.png","image_72":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/service_72.png"},"deleted":false,"updated":1766422444,"team_id":"T00FAKE00AA"},"thread_ts":"1766458026.240809","parent_user_id":"U00FAKEUSER1","blocks":[{"type":"rich_text","block_id":"LuPA","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"Just a little bit..."}]}]}],"ts":"1766458031.632339","source_team":"T00FAKE00AA","user_team":"T00FAKE00AA"},"previous_message":{"user":"U00FAKEBOT01","type":"message","ts":"1766458031.632339","bot_id":"B00FAKEBOT01","app_id":"A00FAKEAPP01","text":"Processing...","team":"T00FAKE00AA","bot_profile":{"id":"B00FAKEBOT01","app_id":"A00FAKEAPP01","user_id":"U00FAKEBOT01","name":"Chat SDK ExampleBot","icons":{"image_36":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_36.png","image_48":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_48.png","image_72":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/service_72.png"},"deleted":false,"updated":1766422444,"team_id":"T00FAKE00AA"},"thread_ts":"1766458026.240809","parent_user_id":"U00FAKEUSER1","blocks":[{"type":"rich_text","block_id":"ViZZ","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"Processing..."}]}]}]},"channel":"C00FAKECHAN1","hidden":true,"ts":"1766458033.001300","event_ts":"1766458033.001300","channel_type":"channel"},"type":"event_callback","event_id":"Ev0A53MVM13Q","event_time":1766458033,"authorizations":[{"enterprise_id":null,"team_id":"T00FAKE00AA","user_id":"U00FAKEBOT01","is_bot":true,"is_enterprise_install":false}],"is_ext_shared_channel":false,"event_context":"4-eyJldCI6Im1lc3NhZ2UiLCJ0aWQiOiJUMDNTSDdHMDFHVSIsImFpZCI6IkEwQTVGVVhQMUVEIiwiY2lkIjoiQzBBNTExTUJDVVcifQ"}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","context_team_id":"T00FAKE00AA","context_enterprise_id":null,"api_app_id":"A00FAKEAPP01","event":{"type":"message","subtype":"message_changed","message":{"user":"U00FAKEBOT01","type":"message","edited":{"user":"B00FAKEBOT01","ts":"1766458034.000000"},"bot_id":"B00FAKEBOT01","app_id":"A00FAKEAPP01","text":"Thanks for your message","team":"T00FAKE00AA","bot_profile":{"id":"B00FAKEBOT01","app_id":"A00FAKEAPP01","user_id":"U00FAKEBOT01","name":"Chat SDK ExampleBot","icons":{"image_36":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_36.png","image_48":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_48.png","image_72":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/service_72.png"},"deleted":false,"updated":1766422444,"team_id":"T00FAKE00AA"},"thread_ts":"1766458026.240809","parent_user_id":"U00FAKEUSER1","blocks":[{"type":"rich_text","block_id":"fFdi","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"Thanks for your message"}]}]}],"ts":"1766458031.632339","source_team":"T00FAKE00AA","user_team":"T00FAKE00AA"},"previous_message":{"user":"U00FAKEBOT01","type":"message","ts":"1766458031.632339","edited":{"user":"B00FAKEBOT01","ts":"1766458033.000000"},"bot_id":"B00FAKEBOT01","app_id":"A00FAKEAPP01","text":"Just a little bit...","team":"T00FAKE00AA","bot_profile":{"id":"B00FAKEBOT01","app_id":"A00FAKEAPP01","user_id":"U00FAKEBOT01","name":"Chat SDK ExampleBot","icons":{"image_36":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_36.png","image_48":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/bot_48.png","image_72":"https:\\/\\/a.slack-edge.com\\/80588\\/img\\/plugins\\/app\\/service_72.png"},"deleted":false,"updated":1766422444,"team_id":"T00FAKE00AA"},"thread_ts":"1766458026.240809","parent_user_id":"U00FAKEUSER1","blocks":[{"type":"rich_text","block_id":"Vh6","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"Just a little bit..."}]}]}]},"channel":"C00FAKECHAN1","hidden":true,"ts":"1766458034.001400","event_ts":"1766458034.001400","channel_type":"channel"},"type":"event_callback","event_id":"Ev0A4QA0SJSK","event_time":1766458034,"authorizations":[{"enterprise_id":null,"team_id":"T00FAKE00AA","user_id":"U00FAKEBOT01","is_bot":true,"is_enterprise_install":false}],"is_ext_shared_channel":false,"event_context":"4-eyJldCI6Im1lc3NhZ2UiLCJ0aWQiOiJUMDNTSDdHMDFHVSIsImFpZCI6IkEwQTVGVVhQMUVEIiwiY2lkIjoiQzBBNTExTUJDVVcifQ"}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","api_app_id":"A00FAKEAPP01","event":{"type":"app_context_changed","channel":"D00FAKEDM001","user":"U00FAKEUSER1","context":{"entities":[{"type":"slack#/types/channel_id","value":"C00FAKECHAN1","team_id":"T00FAKE00AA"}]},"event_ts":"1771460500.111180"},"type":"event_callback","event_id":"Ev0AGENTCTX1","event_time":1771460500}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","api_app_id":"A00FAKEAPP01","event":{"type":"message","channel":"D00FAKEDM001","channel_type":"im","user":"U00FAKEUSER1","text":"summarize this","ts":"1771460600.222190","event_ts":"1771460600.222190","app_context":{"entities":[{"type":"slack#/types/message_context","value":{"message_ts":"1771460400.100100","channel_id":"C00FAKECHAN1"},"team_id":"T00FAKE00AA"}]}},"type":"event_callback","event_id":"Ev0AGENTFOLD1","event_time":1771460600}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","api_app_id":"A00FAKEAPP01","event":{"type":"app_home_opened","user":"U00FAKEUSER1","channel":"D00FAKEDM001","tab":"messages","event_ts":"1771460700.333100","context":{"entities":[{"type":"slack#/types/channel_id","value":"C00FAKECHAN1"}]}},"type":"event_callback","event_id":"Ev0AGENTHOME1","event_time":1771460700}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","api_app_id":"A00FAKEAPP01","event":{"type":"message","user":"USLACK","channel":"D00FAKEDM001","channel_type":"im","text":"<@U00FAKEUSER1> archived the channel <#C00FAKECHAN1>","ts":"1771460800.444100","event_ts":"1771460800.444100"},"type":"event_callback","event_id":"Ev0ASYSTEM01","event_time":1771460800}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","context_team_id":"T00FAKE00AA","context_enterprise_id":null,"api_app_id":"A00FAKEAPP01","event":{"type":"message","user":"U00FAKEUSER1","ts":"1786120899.208429","client_msg_id":"8f1c2d3e-45a6-47b8-9c0d-1e2f3a4b5c6d","text":"Which devices support remote firmware upgrades?","team":"T00FAKE00AA","blocks":[{"type":"rich_text","block_id":"tblQ1","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"Which devices support remote firmware upgrades?"}]}]}],"attachments":[{"id":1,"fallback":"[no preview available]","blocks":[{"type":"table","block_id":"pasted1","rows":[[{"type":"rich_text","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"Manufacturer","style":{"bold":true}}]}]},{"type":"raw_text","text":"Identifier Listed"},{"type":"raw_text","text":"Units"}],[{"type":"raw_text","text":"Samsung"},{"type":"raw_text","text":"QB55C"},{"type":"raw_number","value":3}]]}]}],"channel":"C00FAKECHAN1","event_ts":"1786120899.208429","channel_type":"channel"},"type":"event_callback","event_id":"Ev0ATABLE001","event_time":1786120899,"authorizations":[{"enterprise_id":null,"team_id":"T00FAKE00AA","user_id":"U00FAKEBOT01","is_bot":true,"is_enterprise_install":false}],"is_ext_shared_channel":false}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","api_app_id":"A00FAKEAPP01","event":{"type":"agent_session_stopped","user":"U00FAKEUSER1","channel":"D00FAKEDM001","thread_ts":"1782234671.392669","streaming_message_ts":["1782234987.693923"],"event_ts":"1783536983.783769"},"type":"event_callback","event_id":"Ev0AGENTSTOP1","event_time":1783536983}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","api_app_id":"A00FAKEAPP01","event":{"type":"agent_session_title_changed","user":"U00FAKEUSER1","channel":"D00FAKEDM001","thread_ts":"1782234671.392669","previous_title":"Scuba diving research","title":"Bora Bora trip prep","event_ts":"1783536983.783769","team_id":"T00FAKE00AA"},"type":"event_callback","event_id":"Ev0AGENTTITLE1","event_time":1783536983}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","context_team_id":"T00FAKE00AA","context_enterprise_id":null,"api_app_id":"A00FAKEAPP01","event":{"type":"message","user":"U00FAKEUSER1","ts":"1787654321.123456","client_msg_id":"3d9b7c6a-21e0-4f5b-8a4d-9c8e7f6a5b4c","text":"Here you go:\\n```first line\\nsecond line```","team":"T00FAKE00AA","blocks":[{"type":"rich_text","block_id":"code1","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"Here you go:\\n"}]},{"type":"rich_text_preformatted","elements":[{"type":"text","text":"first line\\nsecond line"}],"border":0}]}],"channel":"C00FAKECHAN1","event_ts":"1787654321.123456","channel_type":"channel"},"type":"event_callback","event_id":"Ev0ACODEFNC1","event_time":1787654321,"authorizations":[{"enterprise_id":null,"team_id":"T00FAKE00AA","user_id":"U00FAKEBOT01","is_bot":true,"is_enterprise_install":false}],"is_ext_shared_channel":false}'
+}
+```
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","context_team_id":"T00FAKE00AA","context_enterprise_id":null,"api_app_id":"A00FAKEAPP01","event":{"type":"message","subtype":"bot_message","ts":"1786292411.318219","text":"","bot_id":"B00FAKEALRT1","username":"Sentry","icons":{"image_48":"https:\\/\\/avatars.slack-edge.com\\/sentry_48.png"},"attachments":[{"id":1,"color":"e03e2f","fallback":"[storefront] TypeError: cannot read property \'id\' of undefined","title":"TypeError: cannot read property \'id\' of undefined","title_link":"https:\\/\\/fake-org.sentry.io\\/issues\\/4501234567\\/?referrer=slack","text":"celery.app.trace in _trace_task\\n\\ncheckout\\/views.py in line 42","fields":[{"title":"Project","value":"storefront","short":true},{"title":"Environment","value":"production","short":true}],"footer":"STOREFRONT-8Q3","ts":1786292410,"mrkdwn_in":["text"]}],"channel":"C00FAKECHAN1","event_ts":"1786292411.318219","channel_type":"channel"},"type":"event_callback","event_id":"Ev0AALERT001","event_time":1786292411,"authorizations":[{"enterprise_id":null,"team_id":"T00FAKE00AA","user_id":"U00FAKEBOT01","is_bot":true,"is_enterprise_install":false}],"is_ext_shared_channel":false}'
+}
+```
+
+The next `app_mention` carries a bot reference composed inside inline code. Slack stores it as a `user` element with `style.code` (captured via `conversations.history` and wrapped in the event envelope above, ids anonymized), and fires `app_mention` for it although the client renders it as code (the display name in monospace, not a mention pill). The adapter classifies it as `isMention: false`. Note that `text` is entity-escaped while rich text `text` elements are not.
+
+```log
+[chat-sdk:slack] Slack webhook raw body {
+  body: '{"token":"xAbCdEfGhIjKlMnOpQrStUvW","team_id":"T00FAKE00AA","api_app_id":"A00FAKEAPP01","event":{"type":"app_mention","user":"U00FAKEUSER1","ts":"1789637259.073259","client_msg_id":"9d1e2c6b-4f0a-4b7e-a4c1-2d8f7e6a5b30","text":"mrkdwn probe: the app imports `<@U00FAKEBOT01>/passport` and A &amp; B &lt;c&gt;","team":"T00FAKE00AA","blocks":[{"type":"rich_text","block_id":"5hP","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"mrkdwn probe: the app imports "},{"type":"user","user_id":"U00FAKEBOT01","style":{"code":true}},{"type":"text","text":"/passport","style":{"code":true}},{"type":"text","text":" and A & B <c>"}]}]}],"channel":"C00FAKECHAN1","event_ts":"1789637259.073259"},"type":"event_callback","event_id":"Ev0A6CODEREF1","event_time":1789637259,"authorizations":[{"enterprise_id":null,"team_id":"T00FAKE00AA","user_id":"U00FAKEBOT01","is_bot":true,"is_enterprise_install":false}],"is_ext_shared_channel":false,"event_context":"4-eyJldCI6ImFwcF9tZW50aW9uIiwidGlkIjoiVDAzU0g3RzAxR1UiLCJhaWQiOiJBMEE1RlVYUDFFRCIsImNpZCI6IkMwQTUxMU1CQ1VXIn0"}'
+}
+```

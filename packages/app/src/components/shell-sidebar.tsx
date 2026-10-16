@@ -4,7 +4,6 @@ import { For, Match, Show, Switch, createEffect, createMemo, createSignal, type 
 import type { Session } from "@opencode-ai/sdk/v2/client"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { Spinner } from "@opencode-ai/ui/spinner"
-import { Avatar } from "@opencode-ai/ui/v2/avatar-v2"
 import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2"
 import { DialogFooter, DialogHeader, DialogTitleGroup, DialogV2 } from "@opencode-ai/ui/v2/dialog-v2"
 import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
@@ -14,7 +13,6 @@ import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
 import { WordmarkV2 } from "@opencode-ai/ui/v2/wordmark-v2"
 import { useSettingsDialog } from "@/components/settings-dialog"
 import { notifySessionTabsRemoved } from "@/components/titlebar-session-events"
-import { useEntitlement } from "@/context/entitlement"
 import { useLanguage } from "@/context/language"
 import { useLayout } from "@/context/layout"
 import { useNotification } from "@/context/notification"
@@ -45,7 +43,7 @@ const DAY = 24 * 60 * 60 * 1000
 //
 // `px-3` (12px) is the one inset shared with the titlebar's reveal button and
 // the collapsed rail: the row box starts at the column's 8px gutter, so every
-// glyph — action, session, avatar — sits on the same 16px line at x=20, and the
+// glyph — action, session, footer row — sits on the same 16px line at x=20, and the
 // rail keeps that line while its rows become 32px squares.
 const ROW_BASE =
   "shell-sidebar-row group relative flex shrink-0 cursor-default items-center rounded-[6px] bg-transparent text-left [font-weight:440] tracking-[-0.04px] text-v2-text-text-muted transition-[background-color,color,box-shadow] duration-[120ms] ease-in-out hover:bg-v2-background-bg-layer-01 hover:text-v2-text-text-base data-[selected]:bg-v2-background-bg-layer-03 data-[selected]:[font-weight:530] data-[selected]:text-v2-text-text-base data-[selected]:hover:bg-v2-background-bg-layer-03 focus-visible:bg-v2-background-bg-layer-01 focus-visible:text-v2-text-text-base focus-visible:outline-none focus-visible:[box-shadow:inset_0_0_0_0.5px_var(--v2-border-border-muted)]"
@@ -63,7 +61,7 @@ const ROW_LABEL = "min-w-0 flex-1 truncate"
  * It is the session list for the project in the address bar, grouped by recency
  * the way a chat product groups conversations, with the primary actions at the
  * top (new session, search) and the utility rows at the bottom (settings,
- * account, help). The collapsed rail is the same rows as icons, so nothing in
+ * help). The collapsed rail is the same rows as icons, so nothing in
  * the column ever disappears — it only gets smaller.
  */
 export function ShellSidebar() {
@@ -74,14 +72,16 @@ export function ShellSidebar() {
   const sync = useServerSync()
   const tabs = useTabs()
   const params = useParams<{ dir?: string; id?: string }>()
-  const entitlement = useEntitlement()
   const openSettings = useSettingsDialog()
-  const openAccount = useSettingsDialog("account")
   const [searching, setSearching] = createSignal(false)
   const [query, setQuery] = createSignal("")
   let searchBox: HTMLDivElement | undefined
 
   const collapsed = () => layout.sidebar.collapsed()
+  // macOS gives the window's top-left corner to the traffic lights, so there the
+  // column carries its own toggle as its first row instead of the titlebar
+  // control every other platform keeps (see titlebar.tsx).
+  const macos = () => platform.platform === "desktop" && platform.os === "macos"
   // The field exists only while the column is open, so the row's disclosure
   // state is derived from both. The pressed surface is what the row paints when
   // its field is on screen; deriving it here is what stops a "searching" row
@@ -182,8 +182,6 @@ export function ShellSidebar() {
     closeSearch()
   })
 
-  const account = () => entitlement.account()?.profile?.login
-
   return (
     <aside
       data-component="shell-sidebar"
@@ -191,8 +189,9 @@ export function ShellSidebar() {
       aria-label={language.t("sidebar.nav.projectsAndSessions")}
     >
       {/* The reveal control lives in the titlebar's left corner, so it stays in
-          one place whether the column is open or a rail. This header only
-          brands the column. */}
+          one place whether the column is open or a rail — except on macOS, where
+          the first action row is that control. This header only brands the
+          column. */}
       <div data-slot="shell-sidebar-header" class="flex h-8 shrink-0 items-center px-2">
         <div data-slot="shell-sidebar-brand" class="flex min-w-0 flex-1 items-center px-3">
           <WordmarkV2 class="h-[11px] w-auto text-v2-text-text-inverse opacity-70" />
@@ -200,6 +199,14 @@ export function ShellSidebar() {
       </div>
 
       <div data-slot="shell-sidebar-actions" class="flex shrink-0 flex-col gap-1 px-2 pt-1">
+        <Show when={macos()}>
+          <SidebarAction
+            collapsed={collapsed()}
+            icon={<IconV2 name="sidebar-right" size="small" />}
+            label={language.t(collapsed() ? "sidebar.menu.open" : "sidebar.menu.close")}
+            onSelect={() => layout.sidebar.toggleCollapsed()}
+          />
+        </Show>
         <SidebarAction
           collapsed={collapsed()}
           icon={<IconV2 name="edit" size="small" />}
@@ -300,12 +307,6 @@ export function ShellSidebar() {
           icon={<IconV2 name="help" size="small" />}
           label={language.t("sidebar.help")}
           onSelect={() => platform.openExternal("https://opencode.ai/desktop-feedback")}
-        />
-        <SidebarAction
-          collapsed={collapsed()}
-          label={account() ?? language.t("desktop.menu.account")}
-          icon={<Avatar size="small" fallback={account() ?? language.t("desktop.menu.account")} />}
-          onSelect={() => openAccount()}
         />
       </div>
     </aside>

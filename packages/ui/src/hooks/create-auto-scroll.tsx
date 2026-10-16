@@ -5,6 +5,13 @@ import { createResizeObserver } from "@solid-primitives/resize-observer"
 
 export interface AutoScrollOptions {
   working: () => boolean
+  /**
+   * Whether this hook owns the bottom. A virtualized list that anchors its own
+   * end has to answer `false`: two followers easing the same scrollTop towards
+   * targets that drift apart is what makes the view bounce while content
+   * streams. Tracking of user intent keeps running either way.
+   */
+  follow?: () => boolean
   onUserInteracted?: () => void
   overflowAnchor?: "none" | "auto" | "dynamic"
   bottomThreshold?: number
@@ -32,7 +39,8 @@ export function createAutoScroll(options: AutoScrollOptions) {
     userScrolled: false,
   })
 
-  const active = () => options.working() || settling
+  const following = () => options.follow?.() ?? true
+  const active = () => following() && (options.working() || settling)
 
   const distanceFromBottom = (el: HTMLElement) => {
     return el.scrollHeight - el.clientHeight - el.scrollTop
@@ -46,9 +54,14 @@ export function createAutoScroll(options: AutoScrollOptions) {
   // between us calling `scrollTo()` and the subsequent `scroll` event firing,
   // the handler can see a non-zero `distanceFromBottom` and incorrectly assume
   // the user scrolled.
+  // Record where we actually put the viewport, not where we meant to put it.
+  // Streaming content grows between the write and the scroll event it produces,
+  // so a target recorded up front stops matching the position the browser then
+  // reports — the old reading made every auto scroll look like the user leaving
+  // the bottom, which handed the anchor back to the browser mid-reply.
   const markAuto = (el: HTMLElement) => {
     auto = {
-      top: Math.max(0, el.scrollHeight - el.clientHeight),
+      top: el.scrollTop,
       time: Date.now(),
     }
 
@@ -92,10 +105,12 @@ export function createAutoScroll(options: AutoScrollOptions) {
     const distance = target - el.scrollTop
     if (Math.abs(distance) < 0.5) {
       el.scrollTop = target
+      markAuto(el)
       cancelFollow()
       return
     }
     el.scrollTop += distance * (1 - Math.exp(-dt / 90))
+    markAuto(el)
     followFrame = requestAnimationFrame(stepFollow)
   }
 
@@ -108,10 +123,10 @@ export function createAutoScroll(options: AutoScrollOptions) {
   const scrollToBottomNow = (_behavior: ScrollBehavior) => {
     const el = store.scrollRef
     if (!el) return
-    markAuto(el)
     if (reducedMotion()) {
       cancelFollow()
       el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight)
+      markAuto(el)
       return
     }
     startFollow()

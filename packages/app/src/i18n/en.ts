@@ -877,6 +877,8 @@ export const dict = {
   "common.time.daysAgo.short": "{{count}}d ago",
 
   "sidebar.menu.toggle": "Toggle menu",
+  "sidebar.menu.close": "Close Sidebar",
+  "sidebar.menu.open": "Open Sidebar",
   "sidebar.nav.projectsAndSessions": "Projects and sessions",
   "sidebar.settings": "Settings",
   "sidebar.help": "Help",

@@ -28,6 +28,13 @@ export function TextReveal(props: {
   travel?: number | string
   spring?: string
   springSoft?: string
+  /**
+   * Ignore the wipe choreography for changes that land within this window of the
+   * previous one, updating the text in place instead. A value that is rewritten
+   * as it streams (a thinking heading) otherwise restarts the whole wipe every
+   * delta, which reads as flicker rather than an animation.
+   */
+  swapHold?: number
   growOnly?: boolean
   truncate?: boolean
 }) {
@@ -48,7 +55,10 @@ export function TextReveal(props: {
   let rootRef: HTMLSpanElement | undefined
   let frame: number | undefined
   let fontFrame: number | undefined
+  let lastChange = Number.NEGATIVE_INFINITY
   let disposed = false
+
+  const now = () => (typeof performance === "undefined" ? Date.now() : performance.now())
 
   const win = () => inRef?.scrollWidth ?? 0
   const wout = () => outRef?.scrollWidth ?? 0
@@ -67,7 +77,18 @@ export function TextReveal(props: {
       () => props.text,
       (next, prev) => {
         if (next === prev) return
+        const changedAt = now()
+        // Measured from the previous change, not the previous wipe: a value that is
+        // rewritten faster than `swapHold` keeps skipping the choreography instead
+        // of restarting it on every delta once the window has passed.
+        const settling = changedAt - lastChange < (props.swapHold ?? 0)
+        lastChange = changedAt
         if (typeof next === "string" && typeof prev === "string" && next.startsWith(prev)) {
+          setState("cur", next)
+          widen(win())
+          return
+        }
+        if (settling) {
           setState("cur", next)
           widen(win())
           return

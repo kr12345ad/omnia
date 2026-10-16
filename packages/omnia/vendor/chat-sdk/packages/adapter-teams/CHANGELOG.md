@@ -1,0 +1,735 @@
+# @chat-adapter/teams
+
+## 4.42.0
+
+### Minor Changes
+
+- fd291b8: feat(teams): let a card carry a text input
+  
+  `TextInput`, which modals already use, is now also a `CardChild`, so a user can type a reply on the card instead of opening a dialog. Teams renders it as an Adaptive Card `Input.Text` with the same mapping the modal converter uses, and the `@chat-adapter/teams/cards` subpath emits the same element. Slack, Google Chat, Discord, GitHub, and Linear show its label as text. WhatsApp, Messenger, Twilio, and X omit it, so don't make an input the only content on a card that reaches them.
+  
+  `ActionEvent` gains `values?: Record<string, string>`, the card's own input values keyed by input ID. It has the same shape as `ModalSubmitEvent.values`. The Teams adapter fills it from the `Action.Submit` payload, and it is absent on platforms with no card inputs. A button's `callbackUrl` POST now carries `values` too, so a webhook-driven flow with no `onAction` handler still receives what was typed.
+  
+  An input is required unless `optional` is set, and Teams validates every input on the card before it lets a button through, so mark it `optional` unless the buttons beside it should be blocked until it is filled. That validation is client-side, so treat `values` as user input and validate it in the handler. A Teams button with `actionType: "modal"` now renders with `associatedInputs: "none"`, so it opens its dialog without waiting on the card's inputs and doesn't send them.
+  
+  Teams merges card inputs into the button's own submit data, so a card `TextInput` with the ID `actionId`, `value`, or `msteams` throws a `ValidationError` when the card is rendered, and the `@chat-adapter/teams/cards` subpath throws an `Error`. Modal inputs can still use `actionId` and `value`.
+  
+  `CardChild` gained a member, so an adapter outside this repo that exhausts the union with a `never` check needs a `text_input` case. Every in-repo converter reaches it through a `default:` branch instead, so none needed changing.
+- f8527b2: Add an optional `aiGenerated` field to `PostableRaw`, `PostableMarkdown`, `PostableAst`, `PostableCard`, `StreamingPlanOptions`, and `StreamOptions`. When it's `true`, adapters with a native AI label show it. The Teams adapter shows Teams' "AI generated" label on new, edited, channel, targeted, and streamed messages. An edit must set the flag again to keep the label. The built-in AI tools now set `aiGenerated: true` on the `markdown` and `raw` messages they post or edit.
+
+### Patch Changes
+
+- 03e7b5f: Classify Teams bot senders using their account role, bot account ID, and the adapter's own identity. Messages, reactions, card actions, and dialog events now report `isBot` and `isMe` consistently, so handlers can exclude bot activity from human-only conversations. Cached user lookups no longer report bot account IDs as humans.
+- 63ad5ea: Return the created thread ID from Teams channel posts so follow-up messages reply to that thread. Applies to text and Adaptive Card posts.
+- Updated dependencies [2f1cfa2]
+- Updated dependencies [daaa0ac]
+- Updated dependencies [fd291b8]
+- Updated dependencies [19c7aa2]
+- Updated dependencies [08081fa]
+- Updated dependencies [19c7aa2]
+- Updated dependencies [80e7bae]
+- Updated dependencies [08081fa]
+- Updated dependencies [7b7d73c]
+- Updated dependencies [f8527b2]
+- Updated dependencies [9a83b22]
+- Updated dependencies [8178fdb]
+- Updated dependencies [f635dbe]
+  - chat@4.42.0
+  - @chat-adapter/shared@4.42.0
+
+## 4.41.1
+
+### Patch Changes
+
+- Updated dependencies [6f17495]
+  - chat@4.41.1
+  - @chat-adapter/shared@4.41.1
+
+## 4.41.0
+
+### Minor Changes
+
+- 139d337: Support Vercel Connect in the Teams adapter with lazy app identity resolution and custom webhook verification. Ensure custom Bot Framework and Graph token factories take precedence over client-secret environment variables.
+  
+  Add Teams to `create-chat-sdk --connect` and interactive Connect scaffolding, including the helper, connector environment variable, and setup documentation.
+- 2e2426d: Add `onInstalled` and `onUninstalled` handlers for installation lifecycle events. The Teams adapter emits them for `installationUpdate` activities, including the `add-upgrade` and `remove-upgrade` actions, with a persistable `channelId` for later proactive messages.
+  
+  The Teams adapter now sends, edits, deletes, reacts, and types against the service URL encoded in the thread ID instead of the app-wide default, so conversations hosted on regional or sovereign Bot Framework endpoints are reached correctly. An explicit `apiUrl` still pins every call to that endpoint.
+- 8421953: feat(teams): render tables as the Adaptive Card 1.5 Table element
+  
+  The Teams adapter now renders `Table` as the native Adaptive Cards `Table` element instead of a `Container` of `ColumnSet`s. Teams draws grid lines between cells, sizes columns by relative weight and marks the header row for accessibility. The `@chat-adapter/teams/cards` subpath emits the same element.
+  
+  `Table` gains optional rendering options that only Teams reads: `widths` (positive integer column weights), `verticalAlign` (vertical alignment of cell content), `gridLines` (default `true`) and `gridStyle`. Other adapters ignore them. Pass `gridLines: false` to keep a borderless table.
+  
+  The chat JSX runtime now forwards `align` on `<Table>`, matching `fromReactElement`.
+
+### Patch Changes
+
+- 8508903: Edit and delete Microsoft Teams targeted messages through the `?isTargetedActivity=true` endpoint, so a message sent with `postEphemeral` can be updated or removed instead of failing with `400 Bad argument`. The ids sent targeted are recorded in the Chat state adapter with a 24-hour TTL, matching how long Teams keeps a targeted message.
+- 91683e5: Wait for Telegram polling handlers to settle before advancing update offsets.
+- c21ccbc: Add an opt-in webhook option to propagate message, action, and slash command handler errors through `waitUntil` while preserving default behavior.
+- Updated dependencies [f233ffe]
+- Updated dependencies [6adca36]
+- Updated dependencies [ad90432]
+- Updated dependencies [683eadc]
+- Updated dependencies [dc2a777]
+- Updated dependencies [139d337]
+- Updated dependencies [2e2426d]
+- Updated dependencies [8421953]
+- Updated dependencies [91683e5]
+- Updated dependencies [056d883]
+- Updated dependencies [c21ccbc]
+- Updated dependencies [fcdc1c9]
+  - chat@4.41.0
+  - @chat-adapter/shared@4.41.0
+
+## 4.40.0
+
+### Minor Changes
+
+- aaeede7: emit Teams bot-join events and expose the bot user ID
+- 4a0b5c0: Add `tooltip` to `Button` and `LinkButton`, and a `width` hint to `Card`. The Teams adapter and the `@chat-adapter/teams/cards` subpath render them as the Adaptive Card action `tooltip` and the `msteams` full-width card property; other adapters ignore them. Emitted Adaptive Cards now declare schema version 1.5, which is the version that introduced action tooltips. Buttons with a `callbackUrl` keep their `tooltip` and other fields when the URL is swapped for a callback token.
+
+### Patch Changes
+
+- a8de95b: Fall back to Teams activity group metadata when the explicit conversation type is missing.
+- f485255: Harden webhook tenant isolation, require explicit Google Chat bot identity for reliable mention handling, use native Google Chat pagination, isolate Slack caches, and bound recording storage.
+- 7062c39: preserve outgoing @names as plain text instead of generating mention markup without matching entities
+- 7609d8f: Validate external request targets before sending credentials, message content, or attachment requests.
+- Updated dependencies [f485255]
+- Updated dependencies [b7c9316]
+- Updated dependencies [4a0b5c0]
+  - chat@4.40.0
+  - @chat-adapter/shared@4.40.0
+
+## 4.39.0
+
+### Patch Changes
+
+- 63997ac: hydrate live Teams sender email without requiring Microsoft Graph permissions
+- bb92688: secure anonymous attachment downloads against SSRF and oversized responses
+
+  `@chat-adapter/shared` gains `downloadAttachment`, a guarded downloader that refuses private and internal addresses (as URL literals, through DNS resolution, and after redirects), decodes compressed responses, caps the body size at 25 MB, and bounds the whole download with a 30 second timeout. All of these are configurable, including the transport for proxied deployments.
+
+  The Teams adapter uses it for anonymous attachment downloads. HTTPS attachments on any public host keep working, plain-HTTP URLs are refused, and the Bot Framework Emulator's loopback connector now uses bot authentication so local development keeps working.
+
+- Updated dependencies [2ce2be0]
+- Updated dependencies [153bd96]
+- Updated dependencies [16ea171]
+- Updated dependencies [169788b]
+- Updated dependencies [eddcd7e]
+- Updated dependencies [bb92688]
+- Updated dependencies [5b538f6]
+- Updated dependencies [e71bfea]
+- Updated dependencies [929878b]
+- Updated dependencies [500b7e6]
+- Updated dependencies [b6fa24c]
+  - chat@4.39.0
+  - @chat-adapter/shared@4.39.0
+
+## 4.38.1
+
+### Patch Changes
+
+- Updated dependencies [6cb933e]
+- Updated dependencies [764e475]
+  - chat@4.38.1
+  - @chat-adapter/shared@4.38.1
+
+## 4.38.0
+
+### Patch Changes
+
+- Updated dependencies [0f24cc3]
+- Updated dependencies [bdeb2bf]
+- Updated dependencies [a0cba02]
+- Updated dependencies [83ede7e]
+- Updated dependencies [18d4a23]
+  - chat@4.38.0
+  - @chat-adapter/shared@4.38.0
+
+## 4.37.0
+
+### Patch Changes
+
+- 4cc3445: Harden Teams HTML-to-text conversion to strip tags until the output is stable, so nested or malformed markup can't leave a partial tag behind. `stripHtmlTags` is now shared across the format and Graph message converters.
+- Updated dependencies [2a2b2c5]
+- Updated dependencies [4ac0455]
+- Updated dependencies [0ec6a73]
+- Updated dependencies [85e3d22]
+  - chat@4.37.0
+  - @chat-adapter/shared@4.37.0
+
+## 4.36.0
+
+### Minor Changes
+
+- 0153a39: Add `DateInput` and `NumberInput` modal children. The Slack adapter renders them as a `datepicker` and a `number_input`, the Teams adapter as `Input.Date` and `Input.Number`, and both submitted values arrive in `event.values` as strings.
+
+  Teams submit values that arrive as JSON numbers are now stringified into `event.values` instead of being dropped. This fixes `Input.Number`, but applies to any numeric value a Teams dialog submits — a key that was previously absent from `event.values` will now be present as a string.
+
+### Patch Changes
+
+- 257a32d: Route Teams personal and group conversations using their explicit conversation type so group chats use buffered fallback even when their IDs resemble direct messages.
+- 3c37cfb: Authenticate connector-hosted inline attachments and parse Teams file download cards.
+- Updated dependencies [257a32d]
+- Updated dependencies [c5d86b1]
+- Updated dependencies [0153a39]
+- Updated dependencies [b547f45]
+- Updated dependencies [caa6325]
+  - chat@4.36.0
+  - @chat-adapter/shared@4.36.0
+
+## 4.35.0
+
+### Minor Changes
+
+- 5eb8b84: Add support for adding and removing reactions from Microsoft Teams messages.
+- 46681f5: Expose Microsoft Graph email addresses on normalized incoming Teams message authors. Resolved user profiles are cached in the state adapter (1 hour, failed lookups 5 minutes) so the lookup doesn't add a Graph call per message.
+- 160140e: Add native Microsoft Teams targeted message support via `thread.postEphemeral()` and `channel.postEphemeral()`.
+- e06b4b6: Add a `token` config option to `TeamsAdapterConfig` for supplying a custom token factory, forwarded to the Teams SDK's `AppOptions.token`. This lets bots authenticate on runtimes that can't reach Azure IMDS (so `federated` managed identity isn't reachable) but can still mint access tokens through an external mechanism, without needing a static client secret.
+
+### Patch Changes
+
+- 3895ab3: Fall back to Microsoft Graph's user principal name when a Teams user has no mail address.
+- 93a58af: Show explicitly configured progress as a native Teams DM status while preserving native streaming.
+- Updated dependencies [80def3a]
+- Updated dependencies [4cb7e5d]
+- Updated dependencies [46681f5]
+- Updated dependencies [93a58af]
+- Updated dependencies [25f3099]
+  - chat@4.35.0
+  - @chat-adapter/shared@4.35.0
+
+## 4.34.0
+
+### Patch Changes
+
+- Updated dependencies [5c926f1]
+- Updated dependencies [2531a42]
+- Updated dependencies [1721fa0]
+- Updated dependencies [4717a38]
+- Updated dependencies [6714efc]
+  - chat@4.34.0
+  - @chat-adapter/shared@4.34.0
+
+## 4.33.0
+
+### Patch Changes
+
+- d4c52ca: use the shared `replaceBareMentions` scanner for `@mention` conversion so email addresses, `@handles` inside URLs, and mentions inside code spans are no longer mangled into `<at>` mention tags
+- Updated dependencies [3abdc69]
+- Updated dependencies [0b63791]
+- Updated dependencies [0c761f1]
+- Updated dependencies [ef2542c]
+- Updated dependencies [24a04d5]
+- Updated dependencies [d4c52ca]
+- Updated dependencies [076fe5d]
+  - chat@4.33.0
+  - @chat-adapter/shared@4.33.0
+
+## 4.32.0
+
+### Patch Changes
+
+- Updated dependencies [eccc6b9]
+- Updated dependencies [438f551]
+- Updated dependencies [d034b8b]
+- Updated dependencies [06af3e1]
+- Updated dependencies [2e47351]
+- Updated dependencies [efa9610]
+  - chat@4.32.0
+  - @chat-adapter/shared@4.32.0
+
+## 4.31.0
+
+### Minor Changes
+
+- 8c71411: Add low-level Teams primitive subpaths for custom runtimes.
+
+### Patch Changes
+
+- Updated dependencies [778ae69]
+- Updated dependencies [171657a]
+  - chat@4.31.0
+  - @chat-adapter/shared@4.31.0
+
+## 4.30.0
+
+### Patch Changes
+
+- 9b8d8c4: expand npm `keywords` for adapter and state packages to improve discoverability (adds `chat-sdk`, `chatbot`, `ai-agent`, `ai-sdk`, `vercel`, plus platform-specific terms)
+- Updated dependencies [5461ea9]
+  - chat@4.30.0
+  - @chat-adapter/shared@4.30.0
+
+## 4.29.0
+
+### Minor Changes
+
+- 2ffed48: Adapter internals are now `protected` rather than `private`, so consumers can subclass an adapter to override or extend its behavior (e.g. handling additional Telegram update types by overriding `processUpdate`).
+
+### Patch Changes
+
+- e60bc8c: chore: set supported Node versions in engines
+- Updated dependencies [ac8a207]
+- Updated dependencies [e60bc8c]
+- Updated dependencies [add2730]
+- Updated dependencies [b75eedb]
+  - chat@4.29.0
+  - @chat-adapter/shared@4.29.0
+
+## 4.28.1
+
+### Patch Changes
+
+- Updated dependencies [0cc3d06]
+  - chat@4.28.1
+  - @chat-adapter/shared@4.28.1
+
+## 4.28.0
+
+### Patch Changes
+
+- c1cd9b5: Add `callbackUrl` to `Button` and `Modal`. When a button is clicked or a modal is submitted, the SDK POSTs the action payload to `callbackUrl` in addition to firing any registered `onAction` / `onModalSubmit` handler. This pairs naturally with webhook-based workflow engines for awaitable button/modal flows.
+
+  Supported platforms: Slack, Teams, Google Chat, WhatsApp, Telegram, and Discord.
+
+- Updated dependencies [eb5f94a]
+- Updated dependencies [c1cd9b5]
+- Updated dependencies [9824d33]
+- Updated dependencies [46d183b]
+- Updated dependencies [46d183b]
+- Updated dependencies [3490a8c]
+  - chat@4.28.0
+  - @chat-adapter/shared@4.28.0
+
+## 4.27.0
+
+### Minor Changes
+
+- 6b17c60: Add `apiUrl` config option for custom API endpoint configuration (e.g. GovSlack, GitHub Enterprise, GCC-High Teams)
+- a520797: Add `getUser()` support for Teams adapter using Microsoft Graph API (requires `User.Read.All` permission)
+- ed46bae: Use native Teams SDK streaming for DMs via `stream.emit()`, with accumulate-and-post fallback for group chats
+
+### Patch Changes
+
+- 1e7c551: restore attachment fetchData after queue/debounce serialization
+- 4c24c94: Fix fetchMessages 404 for DM conversations by caching the user's AAD object ID and resolving the Graph API chat ID
+- d440b0f: Bump Microsoft Teams SDK to 2.0.8 and switch to standard `User-Agent` header
+- Updated dependencies [8a0c7b3]
+- Updated dependencies [1e7c551]
+- Updated dependencies [b0ab804]
+- Updated dependencies [d630e6c]
+- Updated dependencies [b9a1961]
+- Updated dependencies [a520797]
+- Updated dependencies [70281dc]
+- Updated dependencies [9093292]
+- Updated dependencies [7e90d9c]
+- Updated dependencies [bca4792]
+- Updated dependencies [37dbb4a]
+- Updated dependencies [608d5f0]
+- Updated dependencies [a179b29]
+- Updated dependencies [a8f2aab]
+  - chat@4.27.0
+  - @chat-adapter/shared@4.27.0
+
+## 4.26.0
+
+### Patch Changes
+
+- Updated dependencies [2235c16]
+- Updated dependencies [ddb084b]
+  - chat@4.26.0
+  - @chat-adapter/shared@4.26.0
+
+## 4.25.0
+
+### Minor Changes
+
+- ce7cd2f: Add Select and RadioSelect support for Teams Adaptive Cards with auto-submit fan-out
+
+### Patch Changes
+
+- Updated dependencies [2700ce8]
+  - chat@4.25.0
+  - @chat-adapter/shared@4.25.0
+
+## 4.24.0
+
+### Minor Changes
+
+- 4f5d200: Add Teams dialog (task module) support with `actionType: "modal"` on buttons and `onOpenModal` webhook hook
+- a0f508e: Migrate from deprecated BotFramework (`botbuilder`) to the official Teams SDK (`@microsoft/teams.apps`). Adds typing indicator support and the ability to receive reaction events. No breaking changes to the public API or environment variables.
+
+### Patch Changes
+
+- 8d89274: fix: disable source maps in published packages
+- Updated dependencies [8d89274]
+- Updated dependencies [4f5d200]
+- Updated dependencies [27b34e1]
+  - @chat-adapter/shared@4.24.0
+  - chat@4.24.0
+
+## 4.23.0
+
+### Patch Changes
+
+- Updated dependencies [4166e09]
+  - chat@4.23.0
+  - @chat-adapter/shared@4.23.0
+
+## 4.22.0
+
+### Patch Changes
+
+- Updated dependencies [f2d8957]
+  - chat@4.22.0
+  - @chat-adapter/shared@4.22.0
+
+## 4.21.0
+
+### Minor Changes
+
+- d778f72: Switch adapters from optional dep to full dep on chat
+
+### Patch Changes
+
+- Updated dependencies [e45a67f]
+- Updated dependencies [13ba1c7]
+- Updated dependencies [95fd8ce]
+  - chat@4.21.0
+  - @chat-adapter/shared@4.21.0
+
+## 4.20.2
+
+### Patch Changes
+
+- chat@4.20.2
+- @chat-adapter/shared@4.20.2
+
+## 4.20.1
+
+### Patch Changes
+
+- Updated dependencies [e206371]
+- Updated dependencies [8d88b8c]
+  - chat@4.20.1
+  - @chat-adapter/shared@4.20.1
+
+## 4.20.0
+
+### Patch Changes
+
+- chat@4.20.0
+- @chat-adapter/shared@4.20.0
+
+## 4.19.0
+
+### Patch Changes
+
+- Updated dependencies [eb49b2a]
+- Updated dependencies [5b41f08]
+- Updated dependencies [c4b0e69]
+  - chat@4.19.0
+  - @chat-adapter/shared@4.19.0
+
+## 4.18.0
+
+### Patch Changes
+
+- Updated dependencies [a3cfc1a]
+  - chat@4.18.0
+  - @chat-adapter/shared@4.18.0
+
+## 4.17.0
+
+### Minor Changes
+
+- a3f8656: Add certificate and federated (workload identity) auth support for Teams adapter
+
+### Patch Changes
+
+- Updated dependencies [cc65dc3]
+  - chat@4.17.0
+  - @chat-adapter/shared@4.17.0
+
+## 4.16.1
+
+### Patch Changes
+
+- f0dfa4d: Fix nested list rendering in Markdown-to-platform converters
+
+  All adapters (Slack, Discord, Teams, Google Chat) were flattening nested
+  lists during `fromAst()` conversion, causing child items to be concatenated
+  directly onto the parent item without any indentation or newline separation.
+
+  The `nodeToX()` list handler now accepts a `depth` parameter and uses it to
+  produce platform-appropriate indentation (`"  ".repeat(depth)`) for nested
+  lists. Each list item's children are processed in order: paragraph content
+  is prefixed with the bullet/number at the correct indent level, and nested
+  list nodes are rendered recursively at `depth + 1`.
+
+- Updated dependencies [130e780]
+- Updated dependencies [ff954f9]
+- Updated dependencies [f27c89b]
+  - chat@4.16.1
+  - @chat-adapter/shared@4.16.1
+
+## 4.16.0
+
+### Minor Changes
+
+- 02e7ef6: Implements table markdown rendering, and fully streaming markdown rendering including for Slack which has native streaming. Overhauls adapters to have better fallback-render behavior
+
+### Patch Changes
+
+- 981650a: Fix ESM directory import for Microsoft Graph auth provider
+- Updated dependencies [02e7ef6]
+- Updated dependencies [9522b04]
+- Updated dependencies [f5a75c9]
+- Updated dependencies [f0c7050]
+- Updated dependencies [73de82d]
+  - @chat-adapter/shared@4.16.0
+  - chat@4.16.0
+
+## 4.15.0
+
+### Minor Changes
+
+- 5b3090a: Add CardLink element
+
+### Patch Changes
+
+- 39888ce: Fix teams bundlijng under strict esm
+- Updated dependencies [0f85031]
+- Updated dependencies [5b3090a]
+  - chat@4.15.0
+  - @chat-adapter/shared@4.15.0
+
+## 4.14.0
+
+### Minor Changes
+
+- 90dc325: Add typing indicators for Slack adapter using Slack assistants API
+
+### Patch Changes
+
+- Updated dependencies [90dc325]
+  - chat@4.14.0
+  - @chat-adapter/shared@4.14.0
+
+## 4.13.4
+
+### Patch Changes
+
+- f266dcf: Automatically load from env vars
+- Updated dependencies [716ce2a]
+  - chat@4.13.4
+  - @chat-adapter/shared@4.13.4
+
+## 4.13.3
+
+### Patch Changes
+
+- Updated dependencies [ce33270]
+  - chat@4.13.3
+  - @chat-adapter/shared@4.13.3
+
+## 4.13.2
+
+### Patch Changes
+
+- Updated dependencies [7d00feb]
+  - chat@4.13.2
+  - @chat-adapter/shared@4.13.2
+
+## 4.13.1
+
+### Patch Changes
+
+- chat@4.13.1
+- @chat-adapter/shared@4.13.1
+
+## 4.13.0
+
+### Patch Changes
+
+- Updated dependencies [f371c0d]
+  - chat@4.13.0
+  - @chat-adapter/shared@4.13.0
+
+## 4.12.0
+
+### Patch Changes
+
+- Updated dependencies [8c50252]
+  - chat@4.12.0
+  - @chat-adapter/shared@4.12.0
+
+## 4.11.0
+
+### Minor Changes
+
+- 417374b: Adding inline Select components and Radio buttons to cards
+
+### Patch Changes
+
+- Updated dependencies [417374b]
+  - chat@4.11.0
+  - @chat-adapter/shared@4.11.0
+
+## 4.10.1
+
+### Patch Changes
+
+- Updated dependencies [c99b183]
+  - chat@4.10.1
+  - @chat-adapter/shared@4.10.1
+
+## 4.10.0
+
+### Patch Changes
+
+- Updated dependencies [c7d51cb]
+  - chat@4.10.0
+  - @chat-adapter/shared@4.10.0
+
+## 4.9.1
+
+### Patch Changes
+
+- Updated dependencies [18ce1d0]
+  - @chat-adapter/shared@4.9.1
+  - chat@4.9.1
+
+## 4.9.0
+
+### Patch Changes
+
+- chat@4.9.0
+- @chat-adapter/shared@4.9.0
+
+## 4.8.0
+
+### Patch Changes
+
+- Updated dependencies [cca9867]
+  - chat@4.8.0
+  - @chat-adapter/shared@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- chat@4.7.2
+- @chat-adapter/shared@4.7.2
+
+## 4.7.1
+
+### Patch Changes
+
+- Updated dependencies [160f1f7]
+  - chat@4.7.1
+  - @chat-adapter/shared@4.7.1
+
+## 4.7.0
+
+### Patch Changes
+
+- Updated dependencies [a13f43e]
+  - chat@4.7.0
+  - @chat-adapter/shared@4.7.0
+
+## 4.6.0
+
+### Minor Changes
+
+- 68e3f74: Add <LinkButton> component
+
+### Patch Changes
+
+- Updated dependencies [68e3f74]
+  - chat@4.6.0
+  - @chat-adapter/shared@4.6.0
+
+## 4.5.0
+
+### Patch Changes
+
+- Updated dependencies [efa6b36]
+  - chat@4.5.0
+  - @chat-adapter/shared@4.5.0
+
+## 4.4.1
+
+### Patch Changes
+
+- 9e8f9e7: Serde support
+- Updated dependencies [1882732]
+- Updated dependencies [b5826c2]
+- Updated dependencies [9e8f9e7]
+  - chat@4.4.1
+  - @chat-adapter/shared@4.4.1
+
+## 4.4.0
+
+### Minor Changes
+
+- 8ca6371: Add support for modals, modal events, text inputs and selectors.
+
+### Patch Changes
+
+- Updated dependencies [8ca6371]
+  - chat@4.4.0
+  - @chat-adapter/shared@4.4.0
+
+## 4.3.0
+
+### Minor Changes
+
+- 498eb04: Discord support
+
+### Patch Changes
+
+- d80ea3f: Refactor
+- Updated dependencies [498eb04]
+- Updated dependencies [d80ea3f]
+  - @chat-adapter/shared@4.3.0
+  - chat@4.3.0
+
+## 4.2.0
+
+### Minor Changes
+
+- 0b5197a: Fixed and tested fetchMessages and allMessages
+
+### Patch Changes
+
+- Updated dependencies [0b5197a]
+  - chat@4.2.0
+
+## 4.1.0
+
+### Minor Changes
+
+- 9b95317: Native streaming support
+
+### Patch Changes
+
+- Updated dependencies [9b95317]
+  - chat@4.1.0
+
+## 4.0.2
+
+### Patch Changes
+
+- chat@4.0.2
+
+## 4.0.1
+
+### Patch Changes
+
+- b27ea10: READMEs
+- Updated dependencies [b27ea10]
+  - chat@4.0.1

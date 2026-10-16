@@ -1,0 +1,3329 @@
+/**
+ * Discord adapter for chat-sdk.
+ *
+ * Uses Discord's HTTP Interactions API (not Gateway WebSocket) for
+ * serverless compatibility. Webhooks use Ed25519 verification by default,
+ * or a custom verifier for services such as Vercel Connect.
+ */
+
+import { AsyncLocalStorage } from "node:async_hooks";
+import {
+  downloadAttachment,
+  extractCard,
+  extractFiles,
+  NetworkError,
+  toBuffer,
+  ValidationError,
+} from "@chat-adapter/shared";
+import type {
+  ActionEvent,
+  Adapter,
+  AdapterPostableMessage,
+  Attachment,
+  ChannelInfo,
+  ChatInstance,
+  EmojiValue,
+  FetchOptions,
+  FetchResult,
+  FormattedContent,
+  ListThreadsOptions,
+  ListThreadsResult,
+  Logger,
+  RawMessage,
+  ThreadInfo,
+  ThreadSummary,
+  UserInfo,
+  WebhookOptions,
+} from "chat";
+import {
+  ConsoleLogger,
+  convertEmojiPlaceholders,
+  defaultEmojiResolver,
+  getEmoji,
+  Message,
+} from "chat";
+import {
+  type ChatInputCommandInteraction,
+  Client,
+  type CommandInteractionOption,
+  type Interaction as DiscordJsInteraction,
+  type Message as DiscordJsMessage,
+  type User as DiscordJsUser,
+  type Entitlement,
+  Events,
+  GatewayIntentBits,
+  type MessageComponentInteraction,
+  Partials,
+} from "discord.js";
+import {
+  type APIApplicationCommandInteraction,
+  type APIApplicationCommandInteractionDataOption,
+  type APIChatInputApplicationCommandInteraction,
+  type APIComponentInContainer,
+  type APIContainerComponent,
+  type APIEntitlement,
+  type APIFileComponent,
+  type APIInteraction,
+  type APIInteractionResponse,
+  type APIMediaGalleryComponent,
+  type APIMessage,
+  type APIMessageComponentInteraction,
+  type APIMessageComponentInteractionData,
+  type APIMessageSelectMenuInteractionData,
+  type APIThreadChannel,
+  type APIUser,
+  ChannelType,
+  ComponentType,
+  InteractionResponseType,
+  InteractionType,
+  MessageType,
+  type RESTGetAPIChannelResult,
+  type RESTGetAPIChannelThreadsArchivedPublicResult,
+  type RESTGetAPIGuildThreadsResult,
+  type RESTGetAPIUserResult,
+  type RESTPostAPICurrentUserCreateDMChannelResult,
+} from "discord-api-types/v10";
+import { verifyKey } from "discord-interactions";
+import {
+  cardToDiscordPayload,
+  decodeDiscordCustomId,
+  validateComponentsV2,
+} from "./cards";
+import { DiscordFormatConverter } from "./markdown";
+import {
+  type DiscordAdapterConfig,
+  DiscordContentFormat,
+  type DiscordForwardedEvent,
+  type DiscordGatewayEventType,
+  type DiscordGatewayMessageData,
+  type DiscordGatewayReactionData,
+  type DiscordInteractionFlagsContext,
+  type DiscordInteractionResponseFlags,
+  DiscordMessageFlag,
+  type DiscordMessagePayload,
+  type DiscordRequestContext,
+  type DiscordSlashCommandContext,
+  type DiscordThreadId,
+  type DiscordWebhookVerifier,
+} from "./types";
+
+const DISCORD_API_BASE = "https://discord.com/api/v10";
+const DISCORD_MAX_CONTENT_LENGTH = 2000;
+const DISCORD_UNKNOWN_MESSAGE = 10_008;
+const DISCORD_THREAD_ALREADY_CREATED = 160_004;
+const HEX_64_PATTERN = /^[0-9a-f]{64}$/;
+const HEX_PATTERN = /^[0-9a-f]+$/;
+
+class DiscordApiError extends Error {
+  readonly code?: number;
+  readonly status: number;
+
+  constructor(status: number, body: string) {
+    super(body);
+    this.name = "DiscordApiError";
+    this.status = status;
+    this.code = parseDiscordErrorCode(body);
+  }
+}
+
+function parseDiscordErrorCode(body: string): number | undefined {
+  try {
+    const data: unknown = JSON.parse(body);
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      "code" in data &&
+      typeof data.code === "number"
+    ) {
+      return data.code;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+type DiscordInteractionChannel = NonNullable<APIInteraction["channel"]>;
+
+/**
+ * Interaction fields rebuilt from a discord.js object. Unlike the webhook
+ * payload types, `channel` is optional because discord.js only resolves it
+ * from its cache.
+ */
+type DiscordGatewayInteractionBase = Omit<
+  APIMessageComponentInteraction,
+  "channel" | "data" | "message" | "type"
+> & { channel?: DiscordInteractionChannel };
+
+function isThreadChannelType(type: ChannelType | undefined): boolean {
+  return (
+    type === ChannelType.PublicThread || type === ChannelType.PrivateThread
+  );
+}
+
+function getInteractionThreadParentId(
+  channel: DiscordInteractionChannel | undefined
+): string | undefined {
+  if (!(channel && isThreadChannelType(channel.type))) {
+    return undefined;
+  }
+  return "parent_id" in channel && channel.parent_id
+    ? channel.parent_id
+    : undefined;
+}
+
+/** Raw dispatch packet as emitted by discord.js's `raw` event. */
+interface DiscordRawGatewayPacket {
+  d: unknown;
+  t: string | null;
+}
+
+function getPacketChannelId(
+  packet: DiscordRawGatewayPacket
+): string | undefined {
+  const data = packet.d;
+  return typeof data === "object" &&
+    data !== null &&
+    "channel_id" in data &&
+    typeof data.channel_id === "string"
+    ? data.channel_id
+    : undefined;
+}
+
+interface DiscordFileUpload {
+  data: Buffer | Blob | ArrayBuffer;
+  filename: string;
+  mimeType?: string;
+}
+
+function flatten<T>(
+  text: string,
+  files: Iterable<T>,
+  snapshots: Iterable<{
+    attachments: { values: () => IterableIterator<T> };
+    content: string;
+  }>
+): { attachments: T[]; text: string } {
+  const items = [...snapshots];
+  return {
+    attachments: [
+      ...files,
+      ...items.flatMap((item) => [...item.attachments.values()]),
+    ],
+    text: [text, ...items.map((item) => item.content)]
+      .filter(Boolean)
+      .join("\n\n"),
+  };
+}
+
+function normalizeCredentialProvider(
+  value: string | (() => string | Promise<string>)
+): () => Promise<string> {
+  if (typeof value === "function") {
+    return async () => await value();
+  }
+  return () => Promise.resolve(value);
+}
+
+export class DiscordAdapter implements Adapter<DiscordThreadId, unknown> {
+  readonly name = "discord";
+  readonly userName: string;
+
+  protected readonly apiBaseUrl: string;
+  protected readonly botTokenProvider: () => Promise<string>;
+  protected readonly applicationIdProvider: () => Promise<string>;
+  protected readonly publicKey?: string;
+  protected readonly webhookVerifier?: DiscordWebhookVerifier;
+  protected resolvedApplicationId?: string;
+  protected pendingApplicationId?: Promise<string>;
+  protected readonly mentionRoleIds: string[];
+  protected readonly contentFormat: DiscordContentFormat;
+  protected readonly respondToChannelIds: string[];
+  protected readonly respondToGlobalMentions: boolean;
+  protected readonly interactionFlags?: DiscordAdapterConfig["interactionFlags"];
+  protected chat: ChatInstance | null = null;
+  protected readonly logger: Logger;
+  protected readonly formatConverter = new DiscordFormatConverter();
+  protected readonly requestContext =
+    new AsyncLocalStorage<DiscordRequestContext>();
+  /** Per-channel forwarding chains, see `enqueueOrderedForward`. */
+  private readonly forwardQueues = new Map<string, Promise<void>>();
+
+  private readonly threadParentCache = new Map<
+    string,
+    { parentId: string; expiresAt: number }
+  >();
+  protected static readonly THREAD_PARENT_CACHE_TTL = 5 * 60 * 1000;
+
+  get botUserId(): string | undefined {
+    return this.resolvedApplicationId;
+  }
+
+  protected get applicationId(): string {
+    if (!this.resolvedApplicationId) {
+      throw new ValidationError(
+        "discord",
+        "applicationId has not been resolved. Ensure chat.initialize() has completed."
+      );
+    }
+    return this.resolvedApplicationId;
+  }
+
+  constructor(config: DiscordAdapterConfig = {}) {
+    const botToken = config.botToken ?? process.env.DISCORD_BOT_TOKEN;
+    if (!botToken) {
+      throw new ValidationError(
+        "discord",
+        "botToken is required. Set DISCORD_BOT_TOKEN or provide it in config."
+      );
+    }
+    const webhookVerifier = config.webhookVerifier;
+    const publicKey = webhookVerifier
+      ? undefined
+      : (config.publicKey ?? process.env.DISCORD_PUBLIC_KEY);
+    if (!(publicKey || webhookVerifier)) {
+      throw new ValidationError(
+        "discord",
+        "publicKey or webhookVerifier is required. Set DISCORD_PUBLIC_KEY, provide publicKey in config, or provide a webhookVerifier."
+      );
+    }
+    const applicationId =
+      config.applicationId ?? process.env.DISCORD_APPLICATION_ID;
+    if (!applicationId) {
+      throw new ValidationError(
+        "discord",
+        "applicationId is required. Set DISCORD_APPLICATION_ID or provide it in config."
+      );
+    }
+
+    this.apiBaseUrl =
+      config.apiUrl ?? process.env.DISCORD_API_URL ?? DISCORD_API_BASE;
+    this.botTokenProvider = normalizeCredentialProvider(botToken);
+    this.applicationIdProvider = normalizeCredentialProvider(applicationId);
+    this.resolvedApplicationId =
+      typeof applicationId === "string" ? applicationId : undefined;
+    this.publicKey = publicKey?.trim().toLowerCase();
+    this.webhookVerifier = webhookVerifier;
+    this.mentionRoleIds =
+      config.mentionRoleIds ??
+      (process.env.DISCORD_MENTION_ROLE_IDS
+        ? process.env.DISCORD_MENTION_ROLE_IDS.split(",").map((id) => id.trim())
+        : []);
+    const contentFormat = config.contentFormat ?? DiscordContentFormat.Embeds;
+    if (
+      contentFormat !== DiscordContentFormat.Embeds &&
+      contentFormat !== DiscordContentFormat.ComponentsV2
+    ) {
+      throw new ValidationError(
+        "discord",
+        "contentFormat must be a DiscordContentFormat value."
+      );
+    }
+
+    this.respondToChannelIds =
+      config.respondToChannelIds ??
+      (process.env.DISCORD_RESPOND_TO_CHANNEL_IDS
+        ? process.env.DISCORD_RESPOND_TO_CHANNEL_IDS.split(",").map((id) =>
+            id.trim()
+          )
+        : []);
+    this.respondToGlobalMentions = config.respondToGlobalMentions ?? false;
+    this.contentFormat = contentFormat;
+    this.interactionFlags = config.interactionFlags;
+    this.logger = config.logger ?? new ConsoleLogger("info").child("discord");
+    this.userName = config.userName ?? "bot";
+
+    // Validate public key format
+    if (this.publicKey && !HEX_64_PATTERN.test(this.publicKey)) {
+      this.logger.error("Invalid Discord public key format", {
+        length: this.publicKey.length,
+        isHex: HEX_PATTERN.test(this.publicKey),
+      });
+    }
+  }
+
+  async initialize(chat: ChatInstance): Promise<void> {
+    await this.resolveApplicationId();
+    this.chat = chat;
+    this.logger.info("Discord adapter initialized");
+  }
+
+  protected async resolveBotToken(): Promise<string> {
+    const botToken = await this.botTokenProvider();
+    if (!botToken) {
+      throw new ValidationError(
+        "discord",
+        "botToken resolver returned an empty token."
+      );
+    }
+    return botToken;
+  }
+
+  protected async resolveApplicationId(): Promise<string> {
+    if (this.resolvedApplicationId) {
+      return this.resolvedApplicationId;
+    }
+    if (!this.pendingApplicationId) {
+      this.pendingApplicationId = this.applicationIdProvider()
+        .then((applicationId) => {
+          if (!applicationId) {
+            throw new ValidationError(
+              "discord",
+              "applicationId resolver returned an empty application ID."
+            );
+          }
+          this.resolvedApplicationId = applicationId;
+          return applicationId;
+        })
+        .finally(() => {
+          this.pendingApplicationId = undefined;
+        });
+    }
+    return this.pendingApplicationId;
+  }
+
+  async getUser(userId: string): Promise<UserInfo | null> {
+    try {
+      const response = await this.discordFetch(`/users/${userId}`, "GET");
+      const user = (await response.json()) as RESTGetAPIUserResult;
+      return {
+        avatarUrl: user.avatar
+          ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png`
+          : undefined,
+        email: undefined,
+        fullName: user.global_name || user.username,
+        isBot: user.bot ?? false,
+        userId: user.id,
+        userName: user.username,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Handle incoming Discord webhook (HTTP Interactions or forwarded Gateway events).
+   */
+  async handleWebhook(
+    request: Request,
+    options?: WebhookOptions
+  ): Promise<Response> {
+    // Get raw body bytes for signature verification
+    const bodyBuffer = await request.arrayBuffer();
+    const bodyBytes = new Uint8Array(bodyBuffer);
+    const body = new TextDecoder().decode(bodyBytes);
+
+    // Check if this is a forwarded Gateway event (uses bot token for auth)
+    const gatewayToken = request.headers.get("x-discord-gateway-token");
+    if (gatewayToken) {
+      const [, botToken] = await Promise.all([
+        this.resolveApplicationId(),
+        this.resolveBotToken(),
+      ]);
+      if (gatewayToken !== botToken) {
+        this.logger.warn("Invalid gateway token");
+        return new Response("Invalid gateway token", { status: 401 });
+      }
+      this.logger.info("Discord forwarded Gateway event received");
+      try {
+        const event = JSON.parse(body) as DiscordForwardedEvent;
+        return this.handleForwardedGatewayEvent(event, options);
+      } catch {
+        return new Response("Invalid JSON", { status: 400 });
+      }
+    }
+
+    await this.resolveApplicationId();
+
+    this.logger.info("Discord webhook received", {
+      bodyLength: body.length,
+      bodyBytesLength: bodyBytes.length,
+      hasSignature: !!request.headers.get("x-signature-ed25519"),
+      hasTimestamp: !!request.headers.get("x-signature-timestamp"),
+    });
+
+    if (this.webhookVerifier) {
+      let verified: unknown;
+      try {
+        verified = await this.webhookVerifier(request, body);
+      } catch (error) {
+        this.logger.warn("Discord webhook verifier rejected the request", {
+          error,
+        });
+        return new Response("Invalid signature", { status: 401 });
+      }
+      if (!verified) {
+        return new Response("Invalid signature", { status: 401 });
+      }
+    } else {
+      const signature = request.headers.get("x-signature-ed25519");
+      const timestamp = request.headers.get("x-signature-timestamp");
+      const signatureValid = await this.verifySignature(
+        bodyBytes,
+        signature,
+        timestamp
+      );
+      if (!signatureValid) {
+        this.logger.warn(
+          "Discord signature verification failed, returning 401"
+        );
+        return new Response("Invalid signature", { status: 401 });
+      }
+      this.logger.info("Discord signature verification passed");
+    }
+
+    let interaction: APIInteraction;
+    try {
+      interaction = JSON.parse(body);
+    } catch {
+      return new Response("Invalid JSON", { status: 400 });
+    }
+
+    this.logger.info("Discord interaction parsed", {
+      type: interaction.type,
+      typeIsPing: interaction.type === InteractionType.Ping,
+      expectedPingType: InteractionType.Ping,
+      id: interaction.id,
+    });
+
+    // Handle PING (Discord verification)
+    if (interaction.type === InteractionType.Ping) {
+      const responseBody = JSON.stringify({
+        type: InteractionResponseType.Pong,
+      });
+      this.logger.info("Discord PING received, responding with PONG", {
+        responseBody,
+        responseType: InteractionResponseType.Pong,
+      });
+      return new Response(responseBody, {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // Handle MESSAGE_COMPONENT (button clicks)
+    if (interaction.type === InteractionType.MessageComponent) {
+      this.handleComponentInteraction(interaction, options);
+      // ACK the interaction immediately
+      return this.respondToInteraction({
+        type: InteractionResponseType.DeferredMessageUpdate,
+      });
+    }
+
+    // Handle APPLICATION_COMMAND (slash and context menu commands)
+    if (interaction.type === InteractionType.ApplicationCommand) {
+      const context = this.getApplicationCommandContext(interaction);
+      const flags = this.getInteractionFlags(context);
+      this.handleApplicationCommandInteraction(context, flags, options);
+      return this.respondToInteraction({
+        ...(flags === undefined ? {} : { data: { flags } }),
+        type: InteractionResponseType.DeferredChannelMessageWithSource,
+      });
+    }
+
+    return new Response("Unknown interaction type", { status: 400 });
+  }
+
+  /**
+   * Verify Discord's Ed25519 signature using official discord-interactions library.
+   */
+  protected async verifySignature(
+    bodyBytes: Uint8Array,
+    signature: string | null,
+    timestamp: string | null
+  ): Promise<boolean> {
+    if (!this.publicKey) {
+      return false;
+    }
+    if (!(signature && timestamp)) {
+      this.logger.warn(
+        "Discord signature verification failed: missing headers",
+        {
+          hasSignature: !!signature,
+          hasTimestamp: !!timestamp,
+        }
+      );
+      return false;
+    }
+
+    try {
+      // Log exactly what we're verifying
+      this.logger.info("Discord signature verification attempt", {
+        bodyBytesLength: bodyBytes.length,
+        signatureLength: signature.length,
+        timestampLength: timestamp.length,
+        publicKeyLength: this.publicKey.length,
+        timestamp,
+        signaturePrefix: signature.slice(0, 16),
+        publicKey: this.publicKey,
+      });
+
+      // Use the official discord-interactions library for verification with raw bytes
+      const isValid = await verifyKey(
+        bodyBytes,
+        signature,
+        timestamp,
+        this.publicKey
+      );
+
+      if (!isValid) {
+        const bodyString = new TextDecoder().decode(bodyBytes);
+        this.logger.warn(
+          "Discord signature verification failed: invalid signature",
+          {
+            publicKeyLength: this.publicKey.length,
+            signatureLength: signature.length,
+            publicKeyPrefix: this.publicKey.slice(0, 8),
+            publicKeySuffix: this.publicKey.slice(-8),
+            timestamp,
+            bodyLength: bodyBytes.length,
+            bodyPrefix: bodyString.slice(0, 50),
+          }
+        );
+      }
+
+      return isValid;
+    } catch (error) {
+      this.logger.warn("Discord signature verification failed: exception", {
+        error,
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Create a JSON response for Discord interactions.
+   */
+  protected respondToInteraction(response: APIInteractionResponse): Response {
+    return Response.json(response);
+  }
+
+  /**
+   * Handle MESSAGE_COMPONENT interactions (button clicks).
+   */
+  protected handleComponentInteraction(
+    interaction: APIMessageComponentInteraction,
+    options?: WebhookOptions
+  ): void {
+    if (!this.chat) {
+      this.logger.warn("Chat instance not initialized, ignoring interaction");
+      return;
+    }
+
+    const customId = interaction.data.custom_id;
+    if (!customId) {
+      this.logger.warn("No custom_id in component interaction");
+      return;
+    }
+
+    const user = interaction.member?.user || interaction.user;
+    if (!user) {
+      this.logger.warn("No user in component interaction");
+      return;
+    }
+
+    const interactionChannelId = interaction.channel_id;
+    const messageId = interaction.message.id;
+
+    if (!(interactionChannelId && messageId)) {
+      this.logger.warn("Missing channel_id or message_id in interaction");
+      return;
+    }
+
+    const threadId = this.encodeInteractionThreadId(
+      interaction,
+      interactionChannelId
+    );
+
+    const decoded = decodeDiscordCustomId(customId);
+    const selectedValue =
+      "values" in interaction.data ? interaction.data.values[0] : undefined;
+    const actionEvent: Omit<ActionEvent, "thread" | "openModal"> & {
+      adapter: DiscordAdapter;
+    } = {
+      actionId: decoded.actionId,
+      value: selectedValue ?? decoded.value ?? decoded.actionId,
+      user: {
+        userId: user.id,
+        userName: user.username,
+        fullName: user.global_name || user.username,
+        isBot: user.bot ?? false,
+        isMe: false,
+      },
+      messageId,
+      threadId,
+      adapter: this,
+      raw: interaction,
+    };
+
+    this.logger.debug("Processing Discord button action", {
+      actionId: customId,
+      messageId,
+      threadId,
+    });
+
+    this.chat.processAction(actionEvent, options);
+  }
+
+  /**
+   * Handle APPLICATION_COMMAND interactions. Context menu (user/message)
+   * commands carry no options and reach `onSlashCommand` under their name.
+   */
+  protected getApplicationCommandContext(
+    interaction: APIApplicationCommandInteraction
+  ): DiscordInteractionFlagsContext | null {
+    const commandName = interaction.data.name;
+    if (!commandName) {
+      this.logger.warn("No command name in application command interaction");
+      return null;
+    }
+
+    const user = interaction.member?.user || interaction.user;
+    if (!user) {
+      this.logger.warn("No user in application command interaction");
+      return null;
+    }
+
+    const interactionChannelId = interaction.channel_id;
+    if (!interactionChannelId) {
+      this.logger.warn("Missing channel_id in application command interaction");
+      return null;
+    }
+
+    const channelId = this.encodeInteractionThreadId(
+      interaction,
+      interactionChannelId
+    );
+
+    const { command, text } = this.parseSlashCommand(
+      commandName,
+      "options" in interaction.data ? interaction.data.options : undefined
+    );
+
+    return {
+      channelId,
+      command,
+      interaction,
+      text,
+      user,
+    };
+  }
+
+  /**
+   * Chat SDK thread id for the channel an interaction arrived in. Thread
+   * channels encode as `guild:parent:thread` and their parent is cached so
+   * later reactions in the same thread skip the channel lookup.
+   */
+  private encodeInteractionThreadId(
+    interaction: Pick<APIInteraction, "channel" | "guild_id">,
+    interactionChannelId: string
+  ): string {
+    const guildId = interaction.guild_id || "@me";
+    const threadParentId = getInteractionThreadParentId(interaction.channel);
+    if (!threadParentId) {
+      return this.encodeThreadId({ guildId, channelId: interactionChannelId });
+    }
+
+    this.rememberThreadParent(interactionChannelId, threadParentId);
+    return this.encodeThreadId({
+      guildId,
+      channelId: threadParentId,
+      threadId: interactionChannelId,
+    });
+  }
+
+  protected getInteractionFlags(
+    context: DiscordInteractionFlagsContext | null
+  ): DiscordInteractionResponseFlags | undefined {
+    if (!(context && this.interactionFlags)) {
+      return undefined;
+    }
+    return this.interactionFlags(context);
+  }
+
+  protected handleApplicationCommandInteraction(
+    context: DiscordInteractionFlagsContext | null,
+    initialResponseFlags?: DiscordMessagePayload["flags"],
+    options?: WebhookOptions
+  ): void {
+    if (!this.chat) {
+      this.logger.warn("Chat instance not initialized, ignoring interaction");
+      return;
+    }
+
+    if (!context) {
+      return;
+    }
+
+    const { channelId, command, interaction, text, user } = context;
+
+    this.logger.debug("Processing Discord slash command", {
+      command,
+      text,
+      userId: user.id,
+      channelId,
+    });
+
+    // Keep interaction metadata in AsyncLocalStorage so event.channel.post(...)
+    // can resolve Discord's deferred "thinking..." response natively.
+    this.requestContext.run(
+      {
+        slashCommand: {
+          channelId,
+          initialResponseFlags,
+          interactionToken: interaction.token,
+          initialResponseSent: false,
+        },
+      },
+      () => {
+        this.chat?.processSlashCommand(
+          {
+            command,
+            text,
+            user: {
+              userId: user.id,
+              userName: user.username,
+              fullName: user.global_name || user.username,
+              isBot: user.bot ?? false,
+              isMe: user.id === this.applicationId,
+            },
+            adapter: this as Adapter,
+            raw: interaction,
+            channelId,
+          },
+          options
+        );
+      }
+    );
+  }
+
+  /**
+   * Parse a Discord slash command into a full command path and flat text.
+   *
+   * Subcommand and subcommand-group names are appended to the command path
+   * so `/project issue create --title="Login fails"` becomes:
+   *   command = "/project issue create"
+   *   text    = "Login fails"
+   *
+   * Leaf option values are flattened into `text`. Consumers needing the full
+   * option tree (names, types) can use `event.raw`.
+   */
+  protected parseSlashCommand(
+    name: string,
+    options?: APIApplicationCommandInteractionDataOption[]
+  ): { command: string; text: string } {
+    const commandParts: string[] = [name.startsWith("/") ? name : `/${name}`];
+    const valueParts: string[] = [];
+
+    const collect = (
+      items: APIApplicationCommandInteractionDataOption[]
+    ): void => {
+      for (const option of items) {
+        if ("value" in option && option.value !== undefined) {
+          valueParts.push(String(option.value));
+          continue;
+        }
+        // Subcommand or subcommand-group — append name to command path
+        if (
+          "options" in option &&
+          option.options &&
+          option.options.length > 0
+        ) {
+          commandParts.push(option.name);
+          collect(option.options);
+        }
+      }
+    };
+
+    if (options && options.length > 0) {
+      collect(options);
+    }
+
+    return {
+      command: commandParts.join(" "),
+      text: valueParts.join(" ").trim(),
+    };
+  }
+
+  protected async handleGatewayInteraction(
+    interaction: DiscordJsInteraction
+  ): Promise<void> {
+    if (interaction.isChatInputCommand()) {
+      const context = this.getApplicationCommandContext(
+        this.normalizeGatewaySlashCommandInteraction(interaction)
+      );
+      const flags = this.getInteractionFlags(context);
+      await interaction.deferReply(flags === undefined ? undefined : { flags });
+      this.handleApplicationCommandInteraction(context, flags);
+      return;
+    }
+
+    if (interaction.isMessageComponent()) {
+      await interaction.deferUpdate();
+      this.handleComponentInteraction(
+        this.normalizeGatewayComponentInteraction(interaction)
+      );
+    }
+  }
+
+  protected normalizeGatewaySlashCommandInteraction(
+    interaction: ChatInputCommandInteraction
+  ): APIChatInputApplicationCommandInteraction {
+    // `channel` may be absent for uncached channels, see normalizeGatewayInteractionBase.
+    return {
+      ...this.normalizeGatewayInteractionBase(interaction),
+      data: {
+        guild_id: interaction.commandGuildId ?? undefined,
+        id: interaction.commandId,
+        name: interaction.commandName,
+        options: this.normalizeGatewayCommandOptions(interaction.options.data),
+        type: interaction.commandType,
+      },
+      type: interaction.type,
+    } as APIChatInputApplicationCommandInteraction;
+  }
+
+  protected normalizeGatewayComponentInteraction(
+    interaction: MessageComponentInteraction
+  ): APIMessageComponentInteraction {
+    const data: APIMessageComponentInteractionData =
+      interaction.isAnySelectMenu()
+        ? ({
+            component_type: interaction.componentType,
+            custom_id: interaction.customId,
+            values: interaction.values,
+          } as APIMessageSelectMenuInteractionData)
+        : {
+            component_type: ComponentType.Button,
+            custom_id: interaction.customId,
+          };
+
+    // `channel` may be absent for uncached channels, see normalizeGatewayInteractionBase.
+    return {
+      ...this.normalizeGatewayInteractionBase(interaction),
+      data,
+      message: { id: interaction.message.id } as APIMessage,
+      type: interaction.type,
+    } as APIMessageComponentInteraction;
+  }
+
+  /**
+   * Fields shared by every interaction, rebuilt from the discord.js object so
+   * Gateway interactions can flow through the same handlers as webhook payloads.
+   */
+  protected normalizeGatewayInteractionBase(
+    interaction: ChatInputCommandInteraction | MessageComponentInteraction
+  ): DiscordGatewayInteractionBase {
+    // discord.js only resolves `channel` from its cache, so a slash command in
+    // a DM the bot has not seen yet arrives with `channel: null`. The handlers
+    // fall back to `channel_id` in that case.
+    return {
+      app_permissions: interaction.appPermissions.bitfield.toString(),
+      application_id: interaction.applicationId,
+      attachment_size_limit: interaction.attachmentSizeLimit,
+      authorizing_integration_owners: interaction.authorizingIntegrationOwners,
+      channel: interaction.channel
+        ? this.normalizeGatewayChannel(interaction.channel)
+        : undefined,
+      channel_id: interaction.channelId,
+      context: interaction.context ?? undefined,
+      entitlements: interaction.entitlements.map((entitlement) =>
+        this.normalizeGatewayEntitlement(entitlement)
+      ),
+      guild_id: interaction.guildId ?? undefined,
+      guild_locale: interaction.guildLocale ?? undefined,
+      id: interaction.id,
+      locale: interaction.locale,
+      token: interaction.token,
+      user: this.normalizeGatewayUser(interaction.user),
+      version: 1,
+    };
+  }
+
+  protected normalizeGatewayChannel(
+    channel: NonNullable<MessageComponentInteraction["channel"]>
+  ): DiscordInteractionChannel {
+    const parentId =
+      "parentId" in channel && typeof channel.parentId === "string"
+        ? channel.parentId
+        : undefined;
+
+    return {
+      id: channel.id,
+      parent_id: parentId,
+      type: channel.type,
+    } as DiscordInteractionChannel;
+  }
+
+  protected normalizeGatewayCommandOptions(
+    options: readonly CommandInteractionOption[]
+  ): APIApplicationCommandInteractionDataOption[] {
+    return options.map(
+      (option) =>
+        ({
+          name: option.name,
+          options: option.options
+            ? this.normalizeGatewayCommandOptions(option.options)
+            : undefined,
+          type: option.type,
+          value: option.value,
+        }) as APIApplicationCommandInteractionDataOption
+    );
+  }
+
+  protected normalizeGatewayEntitlement(
+    entitlement: Entitlement
+  ): APIEntitlement {
+    return {
+      application_id: entitlement.applicationId,
+      consumed: entitlement.consumed,
+      deleted: entitlement.deleted,
+      ends_at: entitlement.endsAt?.toISOString() ?? null,
+      guild_id: entitlement.guildId ?? undefined,
+      id: entitlement.id,
+      sku_id: entitlement.skuId,
+      starts_at: entitlement.startsAt?.toISOString() ?? null,
+      type: entitlement.type,
+      user_id: entitlement.userId,
+    };
+  }
+
+  protected normalizeGatewayUser(user: DiscordJsUser): APIUser {
+    return {
+      avatar: user.avatar,
+      bot: user.bot,
+      discriminator: user.discriminator,
+      global_name: user.globalName,
+      id: user.id,
+      username: user.username,
+    };
+  }
+
+  /**
+   * Handle a forwarded Gateway event received via webhook.
+   */
+  protected async handleForwardedGatewayEvent(
+    event: DiscordForwardedEvent,
+    options?: WebhookOptions
+  ): Promise<Response> {
+    this.logger.info("Processing forwarded Gateway event", {
+      type: event.type,
+      timestamp: event.timestamp,
+    });
+
+    switch (event.type) {
+      case "GATEWAY_MESSAGE_CREATE":
+        await this.handleForwardedMessage(
+          event.data as DiscordGatewayMessageData,
+          options
+        );
+        break;
+      case "GATEWAY_MESSAGE_REACTION_ADD":
+        await this.handleForwardedReaction(
+          event.data as DiscordGatewayReactionData,
+          true,
+          options
+        );
+        break;
+      case "GATEWAY_MESSAGE_REACTION_REMOVE":
+        await this.handleForwardedReaction(
+          event.data as DiscordGatewayReactionData,
+          false,
+          options
+        );
+        break;
+      default:
+        // Other Gateway events are forwarded but not processed - this is expected
+        this.logger.debug("Forwarded Gateway event (no handler)", {
+          type: event.type,
+        });
+    }
+
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  /**
+   * Handle a forwarded MESSAGE_CREATE event.
+   */
+  protected async handleForwardedMessage(
+    data: DiscordGatewayMessageData,
+    _options?: WebhookOptions
+  ): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    const guildId = data.guild_id || "@me";
+    const channelId = data.channel_id;
+
+    // Use thread info if provided, otherwise use channel
+    let discordThreadId: string | undefined;
+    let parentChannelId = channelId;
+
+    if (data.thread) {
+      discordThreadId = data.thread.id;
+      parentChannelId = data.thread.parent_id;
+      this.rememberThreadParent(discordThreadId, parentChannelId);
+    } else if (isThreadChannelType(data.channel_type)) {
+      // Message is in a thread but we don't have parent info; fetch the channel to get parent_id
+      try {
+        const response = await this.discordFetch(
+          `/channels/${channelId}`,
+          "GET"
+        );
+        const channel = (await response.json()) as APIThreadChannel;
+        if (channel.parent_id) {
+          discordThreadId = channelId;
+          parentChannelId = channel.parent_id;
+          this.logger.debug("Fetched thread parent for forwarded message", {
+            threadId: channelId,
+            parentId: channel.parent_id,
+          });
+        }
+      } catch (error) {
+        this.logger.error("Failed to fetch thread parent", {
+          error: String(error),
+          channelId,
+        });
+      }
+    }
+
+    // Check if bot is mentioned (by user ID or configured role IDs)
+    const isUserMentioned = data.mentions.some(
+      (m) => m.id === this.applicationId
+    );
+    const isRoleMentioned =
+      this.mentionRoleIds.length > 0 &&
+      data.mention_roles?.some((roleId) =>
+        this.mentionRoleIds.includes(roleId)
+      );
+    const isEveryoneMentioned =
+      this.respondToGlobalMentions && data.mention_everyone === true;
+    const isMentioned =
+      isUserMentioned ||
+      isRoleMentioned ||
+      isEveryoneMentioned ||
+      (!data.author.bot && this.respondToChannelIds.includes(parentChannelId));
+
+    // If mentioned and not in a thread, create one
+    if (!discordThreadId && isMentioned) {
+      try {
+        const newThread = await this.createDiscordThread(channelId, data.id);
+        discordThreadId = newThread.id;
+        this.logger.debug("Created Discord thread for forwarded mention", {
+          channelId,
+          messageId: data.id,
+          threadId: newThread.id,
+        });
+      } catch (error) {
+        this.logger.error("Failed to create Discord thread for mention", {
+          error: String(error),
+          messageId: data.id,
+        });
+      }
+    }
+
+    const threadId = this.encodeThreadId({
+      guildId,
+      channelId: parentChannelId,
+      threadId: discordThreadId,
+    });
+    const content = flatten(
+      data.content,
+      data.attachments,
+      data.message_snapshots?.map(({ message }) => message) ?? []
+    );
+
+    // Convert to SDK Message format
+    const chatMessage = new Message({
+      id: data.id,
+      threadId,
+      text: content.text,
+      formatted: this.formatConverter.toAst(content.text),
+      author: {
+        userId: data.author.id,
+        userName: data.author.username,
+        fullName: data.author.global_name || data.author.username,
+        isBot: data.author.bot === true, // Discord returns null for non-bots
+        isMe: data.author.id === this.applicationId,
+      },
+      metadata: {
+        dateSent: new Date(data.timestamp),
+        edited: false,
+      },
+      attachments: content.attachments.map((a) =>
+        this.rehydrateAttachment({
+          type: this.getAttachmentType(a.content_type),
+          url: a.url,
+          name: a.filename,
+          mimeType: a.content_type,
+          size: a.size,
+        })
+      ),
+      raw: data,
+      // A real ping, role mention, @everyone, or allowlisted channel is a
+      // definitive mention. Otherwise leave it undetermined so the SDK can
+      // still match a literal @botname typed in the text.
+      isMention: isMentioned || undefined,
+    });
+
+    try {
+      await this.chat.handleIncomingMessage(this, threadId, chatMessage);
+    } catch (error) {
+      this.logger.error("Error handling forwarded message", {
+        error: String(error),
+        messageId: data.id,
+      });
+    }
+  }
+
+  /**
+   * Handle a forwarded REACTION_ADD or REACTION_REMOVE event.
+   */
+  protected async handleForwardedReaction(
+    data: DiscordGatewayReactionData,
+    added: boolean,
+    _options?: WebhookOptions
+  ): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    const guildId = data.guild_id || "@me";
+    const channelId = data.channel_id;
+
+    // Use thread info if the forwarder resolved it, otherwise fall back to the
+    // cache and finally to a channel lookup.
+    let discordThreadId: string | undefined;
+    let parentChannelId = channelId;
+
+    if (data.thread) {
+      discordThreadId = data.thread.id;
+      parentChannelId = data.thread.parent_id;
+      this.rememberThreadParent(discordThreadId, parentChannelId);
+    } else if (isThreadChannelType(data.channel_type)) {
+      const cached = this.threadParentCache.get(channelId);
+      if (cached && cached.expiresAt > Date.now()) {
+        discordThreadId = channelId;
+        parentChannelId = cached.parentId;
+      } else {
+        try {
+          const response = await this.discordFetch(
+            `/channels/${channelId}`,
+            "GET"
+          );
+          const channel = (await response.json()) as APIThreadChannel;
+          if (channel.parent_id) {
+            discordThreadId = channelId;
+            parentChannelId = channel.parent_id;
+            this.threadParentCache.set(channelId, {
+              parentId: channel.parent_id,
+              expiresAt: Date.now() + DiscordAdapter.THREAD_PARENT_CACHE_TTL,
+            });
+          }
+        } catch (error) {
+          this.logger.error("Failed to fetch thread parent for reaction", {
+            error: String(error),
+            channelId,
+          });
+        }
+      }
+    }
+
+    const threadId = this.encodeThreadId({
+      guildId,
+      channelId: parentChannelId,
+      threadId: discordThreadId,
+    });
+
+    // Normalize emoji
+    const emojiName = data.emoji.name || "unknown";
+    const normalizedEmoji = this.normalizeDiscordEmoji(emojiName);
+
+    // Get user info from either data.user (DMs) or data.member.user (guilds)
+    const userInfo =
+      data.user ?? ("member" in data ? data.member?.user : undefined);
+    if (!userInfo) {
+      this.logger.warn("Reaction event missing user info", { data });
+      return;
+    }
+
+    const reactionEvent = {
+      adapter: this as Adapter,
+      threadId,
+      messageId: data.message_id,
+      emoji: normalizedEmoji,
+      rawEmoji: data.emoji.id ? `<:${emojiName}:${data.emoji.id}>` : emojiName,
+      added,
+      user: {
+        userId: userInfo.id,
+        userName: userInfo.username,
+        fullName: userInfo.username,
+        isBot: userInfo.bot === true, // Discord returns null for non-bots
+        isMe: userInfo.id === this.applicationId,
+      },
+      raw: data,
+    };
+
+    this.chat.processReaction(reactionEvent);
+  }
+
+  protected buildMessagePayload(
+    message: AdapterPostableMessage,
+    options: { clearContentForCard?: boolean } = {}
+  ): {
+    componentCount: number;
+    embedCount: number;
+    payload: DiscordMessagePayload;
+  } {
+    const payload: DiscordMessagePayload = {};
+    const card = extractCard(message);
+
+    if (card) {
+      const cardPayload = cardToDiscordPayload(card, {
+        contentFormat: this.contentFormat,
+      });
+
+      if (cardPayload.embeds.length > 0) {
+        payload.embeds = cardPayload.embeds;
+      }
+
+      if (cardPayload.components.length > 0) {
+        payload.components = cardPayload.components;
+      }
+
+      if (cardPayload.flags !== undefined) {
+        // biome-ignore lint/suspicious/noBitwiseOperators: Discord message flags are bitfields.
+        payload.flags = (payload.flags ?? 0) | cardPayload.flags;
+      }
+
+      if (options.clearContentForCard) {
+        if (this.contentFormat === DiscordContentFormat.ComponentsV2) {
+          payload.content = null;
+          payload.embeds = [];
+        } else {
+          payload.content = "";
+        }
+      }
+
+      return {
+        componentCount: payload.components?.length ?? 0,
+        embedCount: payload.embeds?.length ?? 0,
+        payload,
+      };
+    }
+
+    payload.content = this.truncateContent(
+      convertEmojiPlaceholders(
+        this.formatConverter.renderPostable(message),
+        "discord"
+      )
+    );
+
+    return {
+      componentCount: 0,
+      embedCount: 0,
+      payload,
+    };
+  }
+
+  protected addComponentsV2FileReferences(
+    payload: DiscordMessagePayload,
+    files: DiscordFileUpload[]
+  ): void {
+    if (files.length === 0) {
+      return;
+    }
+
+    const isComponentsV2 =
+      // biome-ignore lint/suspicious/noBitwiseOperators: Discord message flags are bitfields.
+      ((payload.flags ?? 0) & DiscordMessageFlag.IsComponentsV2) !== 0;
+    if (!isComponentsV2) {
+      return;
+    }
+
+    const uploadComponents = files.map((file) =>
+      this.fileUploadToComponentsV2Component(file)
+    );
+
+    const container = payload.components?.find(
+      (component): component is APIContainerComponent =>
+        component.type === ComponentType.Container
+    );
+
+    if (container) {
+      container.components.push(...uploadComponents);
+    } else {
+      payload.components = [...(payload.components ?? []), ...uploadComponents];
+    }
+
+    validateComponentsV2(payload.components ?? []);
+  }
+
+  protected fileUploadToComponentsV2Component(
+    file: DiscordFileUpload
+  ): APIComponentInContainer {
+    const url = `attachment://${file.filename}`;
+
+    if (this.isMediaGalleryUpload(file)) {
+      return {
+        type: ComponentType.MediaGallery,
+        items: [
+          {
+            media: { url },
+            description: file.filename,
+          },
+        ],
+      } satisfies APIMediaGalleryComponent;
+    }
+
+    return {
+      type: ComponentType.File,
+      file: { url },
+    } satisfies APIFileComponent;
+  }
+
+  protected isMediaGalleryUpload(file: DiscordFileUpload): boolean {
+    return (
+      file.mimeType?.startsWith("image/") === true ||
+      file.mimeType?.startsWith("video/") === true
+    );
+  }
+
+  /**
+   * Post a message to a Discord channel or thread.
+   */
+  async postMessage(
+    threadId: string,
+    message: AdapterPostableMessage
+  ): Promise<RawMessage<unknown>> {
+    const { channelId, threadId: discordThreadId } =
+      this.decodeThreadId(threadId);
+    const actualThreadId = threadId;
+    const targetChannelId = await this.resolveThreadChannelId(
+      channelId,
+      discordThreadId
+    );
+
+    const { componentCount, embedCount, payload } =
+      this.buildMessagePayload(message);
+
+    // Handle file uploads
+    const files = extractFiles(message);
+    this.addComponentsV2FileReferences(payload, files);
+    const slashResponse = this.tryPostSlashResponse(
+      actualThreadId,
+      payload,
+      files
+    );
+    if (slashResponse) {
+      return slashResponse;
+    }
+    if (files.length > 0) {
+      return this.postMessageWithFiles(
+        targetChannelId,
+        actualThreadId,
+        payload,
+        files
+      );
+    }
+
+    this.logger.debug("Discord API: POST message", {
+      channelId: targetChannelId,
+      contentLength: payload.content?.length || 0,
+      embedCount,
+      componentCount,
+    });
+
+    const response = await this.discordFetch(
+      `/channels/${targetChannelId}/messages`,
+      "POST",
+      payload
+    );
+
+    const result = (await response.json()) as APIMessage;
+
+    this.logger.debug("Discord API: POST message response", {
+      messageId: result.id,
+    });
+
+    return {
+      id: result.id,
+      threadId: actualThreadId,
+      raw: result,
+    };
+  }
+
+  protected tryPostSlashResponse(
+    threadId: string,
+    payload: DiscordMessagePayload,
+    files: DiscordFileUpload[]
+  ): Promise<RawMessage<unknown>> | undefined {
+    const slashContext = this.requestContext.getStore()?.slashCommand;
+    if (!slashContext || slashContext.channelId !== threadId) {
+      return undefined;
+    }
+    return this.postSlashCommandResponse(
+      slashContext,
+      threadId,
+      payload,
+      files
+    );
+  }
+
+  protected async postSlashCommandResponse(
+    slashContext: DiscordSlashCommandContext,
+    threadId: string,
+    payload: DiscordMessagePayload,
+    files: DiscordFileUpload[]
+  ): Promise<RawMessage<unknown>> {
+    const isInitialResponse = !slashContext.initialResponseSent;
+    // Set flag before awaiting to prevent concurrent post() calls from both
+    // trying to PATCH @original instead of the second being a followup POST.
+    slashContext.initialResponseSent = true;
+
+    const path = isInitialResponse
+      ? `/webhooks/${this.applicationId}/${slashContext.interactionToken}/messages/@original`
+      : `/webhooks/${this.applicationId}/${slashContext.interactionToken}?wait=true`;
+    const method = isInitialResponse ? "PATCH" : "POST";
+
+    this.logger.debug(
+      "Discord interaction webhook: responding to slash command",
+      {
+        threadId,
+        isInitialResponse,
+        hasFiles: files.length > 0,
+      }
+    );
+
+    const responsePayload =
+      slashContext.initialResponseFlags !== undefined
+        ? {
+            ...payload,
+            // biome-ignore lint/suspicious/noBitwiseOperators: Discord message flags are bitfields.
+            flags: slashContext.initialResponseFlags | (payload.flags ?? 0),
+          }
+        : payload;
+
+    const response =
+      files.length > 0
+        ? await this.discordInteractionFetchWithFiles(
+            path,
+            method,
+            responsePayload,
+            files
+          )
+        : await this.discordInteractionFetch(path, method, responsePayload);
+
+    const result = (await response.json()) as APIMessage;
+
+    return {
+      id: result.id,
+      threadId,
+      raw: result,
+    };
+  }
+
+  /**
+   * Create a Discord thread from a message.
+   */
+  protected async createDiscordThread(
+    channelId: string,
+    messageId: string
+  ): Promise<Pick<APIThreadChannel, "id" | "name">> {
+    const threadName = `Thread ${new Date().toLocaleString()}`;
+
+    this.logger.debug("Discord API: POST thread", {
+      channelId,
+      messageId,
+      threadName,
+    });
+
+    try {
+      const response = await this.discordFetch(
+        `/channels/${channelId}/messages/${messageId}/threads`,
+        "POST",
+        {
+          name: threadName,
+          auto_archive_duration: 1440, // 24 hours
+        }
+      );
+
+      const result = (await response.json()) as APIThreadChannel;
+
+      this.logger.debug("Discord API: POST thread response", {
+        threadId: result.id,
+        threadName: result.name,
+      });
+
+      return result;
+    } catch (error) {
+      // Discord error 160004: "A thread has already been created for this message"
+      // Recover by using the existing thread (its ID equals the parent message ID).
+      if (
+        error instanceof NetworkError &&
+        error.originalError instanceof DiscordApiError &&
+        error.originalError.code === DISCORD_THREAD_ALREADY_CREATED
+      ) {
+        this.logger.debug(
+          "Thread already exists for message, reusing existing thread",
+          { channelId, messageId }
+        );
+        return { id: messageId, name: threadName };
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Truncate content to Discord's maximum length.
+   */
+  protected truncateContent(content: string): string {
+    if (content.length <= DISCORD_MAX_CONTENT_LENGTH) {
+      return content;
+    }
+    // Truncate and add ellipsis
+    return `${content.slice(0, DISCORD_MAX_CONTENT_LENGTH - 3)}...`;
+  }
+
+  /**
+   * Post a message with file attachments.
+   */
+  protected async postMessageWithFiles(
+    channelId: string,
+    threadId: string,
+    payload: DiscordMessagePayload,
+    files: DiscordFileUpload[]
+  ): Promise<RawMessage<unknown>> {
+    const botToken = await this.resolveBotToken();
+    const formData = new FormData();
+
+    // Add JSON payload
+    formData.append("payload_json", JSON.stringify(payload));
+
+    // Add files
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!file) {
+        continue;
+      }
+      const buffer = await toBuffer(file.data, {
+        platform: "discord" as "slack",
+      });
+      if (!buffer) {
+        continue;
+      }
+      const blob = new Blob([new Uint8Array(buffer)], {
+        type: file.mimeType || "application/octet-stream",
+      });
+      formData.append(`files[${i}]`, blob, file.filename);
+    }
+
+    const response = await fetch(
+      `${DISCORD_API_BASE}/channels/${channelId}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bot ${botToken}`,
+        },
+        body: formData,
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new NetworkError(
+        "discord",
+        `Failed to post message: ${response.status} ${error}`
+      );
+    }
+
+    const result = (await response.json()) as APIMessage;
+
+    return {
+      id: result.id,
+      threadId,
+      raw: result,
+    };
+  }
+
+  protected async discordInteractionFetch(
+    path: string,
+    method: string,
+    body?: unknown
+  ): Promise<Response> {
+    const response = await fetch(`${DISCORD_API_BASE}${path}`, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      this.logger.error("Discord interaction API error", {
+        path,
+        method,
+        status: response.status,
+        error: errorText,
+      });
+      throw new NetworkError(
+        "discord",
+        `Discord interaction API error: ${response.status} ${errorText}`
+      );
+    }
+
+    return response;
+  }
+
+  protected async discordInteractionFetchWithFiles(
+    path: string,
+    method: string,
+    payload: DiscordMessagePayload,
+    files: DiscordFileUpload[]
+  ): Promise<Response> {
+    const formData = new FormData();
+    formData.append("payload_json", JSON.stringify(payload));
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!file) {
+        continue;
+      }
+      const buffer = await toBuffer(file.data, {
+        platform: "discord",
+      });
+      if (!buffer) {
+        continue;
+      }
+      const blob = new Blob([new Uint8Array(buffer)], {
+        type: file.mimeType || "application/octet-stream",
+      });
+      formData.append(`files[${i}]`, blob, file.filename);
+    }
+
+    const response = await fetch(`${DISCORD_API_BASE}${path}`, {
+      method,
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      this.logger.error("Discord interaction API error", {
+        path,
+        method,
+        status: response.status,
+        error: errorText,
+      });
+      throw new NetworkError(
+        "discord",
+        `Discord interaction API error: ${response.status} ${errorText}`
+      );
+    }
+
+    return response;
+  }
+
+  /**
+   * Edit an existing Discord message.
+   */
+  async editMessage(
+    threadId: string,
+    messageId: string,
+    message: AdapterPostableMessage
+  ): Promise<RawMessage<unknown>> {
+    const { payload } = this.buildMessagePayload(message, {
+      clearContentForCard: true,
+    });
+
+    const response = await this.withMessageChannel(
+      threadId,
+      messageId,
+      async (channelId) => {
+        this.logger.debug("Discord API: PATCH message", {
+          channelId,
+          messageId,
+          contentLength: payload.content?.length || 0,
+        });
+
+        return this.discordFetch(
+          `/channels/${channelId}/messages/${messageId}`,
+          "PATCH",
+          payload
+        );
+      }
+    );
+
+    const result = (await response.json()) as APIMessage;
+
+    this.logger.debug("Discord API: PATCH message response", {
+      messageId: result.id,
+    });
+
+    return {
+      id: result.id,
+      threadId,
+      raw: result,
+    };
+  }
+
+  /**
+   * Delete a Discord message.
+   */
+  async deleteMessage(threadId: string, messageId: string): Promise<void> {
+    await this.withMessageChannel(threadId, messageId, async (channelId) => {
+      this.logger.debug("Discord API: DELETE message", {
+        channelId,
+        messageId,
+      });
+
+      return this.discordFetch(
+        `/channels/${channelId}/messages/${messageId}`,
+        "DELETE"
+      );
+    });
+
+    this.logger.debug("Discord API: DELETE message response", { ok: true });
+  }
+
+  private async resolveThreadChannelId(
+    parentChannelId: string,
+    discordThreadId?: string
+  ): Promise<string> {
+    if (!discordThreadId) {
+      return parentChannelId;
+    }
+
+    const cached = this.threadParentCache.get(discordThreadId);
+    if (cached && cached.expiresAt > Date.now()) {
+      if (cached.parentId === parentChannelId) {
+        return discordThreadId;
+      }
+      throw new ValidationError(
+        "discord",
+        `Discord thread ${discordThreadId} does not belong to channel ${parentChannelId}`
+      );
+    }
+
+    const response = await this.discordFetch(
+      `/channels/${discordThreadId}`,
+      "GET"
+    );
+    const channel = (await response.json()) as APIThreadChannel;
+    if (channel.parent_id !== parentChannelId) {
+      throw new ValidationError(
+        "discord",
+        `Discord thread ${discordThreadId} does not belong to channel ${parentChannelId}`
+      );
+    }
+
+    this.rememberThreadParent(discordThreadId, parentChannelId);
+    return discordThreadId;
+  }
+
+  private rememberThreadParent(threadId: string, parentId: string): void {
+    this.threadParentCache.set(threadId, {
+      parentId,
+      expiresAt: Date.now() + DiscordAdapter.THREAD_PARENT_CACHE_TTL,
+    });
+  }
+
+  protected async withMessageChannel<T>(
+    threadId: string,
+    messageId: string,
+    operation: (channelId: string) => Promise<T>
+  ): Promise<T> {
+    const { channelId, threadId: discordThreadId } =
+      this.decodeThreadId(threadId);
+    const targetChannelId = await this.resolveThreadChannelId(
+      channelId,
+      discordThreadId
+    );
+
+    if (!(discordThreadId && discordThreadId === messageId)) {
+      return operation(targetChannelId);
+    }
+
+    // A thread whose ID equals the message ID is a starter message, and where
+    // that message lives depends on the parent channel. Forum and media posts
+    // keep it inside the thread; threads on a text channel keep it in the
+    // parent channel. Try the thread first and fall back to the parent on
+    // "Unknown Message". Forum channels reject message routes with a channel
+    // type error rather than 10008, so probing them first would not be
+    // recoverable.
+    try {
+      return await operation(discordThreadId);
+    } catch (error) {
+      if (
+        !(
+          error instanceof NetworkError &&
+          error.originalError instanceof DiscordApiError &&
+          error.originalError.code === DISCORD_UNKNOWN_MESSAGE
+        )
+      ) {
+        throw error;
+      }
+      return operation(channelId);
+    }
+  }
+
+  protected async withReaction(
+    threadId: string,
+    messageId: string,
+    emoji: EmojiValue | string,
+    method: "DELETE" | "PUT"
+  ): Promise<void> {
+    const emojiEncoded = this.encodeEmoji(emoji);
+
+    await this.withMessageChannel(threadId, messageId, async (channelId) => {
+      this.logger.debug(`Discord API: ${method} reaction`, {
+        channelId,
+        messageId,
+        emoji: emojiEncoded,
+      });
+
+      return this.discordFetch(
+        `/channels/${channelId}/messages/${messageId}/reactions/${emojiEncoded}/@me`,
+        method
+      );
+    });
+
+    this.logger.debug(`Discord API: ${method} reaction response`, { ok: true });
+  }
+
+  /**
+   * Add a reaction to a Discord message.
+   */
+  async addReaction(
+    threadId: string,
+    messageId: string,
+    emoji: EmojiValue | string
+  ): Promise<void> {
+    await this.withReaction(threadId, messageId, emoji, "PUT");
+  }
+
+  /**
+   * Remove a reaction from a Discord message.
+   */
+  async removeReaction(
+    threadId: string,
+    messageId: string,
+    emoji: EmojiValue | string
+  ): Promise<void> {
+    await this.withReaction(threadId, messageId, emoji, "DELETE");
+  }
+
+  /**
+   * Encode an emoji for use in Discord API URLs.
+   */
+  protected encodeEmoji(emoji: EmojiValue | string): string {
+    const emojiStr = defaultEmojiResolver.toDiscord
+      ? defaultEmojiResolver.toDiscord(emoji)
+      : String(emoji);
+    // URL-encode the emoji for the API path
+    return encodeURIComponent(emojiStr);
+  }
+
+  /**
+   * Start typing indicator in a Discord channel or thread.
+   */
+  async startTyping(threadId: string, _status?: string): Promise<void> {
+    const { channelId, threadId: discordThreadId } =
+      this.decodeThreadId(threadId);
+    const targetChannelId = await this.resolveThreadChannelId(
+      channelId,
+      discordThreadId
+    );
+
+    this.logger.debug("Discord API: POST typing", {
+      channelId: targetChannelId,
+    });
+
+    await this.discordFetch(`/channels/${targetChannelId}/typing`, "POST");
+  }
+
+  /**
+   * Fetch messages from a Discord channel or thread.
+   * If threadId includes a Discord thread ID, fetches from that thread channel.
+   */
+  async fetchMessages(
+    threadId: string,
+    options: FetchOptions = {}
+  ): Promise<FetchResult<unknown>> {
+    const { channelId, threadId: discordThreadId } =
+      this.decodeThreadId(threadId);
+    const targetChannelId = await this.resolveThreadChannelId(
+      channelId,
+      discordThreadId
+    );
+
+    const limit = options.limit || 50;
+    const direction = options.direction ?? "backward";
+
+    const params = new URLSearchParams();
+    params.set("limit", String(limit));
+
+    // Handle pagination cursor
+    if (options.cursor) {
+      if (direction === "backward") {
+        params.set("before", options.cursor);
+      } else {
+        params.set("after", options.cursor);
+      }
+    }
+
+    this.logger.debug("Discord API: GET messages", {
+      channelId: targetChannelId,
+      limit,
+      direction,
+      cursor: options.cursor,
+    });
+
+    const response = await this.discordFetch(
+      `/channels/${targetChannelId}/messages?${params.toString()}`,
+      "GET"
+    );
+
+    const rawMessages = (await response.json()) as APIMessage[];
+
+    this.logger.debug("Discord API: GET messages response", {
+      messageCount: rawMessages.length,
+    });
+
+    // Discord returns messages in reverse chronological order (newest first)
+    // For consistency, reverse to chronological order (oldest first)
+    const sortedMessages = [...rawMessages].reverse();
+
+    const messages = sortedMessages.map((msg) =>
+      this.parseDiscordMessage(msg, threadId)
+    );
+
+    // Determine next cursor
+    let nextCursor: string | undefined;
+    if (rawMessages.length === limit) {
+      if (direction === "backward") {
+        // For backward, cursor is the oldest message ID in the batch
+        const oldest = rawMessages.at(-1);
+        nextCursor = oldest?.id;
+      } else {
+        // For forward, cursor is the newest message ID in the batch
+        const newest = rawMessages[0];
+        nextCursor = newest?.id;
+      }
+    }
+
+    return {
+      messages,
+      nextCursor,
+    };
+  }
+
+  /**
+   * Fetch thread/channel information.
+   */
+  async fetchThread(threadId: string): Promise<ThreadInfo> {
+    const { channelId, guildId } = this.decodeThreadId(threadId);
+
+    this.logger.debug("Discord API: GET channel", { channelId });
+
+    const response = await this.discordFetch(`/channels/${channelId}`, "GET");
+    const channel = (await response.json()) as RESTGetAPIChannelResult;
+
+    return {
+      id: threadId,
+      channelId,
+      channelName: channel.name ?? undefined,
+      isDM:
+        channel.type === ChannelType.DM || channel.type === ChannelType.GroupDM,
+      metadata: {
+        guildId,
+        channelType: channel.type,
+        raw: channel,
+      },
+    };
+  }
+
+  async setThreadTitle(threadId: string, title: string): Promise<void> {
+    const { channelId, threadId: discordThreadId } =
+      this.decodeThreadId(threadId);
+    if (!discordThreadId) {
+      return;
+    }
+
+    const targetChannelId = await this.resolveThreadChannelId(
+      channelId,
+      discordThreadId
+    );
+    await this.discordFetch(`/channels/${targetChannelId}`, "PATCH", {
+      name: title,
+    });
+  }
+
+  /**
+   * Open a DM with a user.
+   */
+  async openDM(userId: string): Promise<string> {
+    this.logger.debug("Discord API: POST DM channel", { userId });
+
+    const response = await this.discordFetch("/users/@me/channels", "POST", {
+      recipient_id: userId,
+    });
+
+    const dmChannel =
+      (await response.json()) as RESTPostAPICurrentUserCreateDMChannelResult;
+
+    this.logger.debug("Discord API: POST DM channel response", {
+      channelId: dmChannel.id,
+    });
+
+    return this.encodeThreadId({
+      guildId: "@me",
+      channelId: dmChannel.id,
+    });
+  }
+
+  /**
+   * Check if a thread is a DM.
+   */
+  isDM(threadId: string): boolean {
+    const { guildId } = this.decodeThreadId(threadId);
+    return guildId === "@me";
+  }
+
+  /**
+   * Encode platform data into a thread ID string.
+   */
+  encodeThreadId(platformData: DiscordThreadId): string {
+    const threadPart = platformData.threadId ? `:${platformData.threadId}` : "";
+    return `discord:${platformData.guildId}:${platformData.channelId}${threadPart}`;
+  }
+
+  /**
+   * Decode thread ID string back to platform data.
+   */
+  decodeThreadId(threadId: string): DiscordThreadId {
+    const parts = threadId.split(":");
+    if (parts.length < 3 || parts[0] !== "discord") {
+      throw new ValidationError(
+        "discord",
+        `Invalid Discord thread ID: ${threadId}`
+      );
+    }
+
+    return {
+      guildId: parts[1] as string,
+      channelId: parts[2] as string,
+      threadId: parts[3],
+    };
+  }
+
+  /**
+   * Parse a Discord message into normalized format.
+   */
+  parseMessage(raw: unknown): Message<unknown> {
+    const msg = raw as APIMessage & { guild_id?: string };
+    const guildId = msg.guild_id || "@me";
+    const threadId = this.encodeThreadId({
+      guildId,
+      channelId: msg.channel_id,
+    });
+    return this.parseDiscordMessage(msg, threadId);
+  }
+
+  /**
+   * Parse a Discord API message into normalized format.
+   */
+  protected parseDiscordMessage(
+    raw: APIMessage,
+    threadId: string
+  ): Message<unknown> {
+    // use original message instead of empty thread starter message if available
+    const msg =
+      raw.type === MessageType.ThreadStarterMessage && raw.referenced_message
+        ? raw.referenced_message
+        : raw;
+
+    const author = msg.author;
+    const isBot = author.bot ?? false;
+    const isMe = author.id === this.botUserId;
+    const content = flatten(
+      msg.content,
+      msg.attachments ?? [],
+      msg.message_snapshots?.map(({ message }) => message) ?? []
+    );
+
+    return new Message({
+      id: msg.id,
+      threadId,
+      text: this.formatConverter.extractPlainText(content.text),
+      formatted: this.formatConverter.toAst(content.text),
+      raw,
+      author: {
+        userId: author.id,
+        userName: author.username,
+        fullName: author.global_name || author.username,
+        isBot,
+        isMe,
+      },
+      metadata: {
+        dateSent: new Date(msg.timestamp),
+        edited: msg.edited_timestamp !== null,
+        editedAt: msg.edited_timestamp
+          ? new Date(msg.edited_timestamp)
+          : undefined,
+      },
+      attachments: content.attachments.map((att) =>
+        this.rehydrateAttachment({
+          type: this.getAttachmentType(att.content_type),
+          url: att.url,
+          name: att.filename,
+          mimeType: att.content_type,
+          size: att.size,
+          width: att.width ?? undefined,
+          height: att.height ?? undefined,
+        })
+      ),
+    });
+  }
+
+  /**
+   * Determine attachment type from MIME type.
+   */
+  protected getAttachmentType(
+    mimeType?: string | null
+  ): "image" | "video" | "audio" | "file" {
+    if (!mimeType) {
+      return "file";
+    }
+    if (mimeType.startsWith("image/")) {
+      return "image";
+    }
+    if (mimeType.startsWith("video/")) {
+      return "video";
+    }
+    if (mimeType.startsWith("audio/")) {
+      return "audio";
+    }
+    return "file";
+  }
+
+  rehydrateAttachment(attachment: Attachment): Attachment {
+    const url = attachment.fetchMetadata?.url ?? attachment.url;
+    if (!url) {
+      return attachment;
+    }
+    return {
+      ...attachment,
+      fetchData: () => this.downloadAttachment(url),
+    };
+  }
+
+  protected async downloadAttachment(url: string): Promise<Buffer> {
+    try {
+      return await downloadAttachment(url, { adapter: "discord" });
+    } catch (error) {
+      if (error instanceof NetworkError) {
+        throw error;
+      }
+      throw new NetworkError(
+        "discord",
+        "Failed to download Discord attachment",
+        error instanceof Error ? error : undefined
+      );
+    }
+  }
+
+  /**
+   * Render formatted content to Discord markdown.
+   */
+  renderFormatted(content: FormattedContent): string {
+    return this.formatConverter.fromAst(content);
+  }
+
+  /**
+   * Make a request to the Discord API.
+   */
+  protected async discordFetch(
+    path: string,
+    method: string,
+    body?: unknown
+  ): Promise<Response> {
+    const botToken = await this.resolveBotToken();
+    const url = `${this.apiBaseUrl}${path}`;
+    const headers: Record<string, string> = {
+      Authorization: `Bot ${botToken}`,
+    };
+
+    if (body) {
+      headers["Content-Type"] = "application/json";
+    }
+
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      this.logger.error("Discord API error", {
+        path,
+        method,
+        status: response.status,
+        error: errorText,
+      });
+      throw new NetworkError(
+        "discord",
+        `Discord API error: ${response.status} ${errorText}`,
+        new DiscordApiError(response.status, errorText)
+      );
+    }
+
+    return response;
+  }
+
+  /**
+   * Start Gateway WebSocket listener for receiving messages/mentions.
+   * Uses waitUntil to keep the connection alive for the specified duration.
+   *
+   * This is a workaround for serverless environments - the Gateway connection
+   * will stay alive for the duration, listening for messages.
+   *
+   * @param options - Webhook options with waitUntil function
+   * @param durationMs - How long to keep listening (default: 180000ms = 3 minutes)
+   * @param abortSignal - Optional AbortSignal to stop the listener early (e.g., when a new listener starts)
+   * @param webhookUrl - URL to forward Gateway events to (required for webhook forwarding mode)
+   * @returns Response indicating the listener was started
+   */
+  async startGatewayListener(
+    options: WebhookOptions,
+    durationMs = 180000,
+    abortSignal?: AbortSignal,
+    webhookUrl?: string
+  ): Promise<Response> {
+    if (!this.chat) {
+      return new Response("Chat instance not initialized", { status: 500 });
+    }
+
+    if (!options.waitUntil) {
+      return new Response("waitUntil not provided", { status: 500 });
+    }
+
+    this.logger.info("Starting Discord Gateway listener", {
+      durationMs,
+      webhookUrl: webhookUrl ? "configured" : "not configured",
+    });
+
+    // Create a promise that resolves after the duration
+    const listenerPromise = this.runGatewayListener(
+      durationMs,
+      abortSignal,
+      webhookUrl
+    );
+
+    // Use waitUntil to keep the function alive
+    options.waitUntil(listenerPromise);
+
+    return new Response(
+      JSON.stringify({
+        status: "listening",
+        durationMs,
+        message: `Gateway listener started, will run for ${durationMs / 1000} seconds`,
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  }
+
+  /**
+   * Run the Gateway listener for a specified duration.
+   */
+  protected async runGatewayListener(
+    durationMs: number,
+    abortSignal?: AbortSignal,
+    webhookUrl?: string
+  ): Promise<void> {
+    const client = new Client({
+      intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.DirectMessageReactions,
+      ],
+      partials: [Partials.Channel],
+    });
+
+    let isShuttingDown = false;
+
+    // When webhookUrl is provided, use raw forwarding for ALL events
+    // This keeps the Gateway simple - all processing happens in the webhook
+    if (webhookUrl) {
+      client.on("raw", async (packet: DiscordRawGatewayPacket) => {
+        if (isShuttingDown || !packet.t) {
+          return; // Skip heartbeats and other non-dispatch events
+        }
+
+        this.logger.info("Discord Gateway forwarding event", {
+          type: packet.t,
+        });
+
+        // Snapshot before yielding. discord.js emits `raw` and handles the
+        // packet in the same turn, so once this handler yields it patches
+        // this same object in place (`Message.js` assigns `member.user`) and
+        // the webhook would receive fields that were never on the wire.
+        const wire = { ...packet, d: structuredClone(packet.d) };
+        // Enrichment awaits REST calls, so serialize per channel to keep
+        // e.g. REACTION_ADD ahead of the REACTION_REMOVE that followed it.
+        await this.enqueueOrderedForward(getPacketChannelId(wire), () =>
+          this.forwardRawGatewayPacket(client, webhookUrl, wire)
+        );
+      });
+    } else {
+      // Legacy mode: handle events directly without webhook forwarding
+      this.setupLegacyGatewayHandlers(client, () => isShuttingDown);
+    }
+
+    client.on(Events.ClientReady, () => {
+      this.logger.info("Discord Gateway connected", {
+        username: client.user?.username,
+        id: client.user?.id,
+      });
+    });
+
+    client.on(Events.Error, (error) => {
+      this.logger.error("Discord Gateway error", { error: String(error) });
+    });
+
+    try {
+      // Login to Discord
+      await client.login(await this.resolveBotToken());
+
+      // Wait for either: duration timeout OR abort signal
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(resolve, durationMs);
+
+        // Listen for abort signal (e.g., when a new listener starts)
+        if (abortSignal) {
+          if (abortSignal.aborted) {
+            clearTimeout(timeout);
+            resolve();
+            return;
+          }
+          abortSignal.addEventListener(
+            "abort",
+            () => {
+              this.logger.info(
+                "Discord Gateway listener received abort signal (new listener started)"
+              );
+              clearTimeout(timeout);
+              resolve();
+            },
+            { once: true }
+          );
+        }
+      });
+
+      this.logger.info(
+        "Discord Gateway listener duration elapsed, disconnecting"
+      );
+    } catch (error) {
+      this.logger.error("Discord Gateway listener error", {
+        error: String(error),
+      });
+    } finally {
+      isShuttingDown = true;
+      client.destroy();
+      this.logger.info("Discord Gateway listener stopped");
+    }
+  }
+
+  /**
+   * Set up legacy Gateway handlers for direct processing (when webhookUrl is not provided).
+   */
+  protected setupLegacyGatewayHandlers(
+    client: Client,
+    isShuttingDown: () => boolean
+  ): void {
+    // Message handler
+    client.on(Events.MessageCreate, async (message: DiscordJsMessage) => {
+      if (isShuttingDown()) {
+        this.logger.debug("Ignoring message - Gateway is shutting down");
+        return;
+      }
+
+      // Ignore messages from bots (including ourselves)
+      if (message.author.bot) {
+        this.logger.debug("Ignoring message from bot", {
+          authorId: message.author.id,
+          authorName: message.author.username,
+          isMe: message.author.id === client.user?.id,
+        });
+        return;
+      }
+
+      // Check if we're mentioned (by user ID or configured role IDs).
+      // @everyone/@here only count when respondToGlobalMentions is enabled.
+      const isUserMentioned = message.mentions.has(client.user?.id ?? "", {
+        ignoreEveryone: true,
+      });
+      const isRoleMentioned =
+        this.mentionRoleIds.length > 0 &&
+        message.mentions.roles.some((role) =>
+          this.mentionRoleIds.includes(role.id)
+        );
+      const isEveryoneMentioned =
+        this.respondToGlobalMentions && message.mentions.everyone;
+      const isChannelAllowlisted = this.respondToChannelIds.includes(
+        message.channel.isThread()
+          ? (message.channel.parentId ?? message.channelId)
+          : message.channelId
+      );
+      const isMentioned =
+        isUserMentioned ||
+        isRoleMentioned ||
+        isEveryoneMentioned ||
+        isChannelAllowlisted;
+
+      this.logger.info("Discord Gateway message received", {
+        channelId: message.channelId,
+        guildId: message.guildId,
+        authorId: message.author.id,
+        isMentioned,
+        isUserMentioned,
+        isRoleMentioned,
+        isEveryoneMentioned,
+        isChannelAllowlisted,
+        content: message.content.slice(0, 100),
+      });
+
+      // Process the message directly
+      await this.handleGatewayMessage(message, isMentioned);
+    });
+
+    client.on(Events.InteractionCreate, async (interaction) => {
+      if (isShuttingDown()) {
+        this.logger.debug("Ignoring interaction - Gateway is shutting down");
+        return;
+      }
+
+      this.logger.info("Discord Gateway interaction received", {
+        id: interaction.id,
+        type: interaction.type,
+      });
+
+      try {
+        await this.handleGatewayInteraction(interaction);
+      } catch (error) {
+        this.logger.error("Error handling Gateway interaction", {
+          error: String(error),
+          interactionId: interaction.id,
+        });
+      }
+    });
+
+    // Reaction add handler
+    client.on(Events.MessageReactionAdd, async (reaction, user) => {
+      if (isShuttingDown()) {
+        this.logger.debug("Ignoring reaction - Gateway is shutting down");
+        return;
+      }
+
+      // Ignore reactions from bots (including ourselves)
+      if (user.bot) {
+        this.logger.debug("Ignoring reaction from bot", {
+          userId: user.id,
+          isMe: user.id === client.user?.id,
+        });
+        return;
+      }
+
+      this.logger.info("Discord Gateway reaction added", {
+        emoji: reaction.emoji.name,
+        messageId: reaction.message.id,
+        channelId: reaction.message.channelId,
+        userId: user.id,
+      });
+
+      // Process the reaction (skip partial users without username)
+      if (user.username) {
+        await this.handleGatewayReaction(
+          reaction,
+          user as { id: string; username: string; bot: boolean },
+          true
+        );
+      }
+    });
+
+    // Reaction remove handler
+    client.on(Events.MessageReactionRemove, async (reaction, user) => {
+      if (isShuttingDown()) {
+        this.logger.debug(
+          "Ignoring reaction removal - Gateway is shutting down"
+        );
+        return;
+      }
+
+      // Ignore reactions from bots (including ourselves)
+      if (user.bot) {
+        this.logger.debug("Ignoring reaction removal from bot", {
+          userId: user.id,
+          isMe: user.id === client.user?.id,
+        });
+        return;
+      }
+
+      this.logger.info("Discord Gateway reaction removed", {
+        emoji: reaction.emoji.name,
+        messageId: reaction.message.id,
+        channelId: reaction.message.channelId,
+        userId: user.id,
+      });
+
+      // Process the reaction (skip partial users without username)
+      if (user.username) {
+        await this.handleGatewayReaction(
+          reaction,
+          user as { id: string; username: string; bot: boolean },
+          false
+        );
+      }
+    });
+  }
+
+  /**
+   * Run `task` after every earlier task queued under the same key so events
+   * for one channel reach the webhook in the order the Gateway delivered
+   * them. Tasks without a key run immediately.
+   */
+  protected enqueueOrderedForward(
+    key: string | undefined,
+    task: () => Promise<void>
+  ): Promise<void> {
+    const run = () =>
+      task().catch((error) => {
+        this.logger.error("Failed to forward Gateway event", {
+          channelId: key,
+          error: String(error),
+        });
+      });
+    if (key === undefined) {
+      return run();
+    }
+
+    const previous = this.forwardQueues.get(key) ?? Promise.resolve();
+    const next = previous.then(run, run);
+    this.forwardQueues.set(key, next);
+    return next.finally(() => {
+      if (this.forwardQueues.get(key) === next) {
+        this.forwardQueues.delete(key);
+      }
+    });
+  }
+
+  /**
+   * Enrich one raw Gateway packet and forward it to the webhook endpoint.
+   */
+  protected async forwardRawGatewayPacket(
+    client: Client,
+    webhookUrl: string,
+    packet: DiscordRawGatewayPacket
+  ): Promise<void> {
+    let data = packet.d;
+    if (packet.t === "MESSAGE_CREATE" && this.respondToChannelIds.length > 0) {
+      const message = packet.d as DiscordGatewayMessageData;
+      if (
+        !(
+          message.author.bot ||
+          this.respondToChannelIds.includes(message.channel_id)
+        )
+      ) {
+        const channel = await client.channels
+          .fetch(message.channel_id)
+          .catch((error) => {
+            this.logger.warn("Failed to resolve forwarded message channel", {
+              channelId: message.channel_id,
+              error: String(error),
+            });
+            return null;
+          });
+        if (
+          channel?.isThread() &&
+          channel.parentId &&
+          this.respondToChannelIds.includes(channel.parentId)
+        ) {
+          data = {
+            ...message,
+            thread: { id: channel.id, parent_id: channel.parentId },
+          };
+        }
+      }
+    }
+
+    if (
+      packet.t === "MESSAGE_REACTION_ADD" ||
+      packet.t === "MESSAGE_REACTION_REMOVE"
+    ) {
+      data = await this.enrichForwardedReaction(
+        client,
+        packet.d as DiscordGatewayReactionData
+      );
+    }
+
+    await this.forwardGatewayEvent(webhookUrl, {
+      type: `GATEWAY_${packet.t}` as DiscordGatewayEventType,
+      timestamp: Date.now(),
+      data,
+    });
+  }
+
+  /**
+   * Discord omits the channel type and, outside guilds, the user from reaction
+   * events. Fill both from the Gateway client, plus the thread parent when the
+   * reaction landed in a thread, so the webhook side can resolve threads and
+   * DM reactors without extra API calls.
+   */
+  protected async enrichForwardedReaction(
+    client: Client,
+    reaction: DiscordGatewayReactionData
+  ): Promise<DiscordGatewayReactionData> {
+    const [channel, user] = await Promise.all([
+      client.channels.fetch(reaction.channel_id).catch((error) => {
+        this.logger.warn("Failed to resolve forwarded reaction channel", {
+          channelId: reaction.channel_id,
+          error: String(error),
+        });
+        return null;
+      }),
+      "member" in reaction && reaction.member
+        ? null
+        : client.users.fetch(reaction.user_id).catch((error) => {
+            this.logger.warn("Failed to resolve forwarded reaction user", {
+              error: String(error),
+              userId: reaction.user_id,
+            });
+            return null;
+          }),
+    ]);
+
+    const thread =
+      channel?.isThread() && channel.parentId
+        ? { id: channel.id, parent_id: channel.parentId }
+        : undefined;
+
+    return {
+      ...reaction,
+      ...(channel ? { channel_type: channel.type } : {}),
+      ...(thread ? { thread } : {}),
+      ...(user ? { user: this.normalizeGatewayUser(user) } : {}),
+    };
+  }
+
+  /**
+   * Forward a Gateway event to the webhook endpoint.
+   */
+  protected async forwardGatewayEvent(
+    webhookUrl: string,
+    event: DiscordForwardedEvent
+  ): Promise<void> {
+    try {
+      const botToken = await this.resolveBotToken();
+      this.logger.debug("Forwarding Gateway event to webhook", {
+        type: event.type,
+        webhookUrl,
+      });
+
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-discord-gateway-token": botToken,
+        },
+        body: JSON.stringify(event),
+      });
+
+      if (response.ok) {
+        this.logger.debug("Gateway event forwarded successfully", {
+          type: event.type,
+        });
+      } else {
+        const errorText = await response.text();
+        this.logger.error("Failed to forward Gateway event", {
+          type: event.type,
+          status: response.status,
+          error: errorText,
+        });
+      }
+    } catch (error) {
+      this.logger.error("Error forwarding Gateway event", {
+        type: event.type,
+        error: String(error),
+      });
+    }
+  }
+
+  /**
+   * Handle a message received via the Gateway WebSocket.
+   */
+  protected async handleGatewayMessage(
+    message: DiscordJsMessage,
+    isMentioned: boolean
+  ): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    const guildId = message.guildId || "@me";
+    const channelId = message.channelId;
+
+    // Check if this message is in a Discord Thread channel
+    const isInThread = message.channel.isThread();
+    let discordThreadId: string | undefined;
+    let parentChannelId = channelId;
+
+    if (
+      isInThread &&
+      "parentId" in message.channel &&
+      message.channel.parentId
+    ) {
+      // Message is in a thread - use the thread channel ID
+      discordThreadId = channelId;
+      parentChannelId = message.channel.parentId;
+      this.rememberThreadParent(discordThreadId, parentChannelId);
+    }
+
+    // If not in a thread and bot is mentioned, create a thread immediately
+    // This ensures the Thread object has the correct ID from the start
+    if (!discordThreadId && isMentioned) {
+      try {
+        const newThread = await this.createDiscordThread(channelId, message.id);
+        discordThreadId = newThread.id;
+        this.logger.debug("Created Discord thread for incoming mention", {
+          channelId,
+          messageId: message.id,
+          threadId: newThread.id,
+        });
+      } catch (error) {
+        this.logger.error("Failed to create Discord thread for mention", {
+          error: String(error),
+          messageId: message.id,
+        });
+        // Continue without thread - will use channel
+      }
+    }
+
+    const threadId = this.encodeThreadId({
+      guildId,
+      channelId: parentChannelId,
+      threadId: discordThreadId,
+    });
+    const content = flatten(
+      message.content,
+      message.attachments.values(),
+      message.messageSnapshots?.values() ?? []
+    );
+
+    // Convert discord.js message to our Message format
+    const chatMessage = new Message({
+      id: message.id,
+      threadId,
+      text: content.text,
+      formatted: this.formatConverter.toAst(content.text),
+      author: {
+        userId: message.author.id,
+        userName: message.author.username,
+        fullName: message.author.displayName || message.author.username,
+        isBot: message.author.bot,
+        isMe: false, // Gateway messages are never from ourselves (we filter those)
+      },
+      metadata: {
+        dateSent: message.createdAt,
+        edited: message.editedAt !== null,
+        editedAt: message.editedAt ?? undefined,
+      },
+      attachments: content.attachments.map((a) =>
+        this.rehydrateAttachment({
+          type: this.getAttachmentType(a.contentType),
+          url: a.url,
+          name: a.name,
+          mimeType: a.contentType ?? undefined,
+          size: a.size,
+        })
+      ),
+      raw: {
+        id: message.id,
+        channel_id: channelId,
+        guild_id: guildId,
+        content: message.content,
+        author: {
+          id: message.author.id,
+          username: message.author.username,
+        },
+        timestamp: message.createdAt.toISOString(),
+      },
+      // Same three-state contract as the webhook path above.
+      isMention: isMentioned || undefined,
+    });
+
+    try {
+      await this.chat.handleIncomingMessage(this, threadId, chatMessage);
+    } catch (error) {
+      this.logger.error("Error handling Gateway message", {
+        error: String(error),
+        messageId: message.id,
+      });
+    }
+  }
+
+  /**
+   * Handle a reaction received via the Gateway WebSocket.
+   */
+  protected async handleGatewayReaction(
+    reaction: {
+      emoji: { name: string | null; id: string | null };
+      message: {
+        id: string;
+        channelId: string;
+        guildId: string | null;
+        channel?: { isThread?: () => boolean; parentId?: string | null };
+      };
+    },
+    user: { id: string; username: string; bot: boolean },
+    added: boolean
+  ): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    const guildId = reaction.message.guildId || "@me";
+    const channelId = reaction.message.channelId;
+
+    // Check if reaction is in a thread channel
+    const isInThread = reaction.message.channel?.isThread?.();
+    let parentChannelId = channelId;
+    let discordThreadId: string | undefined;
+
+    if (isInThread && reaction.message.channel?.parentId) {
+      discordThreadId = channelId;
+      parentChannelId = reaction.message.channel.parentId;
+      this.rememberThreadParent(discordThreadId, parentChannelId);
+    }
+
+    const threadId = this.encodeThreadId({
+      guildId,
+      channelId: parentChannelId,
+      threadId: discordThreadId,
+    });
+
+    // Normalize emoji
+    const emojiName = reaction.emoji.name || "unknown";
+    const normalizedEmoji = this.normalizeDiscordEmoji(emojiName);
+
+    // Build reaction event
+    const reactionEvent = {
+      adapter: this as Adapter,
+      threadId,
+      messageId: reaction.message.id,
+      emoji: normalizedEmoji,
+      rawEmoji: reaction.emoji.id
+        ? `<:${emojiName}:${reaction.emoji.id}>`
+        : emojiName,
+      added,
+      user: {
+        userId: user.id,
+        userName: user.username,
+        fullName: user.username,
+        isBot: user.bot === true, // Match pattern from handleForwardedReaction
+        isMe: user.id === this.applicationId,
+      },
+      raw: {
+        emoji: reaction.emoji,
+        message_id: reaction.message.id,
+        channel_id: reaction.message.channelId,
+        guild_id: reaction.message.guildId,
+        user_id: user.id,
+      },
+    };
+
+    this.chat.processReaction(reactionEvent);
+  }
+
+  /**
+   * Derive channel ID from a Discord thread ID.
+   * Discord: discord:{guildId}:{channelId}:{threadId} -> discord:{guildId}:{channelId}
+   * If already a channel ID (3 parts), returns as-is.
+   */
+  channelIdFromThreadId(threadId: string): string {
+    const parts = threadId.split(":");
+    // discord:{guildId}:{channelId} or discord:{guildId}:{channelId}:{threadId}
+    return parts.slice(0, 3).join(":");
+  }
+
+  /**
+   * Fetch channel-level messages (not thread replies).
+   * Uses the parent channel ID to fetch top-level messages.
+   */
+  async fetchChannelMessages(
+    channelId: string,
+    options: FetchOptions = {}
+  ): Promise<FetchResult<unknown>> {
+    const parts = channelId.split(":");
+    const discordChannelId = parts[2];
+    if (!discordChannelId) {
+      throw new ValidationError(
+        "discord",
+        `Invalid Discord channel ID: ${channelId}`
+      );
+    }
+
+    const limit = options.limit || 50;
+    const direction = options.direction ?? "backward";
+
+    const params = new URLSearchParams();
+    params.set("limit", String(limit));
+
+    if (options.cursor) {
+      if (direction === "backward") {
+        params.set("before", options.cursor);
+      } else {
+        params.set("after", options.cursor);
+      }
+    }
+
+    this.logger.debug("Discord API: GET channel messages", {
+      channelId: discordChannelId,
+      limit,
+      direction,
+      cursor: options.cursor,
+    });
+
+    const response = await this.discordFetch(
+      `/channels/${discordChannelId}/messages?${params.toString()}`,
+      "GET"
+    );
+
+    const rawMessages = (await response.json()) as APIMessage[];
+
+    this.logger.debug("Discord API: GET channel messages response", {
+      messageCount: rawMessages.length,
+    });
+
+    // Discord returns newest first, reverse for chronological order
+    const sortedMessages = [...rawMessages].reverse();
+
+    const messages = sortedMessages.map((msg) =>
+      this.parseDiscordMessage(msg, channelId)
+    );
+
+    let nextCursor: string | undefined;
+    if (rawMessages.length === limit) {
+      if (direction === "backward") {
+        const oldest = rawMessages.at(-1);
+        nextCursor = oldest?.id;
+      } else {
+        const newest = rawMessages[0];
+        nextCursor = newest?.id;
+      }
+    }
+
+    return { messages, nextCursor };
+  }
+
+  /**
+   * List threads in a Discord channel.
+   * Fetches active threads from the guild and archived threads from the channel.
+   */
+  async listThreads(
+    channelId: string,
+    options: ListThreadsOptions = {}
+  ): Promise<ListThreadsResult<unknown>> {
+    const parts = channelId.split(":");
+    const guildId = parts[1];
+    const discordChannelId = parts[2];
+    if (!(guildId && discordChannelId)) {
+      throw new ValidationError(
+        "discord",
+        `Invalid Discord channel ID: ${channelId}`
+      );
+    }
+
+    this.logger.debug("Discord API: GET threads", {
+      guildId,
+      channelId: discordChannelId,
+    });
+
+    // Fetch active threads from the guild
+    const activeResponse = await this.discordFetch(
+      `/guilds/${guildId}/threads/active`,
+      "GET"
+    );
+    const activeData =
+      (await activeResponse.json()) as RESTGetAPIGuildThreadsResult;
+
+    // Filter threads that belong to our channel
+    const channelThreads = (
+      (activeData.threads || []) as APIThreadChannel[]
+    ).filter((t) => t.parent_id === discordChannelId);
+
+    // Also fetch archived public threads
+    let archivedThreads: APIThreadChannel[] = [];
+    try {
+      const archivedResponse = await this.discordFetch(
+        `/channels/${discordChannelId}/threads/archived/public?limit=${options.limit || 50}`,
+        "GET"
+      );
+      const archivedData =
+        (await archivedResponse.json()) as RESTGetAPIChannelThreadsArchivedPublicResult;
+      archivedThreads = (archivedData.threads || []) as APIThreadChannel[];
+    } catch {
+      // Archived threads may not be available (permissions)
+      this.logger.debug(
+        "Could not fetch archived threads (may lack permissions)"
+      );
+    }
+
+    // Merge and deduplicate
+    const allThreads = [...channelThreads, ...archivedThreads];
+    const seen = new Set<string>();
+    const uniqueThreads = allThreads.filter((t) => {
+      if (seen.has(t.id)) {
+        return false;
+      }
+      seen.add(t.id);
+      return true;
+    });
+
+    // Apply limit
+    const limit = options.limit || 50;
+    const limitedThreads = uniqueThreads.slice(0, limit);
+
+    // Convert to ThreadSummary - fetch the first message of each thread
+    const threads: ThreadSummary[] = [];
+    for (const thread of limitedThreads) {
+      const threadId = this.encodeThreadId({
+        guildId,
+        channelId: discordChannelId,
+        threadId: thread.id,
+      });
+
+      // Fetch the first message of the thread (which is the root/starter message)
+      try {
+        const msgsResponse = await this.discordFetch(
+          `/channels/${thread.id}/messages?limit=1&after=0`,
+          "GET"
+        );
+        const msgs = (await msgsResponse.json()) as APIMessage[];
+        const rootMsg = msgs[0];
+
+        if (rootMsg) {
+          threads.push({
+            id: threadId,
+            rootMessage: this.parseDiscordMessage(rootMsg, threadId),
+            replyCount: thread.total_message_sent ?? thread.message_count,
+            lastReplyAt: thread.thread_metadata?.archive_timestamp
+              ? new Date(thread.thread_metadata.archive_timestamp)
+              : undefined,
+          });
+        }
+      } catch {
+        // If we can't fetch the root message, create a placeholder
+        threads.push({
+          id: threadId,
+          rootMessage: new Message({
+            id: thread.id,
+            threadId,
+            text: thread.name ?? "",
+            formatted: this.formatConverter.toAst(thread.name ?? ""),
+            raw: thread,
+            author: {
+              userId: "unknown",
+              userName: "unknown",
+              fullName: "unknown",
+              isBot: false,
+              isMe: false,
+            },
+            metadata: { dateSent: new Date(), edited: false },
+            attachments: [],
+          }),
+          replyCount: thread.total_message_sent ?? thread.message_count,
+        });
+      }
+    }
+
+    this.logger.debug("Discord API: listThreads result", {
+      threadCount: threads.length,
+    });
+
+    return {
+      threads,
+      nextCursor: uniqueThreads.length > limit ? String(limit) : undefined,
+    };
+  }
+
+  /**
+   * Fetch Discord channel info/metadata.
+   */
+  async fetchChannelInfo(channelId: string): Promise<ChannelInfo> {
+    const parts = channelId.split(":");
+    const discordChannelId = parts[2];
+    if (!discordChannelId) {
+      throw new ValidationError(
+        "discord",
+        `Invalid Discord channel ID: ${channelId}`
+      );
+    }
+
+    this.logger.debug("Discord API: GET channel info", {
+      channelId: discordChannelId,
+    });
+
+    const response = await this.discordFetch(
+      `/channels/${discordChannelId}`,
+      "GET"
+    );
+    const channel = (await response.json()) as RESTGetAPIChannelResult;
+
+    return {
+      id: channelId,
+      name: channel.name ?? undefined,
+      isDM:
+        channel.type === ChannelType.DM || channel.type === ChannelType.GroupDM,
+      memberCount: "member_count" in channel ? channel.member_count : undefined,
+      metadata: {
+        channelType: channel.type,
+        raw: channel,
+      },
+    };
+  }
+
+  /**
+   * Post a message to channel top-level (not in a thread).
+   * Posts directly to the parent channel without a thread reference.
+   */
+  async postChannelMessage(
+    channelId: string,
+    message: AdapterPostableMessage
+  ): Promise<RawMessage<unknown>> {
+    const parts = channelId.split(":");
+    const discordChannelId = parts[2];
+    if (!discordChannelId) {
+      throw new ValidationError(
+        "discord",
+        `Invalid Discord channel ID: ${channelId}`
+      );
+    }
+
+    const { payload } = this.buildMessagePayload(message);
+
+    const files = extractFiles(message);
+    this.addComponentsV2FileReferences(payload, files);
+    const slashResponse = this.tryPostSlashResponse(channelId, payload, files);
+    if (slashResponse) {
+      return slashResponse;
+    }
+    if (files.length > 0) {
+      return this.postMessageWithFiles(
+        discordChannelId,
+        channelId,
+        payload,
+        files
+      );
+    }
+
+    this.logger.debug("Discord API: POST channel message", {
+      channelId: discordChannelId,
+      contentLength: payload.content?.length || 0,
+    });
+
+    const response = await this.discordFetch(
+      `/channels/${discordChannelId}/messages`,
+      "POST",
+      payload
+    );
+
+    const result = (await response.json()) as APIMessage;
+
+    return {
+      id: result.id,
+      threadId: channelId,
+      raw: result,
+    };
+  }
+
+  /**
+   * Normalize a Discord emoji to our standard EmojiValue format.
+   */
+  protected normalizeDiscordEmoji(emojiName: string): EmojiValue {
+    // Map common Discord unicode emoji to our standard names
+    const unicodeToName: Record<string, string> = {
+      "👍": "thumbs_up",
+      "👎": "thumbs_down",
+      "❤️": "heart",
+      "❤": "heart",
+      "🔥": "fire",
+      "🚀": "rocket",
+      "🙌": "raised_hands",
+      "✅": "check",
+      "❌": "x",
+      "👋": "wave",
+      "🤔": "thinking",
+      "😊": "smile",
+      "😂": "laugh",
+      "🎉": "party",
+      "⭐": "star",
+      "✨": "sparkles",
+      "👀": "eyes",
+      "💯": "100",
+    };
+
+    // Check if it's a unicode emoji we recognize
+    const normalizedName = unicodeToName[emojiName] || emojiName;
+    return getEmoji(normalizedName);
+  }
+}
+
+/**
+ * Create a Discord adapter instance.
+ */
+export function createDiscordAdapter(
+  config?: DiscordAdapterConfig
+): DiscordAdapter {
+  return new DiscordAdapter(config ?? {});
+}
+
+// Re-export card converter for advanced use
+export {
+  cardToDiscordPayload,
+  cardToFallbackText,
+  decodeDiscordCustomId,
+  encodeDiscordCustomId,
+} from "./cards";
+
+// Re-export format converter for advanced use
+export {
+  DiscordFormatConverter,
+  DiscordFormatConverter as DiscordMarkdownConverter,
+} from "./markdown";
+// Re-export types
+export type {
+  DiscordAdapterConfig,
+  DiscordComponentTypeValue,
+  DiscordForwardedThread,
+  DiscordInteractionFlagsContext,
+  DiscordInteractionResponseFlags,
+  DiscordMessageFlags,
+  DiscordMessageFlagValue,
+  DiscordThreadId,
+  DiscordWebhookVerifier,
+} from "./types";
+export {
+  DiscordComponentType,
+  DiscordContentFormat,
+  DiscordInteractionResponseFlag,
+  DiscordMessageFlag,
+} from "./types";

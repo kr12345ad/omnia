@@ -203,6 +203,11 @@ export const dict: Record<string, string> = {
   "ui.toolErrorCard.failed": "Failed",
   "ui.toolErrorCard.copyError": "Copy error",
 
+  "ui.jsCard.invalid.title": "This card's script could not be compiled",
+  "ui.jsCard.invalid.description": "The card was not run: {{message}}",
+  "ui.jsCard.failed.title": "This card's script failed",
+  "ui.jsCard.failed.description": "{{message}}",
+
   "ui.common.file.one": "file",
   "ui.common.file.other": "files",
   "ui.common.question.one": "question",

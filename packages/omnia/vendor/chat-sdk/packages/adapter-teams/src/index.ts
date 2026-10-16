@@ -1,0 +1,2153 @@
+import {
+  bufferToDataUri,
+  extractCard,
+  extractFiles,
+  NetworkError,
+  toBuffer,
+  ValidationError,
+} from "@chat-adapter/shared";
+import type {
+  Account,
+  Activity,
+  IAdaptiveCardActionInvokeActivity,
+  IConversationUpdateActivity,
+  IMessageActivity,
+  IMessageReactionActivity,
+  InstallUpdateActivity,
+  ITaskFetchInvokeActivity,
+  ITaskSubmitInvokeActivity,
+  MessageReactionType,
+  SentActivity,
+  TaskModuleResponse,
+} from "@microsoft/teams.api";
+import {
+  MessageActivity,
+  MessageActivityInput,
+  TypingActivity,
+} from "@microsoft/teams.api";
+import type { IActivityContext, IStreamer } from "@microsoft/teams.apps";
+import { StreamCancelledError } from "@microsoft/teams.apps";
+import { users } from "@microsoft/teams.graph-endpoints";
+import type {
+  ActionEvent,
+  Adapter,
+  AdapterPostableMessage,
+  Attachment,
+  Author,
+  ChannelInfo,
+  ChatInstance,
+  EmojiValue,
+  EphemeralMessage,
+  FetchOptions,
+  FetchResult,
+  FileUpload,
+  FormattedContent,
+  ListThreadsOptions,
+  ListThreadsResult,
+  Logger,
+  ModalElement,
+  RawMessage,
+  ReactionEvent,
+  StreamChunk,
+  StreamOptions,
+  ThreadInfo,
+  UserInfo,
+  WebhookOptions,
+} from "chat";
+import {
+  ConsoleLogger,
+  convertEmojiPlaceholders,
+  defaultEmojiResolver,
+  Message,
+} from "chat";
+import { applyAiGeneratedLabel } from "./ai-generated";
+import { TeamsApp } from "./app";
+import {
+  createAnonymousAttachmentFetchData,
+  createTeamsAttachment,
+  rehydrateTeamsAttachment,
+  type TeamsActivityAttachment,
+} from "./attachments";
+import { BridgeHttpAdapter } from "./bridge-adapter";
+import {
+  AUTO_SUBMIT_ACTION_ID,
+  AUTO_SUBMIT_KEYS,
+  BUTTON_SUBMIT_KEYS,
+  cardInputValues,
+  cardToAdaptiveCard,
+  submitValueToString,
+} from "./cards";
+import { toAppOptions } from "./config";
+import { handleTeamsError } from "./errors";
+import { TeamsGraphReader } from "./graph-api";
+import { isInstallAction, parseInstallationAction } from "./installation";
+import { TeamsFormatConverter } from "./markdown";
+import {
+  modalResponseToTaskModuleResponse,
+  modalToAdaptiveCard,
+  parseDialogSubmitValues,
+} from "./modals";
+import {
+  conversationTypeFromActivity,
+  decodeThreadId,
+  encodeThreadId,
+  isDM,
+  tenantIdFromActivity,
+} from "./thread-id";
+import type {
+  TeamsAdapterConfig,
+  TeamsChannelContext,
+  TeamsDmContext,
+  TeamsGraphContext,
+  TeamsThreadId,
+} from "./types";
+
+/**
+ * Data payload from an Action.Submit button click. Teams merges the card's own
+ * input values into the same flat object, so it carries more keys than this
+ * names; `cardInputValues` in `cards.ts` reads those. Kept free of an index signature so a
+ * misspelled member read stays a compile error rather than `unknown`.
+ */
+interface ActionSubmitData {
+  actionId?: string;
+  value?: string;
+}
+
+const MESSAGEID_CAPTURE_PATTERN = /messageid=(\d+)/;
+const MESSAGEID_STRIP_PATTERN = /;messageid=\d+/;
+const BOT_USER_ID_PREFIX = "28:";
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const USER_INFO_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const USER_INFO_NEGATIVE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+// Teams deletes a targeted message 24 hours after it is sent, so a record of
+// one is worthless past that point.
+const TARGETED_ACTIVITY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+// Sentinel cached when a Graph lookup fails, so tenants without Graph
+// consent don't pay a failing network call on every message.
+const USER_INFO_NEGATIVE_SENTINEL = "unresolvable";
+const DEFAULT_DIALOG_OPEN_TIMEOUT_MS = 5000; // Max wait for handler to call openModal()
+// Keep this list to common Chat SDK names that differ from Teams IDs.
+// Other strings are treated as native Teams reaction IDs and pass through.
+const TEAMS_REACTION_ALIASES: Readonly<Record<string, MessageReactionType>> = {
+  check: "2705_whiteheavycheckmark",
+  eyes: "1f440_eyes",
+  pin: "1f4cc_pushpin",
+  rocket: "launch",
+  thinking: "think",
+  thumbs_up: "like",
+  x: "274c_crossmark",
+};
+
+function resolveTeamsReactionType(
+  emoji: EmojiValue | string
+): MessageReactionType {
+  const name = typeof emoji === "string" ? emoji : emoji.name;
+  return TEAMS_REACTION_ALIASES[name] ?? name;
+}
+
+export class TeamsAdapter implements Adapter<TeamsThreadId, unknown> {
+  readonly name = "teams";
+  readonly userName: string;
+  private appInstance?: TeamsApp;
+  private graphReaderInstance?: TeamsGraphReader;
+  private initialization?: Promise<void>;
+  private handlersRegistered = false;
+
+  get botUserId(): string | undefined {
+    return this.appInstance?.id ? `28:${this.appInstance.id}` : undefined;
+  }
+
+  protected get app(): TeamsApp {
+    if (!this.appInstance) {
+      throw new ValidationError(
+        "teams",
+        "appId has not been resolved. Ensure chat.initialize() has completed."
+      );
+    }
+    return this.appInstance;
+  }
+
+  protected get graphReader(): TeamsGraphReader {
+    if (!this.graphReaderInstance) {
+      throw new ValidationError(
+        "teams",
+        "appId has not been resolved. Ensure chat.initialize() has completed."
+      );
+    }
+    return this.graphReaderInstance;
+  }
+  protected readonly bridgeAdapter: BridgeHttpAdapter;
+  protected chat: ChatInstance | null = null;
+  protected readonly logger: Logger;
+  protected readonly formatConverter = new TeamsFormatConverter();
+  protected readonly config: TeamsAdapterConfig;
+  private readonly activeStreams = new Map<string, IStreamer>();
+
+  constructor(config: TeamsAdapterConfig = {}) {
+    this.config = { ...config };
+    this.logger = config.logger ?? new ConsoleLogger("info").child("teams");
+    this.userName = config.userName || "bot";
+
+    this.bridgeAdapter = new BridgeHttpAdapter(
+      this.logger,
+      config.webhookVerifier
+    );
+    if (typeof config.appId !== "function") {
+      this.createApp(config.appId);
+    }
+  }
+
+  private createApp(appId?: string): void {
+    const app = new TeamsApp({
+      ...toAppOptions({ ...this.config, appId }),
+      client: {
+        headers: { "User-Agent": "Vercel.ChatSDK" },
+      },
+      httpServerAdapter: this.bridgeAdapter,
+      // The bridge verifies every request before it reaches the SDK handler.
+      skipAuth: Boolean(this.config.webhookVerifier),
+    });
+    const graphReader = new TeamsGraphReader({
+      botId: app.id ?? "",
+      graph: app.graph,
+      logger: this.logger,
+      formatConverter: this.formatConverter,
+      getGraphContext: (baseConversationId) =>
+        this.getGraphContext(baseConversationId),
+    });
+    this.appInstance = app;
+    this.graphReaderInstance = graphReader;
+  }
+
+  /**
+   * Register TeamsSDK event handlers.
+   * Called from initialize() after this.chat is set.
+   */
+  protected registerEventHandlers(): void {
+    this.app.on("message", async (ctx) => {
+      this.cacheUserContext(ctx.activity);
+      await this.handleMessageActivity(ctx);
+    });
+
+    this.app.on("messageReaction", async (ctx) => {
+      this.cacheUserContext(ctx.activity);
+      this.handleReactionFromContext(ctx);
+    });
+
+    this.app.on("card.action", async (ctx) => {
+      this.cacheUserContext(ctx.activity);
+      await this.handleAdaptiveCardAction(ctx);
+      return {
+        statusCode: 200,
+        type: "application/vnd.microsoft.activity.message",
+        value: "",
+      };
+    });
+
+    this.app.on(
+      "dialog.open",
+      async (ctx: IActivityContext<ITaskFetchInvokeActivity>) => {
+        this.cacheUserContext(ctx.activity);
+        return this.handleDialogOpen(ctx);
+      }
+    );
+
+    this.app.on(
+      "dialog.submit",
+      async (ctx: IActivityContext<ITaskSubmitInvokeActivity>) => {
+        this.cacheUserContext(ctx.activity);
+        return this.handleDialogSubmit(ctx);
+      }
+    );
+
+    this.app.on("conversationUpdate", async (ctx) => {
+      this.cacheUserContext(ctx.activity);
+      this.handleConversationUpdate(ctx.activity);
+    });
+
+    this.app.on("installationUpdate", async (ctx) => {
+      this.cacheUserContext(ctx.activity);
+      this.handleInstallationUpdate(ctx);
+    });
+  }
+
+  protected handleInstallationUpdate(
+    ctx: IActivityContext<InstallUpdateActivity>
+  ): void {
+    const { activity } = ctx;
+    if (!this.chat) {
+      this.logger.warn(
+        "Chat instance not initialized, ignoring installationUpdate"
+      );
+      return;
+    }
+    if (
+      !(activity.recipient?.id && this.isBotAccountId(activity.recipient.id))
+    ) {
+      this.logger.debug(
+        "Ignoring installationUpdate: recipient is not this bot"
+      );
+      return;
+    }
+    const conversationId = activity.conversation?.id;
+    if (!conversationId) {
+      this.logger.debug("Ignoring installationUpdate: missing conversation id");
+      return;
+    }
+    const action = parseInstallationAction(activity.action);
+    if (!action) {
+      this.logger.debug("Ignoring installationUpdate: unknown action", {
+        action: activity.action,
+      });
+      return;
+    }
+    // Message thread IDs encode the raw activity serviceUrl, so prefer it for
+    // consistency. The SDK reference falls back to the JWT's serviceUrl when
+    // the body omits one, which still gives a sendable destination.
+    const serviceUrl = activity.serviceUrl || ctx.ref.serviceUrl;
+    const event = {
+      adapter: this,
+      id: activity.id,
+      conversationId,
+      channelId: serviceUrl
+        ? this.encodeThreadId({
+            conversationId,
+            serviceUrl,
+            conversationType: conversationTypeFromActivity(activity),
+          })
+        : undefined,
+      userId: activity.from?.id,
+      tenantId: tenantIdFromActivity(activity),
+      locale: activity.locale,
+      raw: activity,
+    };
+    const options = this.bridgeAdapter.getWebhookOptions(activity.id);
+    if (isInstallAction(action)) {
+      this.chat.processInstalled?.({ ...event, action }, options);
+    } else {
+      this.chat.processUninstalled?.({ ...event, action }, options);
+    }
+  }
+
+  protected handleConversationUpdate(
+    activity: IConversationUpdateActivity
+  ): void {
+    if (!this.chat) {
+      this.logger.warn(
+        "Chat instance not initialized, ignoring conversationUpdate"
+      );
+      return;
+    }
+
+    const userId = this.botUserId;
+    if (!userId) {
+      this.logger.warn(
+        "Teams app ID is not configured, ignoring conversationUpdate. " +
+          "Set appId or TEAMS_APP_ID to receive bot join events."
+      );
+      return;
+    }
+
+    const resolved = this.resolveBotJoin(activity);
+    if ("skip" in resolved) {
+      this.logger.debug("Ignoring conversationUpdate", {
+        activityId: activity.id,
+        reason: resolved.skip,
+      });
+      return;
+    }
+
+    this.chat.processMemberJoinedChannel(
+      {
+        adapter: this,
+        channelId: this.encodeThreadId(resolved.join),
+        userId,
+        inviterId: activity.from?.id,
+      },
+      this.bridgeAdapter.getWebhookOptions(activity.id)
+    );
+  }
+
+  /**
+   * Decide whether a conversationUpdate is this bot being added to a channel
+   * or group chat. Returns the thread to dispatch on, or the reason to skip.
+   *
+   * Teams sends the bot's own ID as `recipient.id`, so membersAdded is
+   * compared against that platform-supplied value rather than a locally
+   * built one; the recipient itself is matched case-insensitively against
+   * the configured app ID.
+   */
+  private resolveBotJoin(
+    activity: IConversationUpdateActivity
+  ): { join: TeamsThreadId } | { skip: string } {
+    const recipientId = activity.recipient?.id;
+    if (!(recipientId && this.isBotAccountId(recipientId))) {
+      return { skip: "recipient is not this bot" };
+    }
+    if (!activity.membersAdded?.some((member) => member.id === recipientId)) {
+      return { skip: "bot was not among the added members" };
+    }
+    const conversationId = activity.conversation?.id;
+    if (!conversationId) {
+      return { skip: "missing conversation id" };
+    }
+    const serviceUrl = activity.serviceUrl;
+    if (!serviceUrl) {
+      return { skip: "missing serviceUrl" };
+    }
+    const conversationType = conversationTypeFromActivity(activity);
+    const isPersonal = conversationType
+      ? conversationType === "personal"
+      : !conversationId.startsWith("19:");
+    if (isPersonal) {
+      return { skip: "personal conversation" };
+    }
+    return { join: { conversationId, conversationType, serviceUrl } };
+  }
+
+  /**
+   * Cache serviceUrl, tenantId, and channel context from activity metadata.
+   * Called inline from each event handler (not middleware).
+   */
+  protected cacheUserContext(activity: Activity): void {
+    if (!(this.chat && activity.from?.id)) {
+      return;
+    }
+
+    const userId = activity.from.id;
+    const ttl = CACHE_TTL_MS;
+
+    // Cache serviceUrl for DM creation
+    if (activity.serviceUrl) {
+      this.chat
+        .getState()
+        .set(`teams:serviceUrl:${userId}`, activity.serviceUrl, ttl)
+        .catch(() => {});
+    }
+
+    // Cache aadObjectId for Graph API user lookups
+    if (activity.from.aadObjectId) {
+      this.chat
+        .getState()
+        .set(`teams:aadObjectId:${userId}`, activity.from.aadObjectId, ttl)
+        .catch(() => {});
+    }
+
+    const channelData = activity.channelData;
+    const tenantId = tenantIdFromActivity(activity);
+
+    if (tenantId) {
+      this.chat
+        .getState()
+        .set(`teams:tenantId:${userId}`, tenantId, ttl)
+        .catch(() => {});
+    }
+
+    // Cache channel context for Graph API message fetching
+    const teamAadGroupId = channelData?.team?.aadGroupId;
+    const conversationId = activity.conversation?.id || "";
+    const baseChannelId = conversationId.replace(MESSAGEID_STRIP_PATTERN, "");
+
+    // Team-scoped conversationUpdate payloads (bot added to a team) carry
+    // team.aadGroupId but no channelData.channel; the conversation itself is
+    // the channel the bot was installed into.
+    const teamChannelId =
+      channelData?.channel?.id ??
+      (baseChannelId.startsWith("19:") ? baseChannelId : undefined);
+
+    if (teamAadGroupId && teamChannelId) {
+      const context: TeamsChannelContext = {
+        teamId: teamAadGroupId,
+        channelId: teamChannelId,
+      };
+      this.chat
+        .getState()
+        .set(
+          `teams:channelContext:${baseChannelId}`,
+          JSON.stringify(context),
+          ttl
+        )
+        .catch(() => {});
+    }
+
+    // Cache DM context for Graph API chat ID resolution
+    const aadObjectId = (activity.from as { aadObjectId?: string }).aadObjectId;
+    const conversationType = conversationTypeFromActivity(activity);
+    const isPersonalConversation = conversationType
+      ? conversationType === "personal"
+      : !baseChannelId.startsWith("19:");
+    if (aadObjectId && this.app.id && isPersonalConversation) {
+      const dmContext: TeamsDmContext = {
+        type: "dm",
+        graphChatId: `19:${aadObjectId}_${this.app.id}@unq.gbl.spaces`,
+      };
+      this.chat
+        .getState()
+        .set(
+          `teams:channelContext:${baseChannelId}`,
+          JSON.stringify(dmContext),
+          ttl
+        )
+        .catch(() => {});
+    }
+  }
+
+  /**
+   * Look up cached Graph context (channel or DM), resolving via Bot API if needed.
+   */
+  protected async getGraphContext(
+    baseConversationId: string
+  ): Promise<TeamsGraphContext | null> {
+    if (!this.chat) {
+      return null;
+    }
+
+    const cached = await this.chat
+      .getState()
+      .get<string>(`teams:channelContext:${baseConversationId}`);
+    if (cached) {
+      try {
+        return JSON.parse(cached) as TeamsGraphContext;
+      } catch {
+        return null;
+      }
+    }
+
+    // No cached context — try to resolve aadGroupId from the conversation ID
+    if (
+      !(
+        baseConversationId.startsWith("19:") &&
+        baseConversationId.includes("@thread")
+      )
+    ) {
+      return null;
+    }
+
+    try {
+      const details = await this.app.api.teams.getById(baseConversationId);
+      if (details.aadGroupId) {
+        const context: TeamsChannelContext = {
+          teamId: details.aadGroupId,
+          channelId: baseConversationId,
+        };
+        await this.chat
+          .getState()
+          .set(
+            `teams:channelContext:${baseConversationId}`,
+            JSON.stringify(context),
+            CACHE_TTL_MS
+          );
+        return context;
+      }
+    } catch {
+      // Resolution failed
+    }
+
+    return null;
+  }
+
+  /**
+   * Handle message activities (normal messages + Action.Submit button clicks).
+   *
+   * For DMs we block the handler until chat processing completes so that
+   * ctx.stream (the Teams SDK's native IStreamer) stays alive for streaming.
+   * The Teams SDK auto-closes the stream after the handler returns.
+   */
+  protected async handleMessageActivity(
+    ctx: IActivityContext<IMessageActivity>
+  ): Promise<void> {
+    if (!this.chat) {
+      this.logger.warn("Chat instance not initialized, ignoring event");
+      return;
+    }
+
+    const activity = ctx.activity;
+
+    // Check if this message activity is actually a button click (Action.Submit)
+    const actionValue = activity.value as ActionSubmitData | undefined;
+    if (actionValue?.actionId) {
+      this.handleMessageAction(activity, actionValue);
+      return;
+    }
+
+    const threadId = this.threadIdFromActivity(activity);
+
+    const message = this.parseTeamsMessage(activity, threadId);
+    let user: UserInfo | null = null;
+    if (activity.from?.aadObjectId) {
+      user = await this.getIncomingUser(
+        ctx,
+        message.author.userId,
+        activity.from.aadObjectId
+      );
+    } else if (!message.author.isBot) {
+      user = await this.getUser(message.author.userId);
+    }
+    if (user?.email) {
+      message.author.email = user.email;
+    }
+
+    // Detect @mention by checking if any mentioned entity matches our app ID
+    const entities = activity.entities || [];
+    const isMention = entities.some(
+      (e: { type?: string; mentioned?: { id?: string } }) =>
+        e.type === "mention" &&
+        e.mentioned?.id &&
+        (e.mentioned.id === this.app.id ||
+          e.mentioned.id.endsWith(`:${this.app.id}`))
+    );
+    if (isMention) {
+      message.isMention = true;
+    }
+
+    // For DMs, capture ctx.stream and await processing so the stream stays
+    // alive for native streaming via emit(). Group chats use fire-and-forget.
+    if (this.isDM(threadId)) {
+      this.activeStreams.set(threadId, ctx.stream);
+
+      let resolveProcessing: () => void;
+      const processingDone = new Promise<void>((resolve) => {
+        resolveProcessing = resolve;
+      });
+
+      const baseOptions = this.bridgeAdapter.getWebhookOptions(activity.id);
+      this.chat.processMessage(this, threadId, message, {
+        ...baseOptions,
+        waitUntil: (task: Promise<unknown>) => {
+          baseOptions?.waitUntil?.(task);
+          task.then(
+            () => resolveProcessing(),
+            () => resolveProcessing()
+          );
+        },
+      });
+
+      try {
+        await processingDone;
+      } finally {
+        this.activeStreams.delete(threadId);
+      }
+    } else {
+      this.chat.processMessage(
+        this,
+        threadId,
+        message,
+        this.bridgeAdapter.getWebhookOptions(activity.id)
+      );
+    }
+  }
+
+  /**
+   * Handle Action.Submit button clicks sent as message activities.
+   */
+  protected handleMessageAction(
+    activity: Activity,
+    actionValue: ActionSubmitData
+  ): void {
+    if (!(this.chat && actionValue.actionId)) {
+      return;
+    }
+
+    const threadId = this.threadIdFromActivity(activity);
+
+    // Auto-submit fan-out: fire onAction for each input value
+    if (actionValue.actionId === AUTO_SUBMIT_ACTION_ID) {
+      this.fanOutAutoSubmit(actionValue, activity, threadId);
+      return;
+    }
+
+    const actionEvent: Omit<ActionEvent, "thread" | "openModal"> & {
+      adapter: TeamsAdapter;
+    } = {
+      actionId: actionValue.actionId,
+      value: actionValue.value,
+      values: cardInputValues(actionValue, BUTTON_SUBMIT_KEYS),
+      user: this.authorFromActivity(activity),
+      messageId: activity.replyToId || activity.id || "",
+      threadId,
+      adapter: this,
+      raw: activity,
+    };
+
+    this.logger.debug("Processing Teams message action (Action.Submit)", {
+      actionId: actionValue.actionId,
+      value: actionValue.value,
+      messageId: actionEvent.messageId,
+      threadId,
+    });
+
+    this.chat.processAction(
+      actionEvent,
+      this.bridgeAdapter.getWebhookOptions(activity.id)
+    );
+  }
+
+  /**
+   * Handle adaptive card button clicks (invoke-based).
+   */
+  protected async handleAdaptiveCardAction(
+    ctx: IActivityContext<IAdaptiveCardActionInvokeActivity>
+  ): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    const activity = ctx.activity;
+    const actionData = activity.value.action.data as ActionSubmitData;
+
+    if (!actionData.actionId) {
+      this.logger.debug("Adaptive card action missing actionId", {
+        value: activity.value,
+      });
+      return;
+    }
+
+    const threadId = this.threadIdFromActivity(activity);
+
+    // Auto-submit fan-out: fire onAction for each input value
+    if (actionData.actionId === AUTO_SUBMIT_ACTION_ID) {
+      this.fanOutAutoSubmit(actionData, activity, threadId);
+      return;
+    }
+
+    const actionEvent: Omit<ActionEvent, "thread" | "openModal"> & {
+      adapter: TeamsAdapter;
+    } = {
+      actionId: actionData.actionId,
+      value: actionData.value,
+      values: cardInputValues(actionData, BUTTON_SUBMIT_KEYS),
+      user: this.authorFromActivity(activity),
+      messageId: activity.replyToId || activity.id || "",
+      threadId,
+      adapter: this,
+      raw: activity,
+    };
+
+    this.logger.debug("Processing Teams adaptive card action", {
+      actionId: actionData.actionId,
+      value: actionData.value,
+      messageId: actionEvent.messageId,
+      threadId,
+    });
+
+    this.chat.processAction(
+      actionEvent,
+      this.bridgeAdapter.getWebhookOptions(activity.id)
+    );
+  }
+
+  /**
+   * Fan out an auto-submit payload into individual onAction calls.
+   * Called when the sentinel __auto_submit action ID is detected.
+   * Each input key/value pair is dispatched as a separate action in parallel.
+   */
+  protected fanOutAutoSubmit(
+    payload: object,
+    activity: Activity,
+    threadId: string
+  ): void {
+    if (!this.chat) {
+      return;
+    }
+
+    const webhookOptions = this.bridgeAdapter.getWebhookOptions(activity.id);
+    const entries = (Object.entries(payload) as [string, unknown][]).filter(
+      ([key]) => !AUTO_SUBMIT_KEYS.has(key)
+    );
+
+    this.logger.debug("Auto-submit fan-out", {
+      inputCount: entries.length,
+      keys: entries.map(([k]) => k),
+    });
+
+    const baseEvent = {
+      user: this.authorFromActivity(activity),
+      messageId: activity.replyToId || activity.id || "",
+      threadId,
+      adapter: this as TeamsAdapter,
+      raw: activity,
+      // Every fanned-out action reports the whole form, not just its own input.
+      values: cardInputValues(payload, AUTO_SUBMIT_KEYS),
+    };
+
+    for (const [key, val] of entries) {
+      this.chat.processAction(
+        {
+          ...baseEvent,
+          actionId: key,
+          value: submitValueToString(val),
+        },
+        webhookOptions
+      );
+    }
+  }
+
+  /**
+   * Handle dialog.open (task/fetch) invoke.
+   * Uses Promise.race to resolve as soon as onOpenModal fires.
+   */
+  protected async handleDialogOpen(
+    ctx: IActivityContext<ITaskFetchInvokeActivity>
+  ): Promise<TaskModuleResponse | undefined> {
+    if (!this.chat) {
+      return undefined;
+    }
+
+    const activity = ctx.activity;
+    const actionData = (activity.value?.data || {}) as ActionSubmitData;
+
+    const threadId = this.threadIdFromActivity(activity);
+
+    let resolveModal: (result: {
+      modal: ModalElement;
+      contextId: string;
+    }) => void;
+    const modalPromise = new Promise<{
+      modal: ModalElement;
+      contextId: string;
+    }>((resolve) => {
+      resolveModal = resolve;
+    });
+
+    const actionEvent: Omit<ActionEvent, "thread" | "openModal"> & {
+      adapter: TeamsAdapter;
+    } = {
+      actionId: actionData.actionId || "dialog.open",
+      value: actionData.value,
+      values: cardInputValues(actionData, BUTTON_SUBMIT_KEYS),
+      user: this.authorFromActivity(activity),
+      messageId: activity.replyToId || activity.id || "",
+      threadId,
+      adapter: this,
+      raw: activity,
+      // No triggerId — onOpenModal bypasses the guard
+    };
+
+    this.logger.debug("Processing Teams dialog.open", {
+      actionId: actionEvent.actionId,
+      threadId,
+    });
+
+    const webhookOptions = this.bridgeAdapter.getWebhookOptions(activity.id);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const actionPromise = this.chat.processAction(actionEvent, {
+      ...webhookOptions,
+      waitUntil: webhookOptions?.waitUntil ?? (() => {}),
+      onOpenModal: async (modal, contextId) => {
+        resolveModal({ modal, contextId });
+        return { viewId: contextId };
+      },
+    });
+
+    const result = await Promise.race([
+      modalPromise,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(
+          () => resolve(null),
+          this.config.dialogOpenTimeoutMs ?? DEFAULT_DIALOG_OPEN_TIMEOUT_MS
+        );
+      }),
+      // If the action handler finishes without calling openModal, resolve
+      // immediately instead of waiting for the timeout.
+      actionPromise.then(
+        () => null,
+        () => null
+      ),
+    ]);
+
+    if (timer) {
+      clearTimeout(timer);
+    }
+
+    if (result) {
+      const card = modalToAdaptiveCard(
+        result.modal,
+        result.contextId,
+        result.modal.callbackId
+      );
+      return {
+        task: {
+          type: "continue" as const,
+          value: {
+            title: result.modal.title || "Dialog",
+            card: {
+              contentType: "application/vnd.microsoft.card.adaptive",
+              content: card,
+            },
+          },
+        },
+      };
+    }
+
+    this.logger.warn("dialog.open timed out waiting for onOpenModal");
+    return undefined;
+  }
+
+  /**
+   * Handle dialog.submit (task/submit) invoke.
+   */
+  protected async handleDialogSubmit(
+    ctx: IActivityContext<ITaskSubmitInvokeActivity>
+  ): Promise<TaskModuleResponse | undefined> {
+    if (!this.chat) {
+      return undefined;
+    }
+
+    const activity = ctx.activity;
+    const data = (activity.value?.data || {}) as Record<string, unknown>;
+    const { contextId, callbackId, values } = parseDialogSubmitValues(data);
+
+    const event = {
+      callbackId: callbackId || "",
+      viewId: activity.id || "",
+      values,
+      privateMetadata: undefined,
+      user: this.authorFromActivity(activity),
+      adapter: this,
+      raw: activity,
+    };
+
+    this.logger.debug("Processing Teams dialog.submit", {
+      callbackId,
+      contextId,
+    });
+
+    const response = await this.chat.processModalSubmit(
+      event,
+      contextId,
+      this.bridgeAdapter.getWebhookOptions(activity.id)
+    );
+    return modalResponseToTaskModuleResponse(response, this.logger, contextId);
+  }
+
+  /**
+   * Handle Teams reaction events.
+   */
+  protected handleReactionFromContext(
+    ctx: IActivityContext<IMessageReactionActivity>
+  ): void {
+    if (!this.chat) {
+      return;
+    }
+
+    const activity = ctx.activity;
+    const conversationId = activity.conversation?.id || "";
+    const messageIdMatch = conversationId.match(MESSAGEID_CAPTURE_PATTERN);
+    const messageId = messageIdMatch?.[1] || activity.replyToId || "";
+
+    const threadId = this.threadIdFromActivity(activity);
+
+    const user = this.authorFromActivity(activity);
+
+    const reactionsAdded = activity.reactionsAdded || [];
+    for (const reaction of reactionsAdded) {
+      const rawEmoji = reaction.type || "";
+      const emojiValue = defaultEmojiResolver.fromTeams(rawEmoji);
+
+      const event: Omit<ReactionEvent, "adapter" | "thread"> = {
+        emoji: emojiValue,
+        rawEmoji,
+        added: true,
+        user,
+        messageId,
+        threadId,
+        raw: activity,
+      };
+
+      this.logger.debug("Processing Teams reaction added", {
+        emoji: emojiValue.name,
+        rawEmoji,
+        messageId,
+      });
+
+      this.chat.processReaction(
+        { ...event, adapter: this },
+        this.bridgeAdapter.getWebhookOptions(activity.id)
+      );
+    }
+
+    const reactionsRemoved = activity.reactionsRemoved || [];
+    for (const reaction of reactionsRemoved) {
+      const rawEmoji = reaction.type || "";
+      const emojiValue = defaultEmojiResolver.fromTeams(rawEmoji);
+
+      const event: Omit<ReactionEvent, "adapter" | "thread"> = {
+        emoji: emojiValue,
+        rawEmoji,
+        added: false,
+        user,
+        messageId,
+        threadId,
+        raw: activity,
+      };
+
+      this.logger.debug("Processing Teams reaction removed", {
+        emoji: emojiValue.name,
+        rawEmoji,
+        messageId,
+      });
+
+      this.chat.processReaction(
+        { ...event, adapter: this },
+        this.bridgeAdapter.getWebhookOptions(activity.id)
+      );
+    }
+  }
+
+  protected parseTeamsMessage(
+    activity: Activity,
+    threadId: string
+  ): Message<unknown> {
+    const text = (activity as IMessageActivity).text || "";
+    const normalizedText = this.normalizeMentions(text);
+
+    return new Message({
+      id: activity.id || "",
+      threadId,
+      text: this.formatConverter.extractPlainText(normalizedText),
+      formatted: this.formatConverter.toAst(normalizedText),
+      raw: activity,
+      author: this.authorFromActivity(activity),
+      metadata: {
+        dateSent: activity.timestamp
+          ? new Date(activity.timestamp)
+          : new Date(),
+        edited: false,
+      },
+      attachments: ((activity as IMessageActivity).attachments || [])
+        .filter(
+          (att) =>
+            att.contentType !== "application/vnd.microsoft.card.adaptive" &&
+            !(att.contentType === "text/html" && !att.contentUrl)
+        )
+        .map((att) => this.createAttachment(att, activity.serviceUrl)),
+    });
+  }
+
+  protected createAttachment(
+    att: TeamsActivityAttachment,
+    serviceUrl?: string
+  ): Attachment {
+    return createTeamsAttachment(att, serviceUrl, {
+      createAnonymousFetchData: (url) => this.createFetchDataFn(url),
+      fetchAuthenticated: (url) => this.fetchAuthenticatedAttachment(url),
+    });
+  }
+
+  protected createFetchDataFn(url: string): () => Promise<Buffer> {
+    return createAnonymousAttachmentFetchData(url);
+  }
+
+  private async fetchAuthenticatedAttachment(url: string): Promise<Buffer> {
+    try {
+      const response = await this.app.api.http.get<ArrayBuffer>(url, {
+        maxRedirects: 0,
+        responseType: "arraybuffer",
+      });
+      return Buffer.from(response.data);
+    } catch (error) {
+      const status =
+        error &&
+        typeof error === "object" &&
+        "response" in error &&
+        error.response &&
+        typeof error.response === "object" &&
+        "status" in error.response &&
+        typeof error.response.status === "number"
+          ? error.response.status
+          : undefined;
+      throw new NetworkError(
+        "teams",
+        `Failed to fetch authenticated file${status ? `: ${status}` : ""}`,
+        error instanceof Error ? error : undefined
+      );
+    }
+  }
+
+  rehydrateAttachment(attachment: Attachment): Attachment {
+    return rehydrateTeamsAttachment(attachment, {
+      createAnonymousFetchData: (url) => this.createFetchDataFn(url),
+      fetchAuthenticated: (url) => this.fetchAuthenticatedAttachment(url),
+    });
+  }
+
+  protected normalizeMentions(text: string): string {
+    return text.trim();
+  }
+
+  async initialize(chat: ChatInstance): Promise<void> {
+    this.chat = chat;
+    if (!this.initialization) {
+      this.initialization = this.initializeApp().catch((error: unknown) => {
+        this.initialization = undefined;
+        throw error;
+      });
+    }
+    await this.initialization;
+  }
+
+  private async initializeApp(): Promise<void> {
+    if (!this.appInstance && typeof this.config.appId === "function") {
+      const appId = await this.config.appId();
+      if (typeof appId !== "string" || appId.trim().length === 0) {
+        throw new ValidationError(
+          "teams",
+          "appId resolver must return a nonempty string."
+        );
+      }
+      this.createApp(appId);
+    }
+    if (!this.handlersRegistered) {
+      this.registerEventHandlers();
+      this.handlersRegistered = true;
+    }
+    await this.app.initialize();
+  }
+
+  async handleWebhook(
+    request: Request,
+    options?: WebhookOptions
+  ): Promise<Response> {
+    return this.bridgeAdapter.dispatch(request, options);
+  }
+
+  async getUser(userId: string): Promise<UserInfo | null> {
+    if (!this.chat) {
+      return null;
+    }
+
+    try {
+      const aadObjectId = await this.chat
+        .getState()
+        .get<string>(`teams:aadObjectId:${userId}`);
+
+      if (!aadObjectId) {
+        this.logger.debug("No cached aadObjectId for user", { userId });
+        return null;
+      }
+
+      return await this.getUserByAadObjectId(userId, aadObjectId);
+    } catch (error) {
+      this.logger.warn("Failed to read cached aadObjectId from state", {
+        userId,
+        error,
+      });
+      return null;
+    }
+  }
+
+  private async getIncomingUser(
+    ctx: IActivityContext<IMessageActivity>,
+    userId: string,
+    aadObjectId: string
+  ): Promise<UserInfo | null> {
+    const cacheKey = `teams:userInfo:${aadObjectId}`;
+    const isBot = this.isBotSender(ctx.activity);
+    const cached = await this.readCachedUserInfo(cacheKey);
+    if (cached && cached !== USER_INFO_NEGATIVE_SENTINEL) {
+      return { ...cached, isBot, userId };
+    }
+
+    try {
+      const member = await ctx.api.conversations.getMemberById(
+        ctx.activity.conversation.id,
+        userId
+      );
+      const userInfo: UserInfo = {
+        avatarUrl: undefined,
+        email: member.email ?? member.userPrincipalName ?? undefined,
+        fullName: member.name ?? aadObjectId,
+        isBot,
+        userId,
+        userName:
+          member.userPrincipalName ?? member.email ?? member.name ?? userId,
+      };
+      this.chat
+        ?.getState()
+        .set(cacheKey, JSON.stringify(userInfo), USER_INFO_CACHE_TTL_MS)
+        .catch(() => {});
+      return userInfo;
+    } catch (error) {
+      this.logger.warn(
+        "Failed to fetch user info from Teams conversation members API",
+        { userId, error }
+      );
+      return null;
+    }
+  }
+
+  private async getUserByAadObjectId(
+    userId: string,
+    aadObjectId: string
+  ): Promise<UserInfo | null> {
+    const cacheKey = `teams:userInfo:${aadObjectId}`;
+    const isBot = this.isBotUserId(userId);
+    const cached = await this.readCachedUserInfo(cacheKey);
+    if (cached === USER_INFO_NEGATIVE_SENTINEL) {
+      return null;
+    }
+    if (cached) {
+      return { ...cached, isBot, userId };
+    }
+
+    try {
+      const graphUser = await this.app.graph.call(users.get, {
+        "user-id": aadObjectId,
+      });
+
+      const userInfo: UserInfo = {
+        avatarUrl: undefined,
+        email: graphUser.mail ?? graphUser.userPrincipalName ?? undefined,
+        fullName: graphUser.displayName ?? aadObjectId,
+        isBot,
+        userId,
+        userName:
+          graphUser.userPrincipalName ?? graphUser.displayName ?? userId,
+      };
+      this.chat
+        ?.getState()
+        .set(cacheKey, JSON.stringify(userInfo), USER_INFO_CACHE_TTL_MS)
+        .catch(() => {});
+      return userInfo;
+    } catch (error) {
+      this.logger.warn("Failed to fetch user info from Graph API", {
+        userId,
+        error,
+      });
+      this.chat
+        ?.getState()
+        .set(
+          cacheKey,
+          USER_INFO_NEGATIVE_SENTINEL,
+          USER_INFO_NEGATIVE_CACHE_TTL_MS
+        )
+        .catch(() => {});
+      return null;
+    }
+  }
+
+  private async readCachedUserInfo(
+    cacheKey: string
+  ): Promise<UserInfo | typeof USER_INFO_NEGATIVE_SENTINEL | null> {
+    if (!this.chat) {
+      return null;
+    }
+    try {
+      const cached = await this.chat.getState().get<string>(cacheKey);
+      if (!cached) {
+        return null;
+      }
+      if (cached === USER_INFO_NEGATIVE_SENTINEL) {
+        return USER_INFO_NEGATIVE_SENTINEL;
+      }
+      return JSON.parse(cached) as UserInfo;
+    } catch {
+      return null;
+    }
+  }
+
+  async postMessage(
+    threadId: string,
+    message: AdapterPostableMessage
+  ): Promise<RawMessage<unknown>> {
+    const target = this.decodeThreadId(threadId);
+    const { conversationId } = target;
+
+    const files = extractFiles(message);
+    const fileAttachments =
+      files.length > 0 ? await this.filesToAttachments(files) : [];
+
+    const card = extractCard(message);
+
+    if (card) {
+      const adaptiveCard = cardToAdaptiveCard(card);
+      const activity = new MessageActivity();
+      activity.attachments = [
+        {
+          contentType: "application/vnd.microsoft.card.adaptive",
+          content: adaptiveCard,
+        },
+        ...fileAttachments,
+      ];
+      applyAiGeneratedLabel(activity, message);
+
+      this.logger.debug("Teams API: send (adaptive card)", {
+        conversationId,
+        fileCount: fileAttachments.length,
+      });
+
+      try {
+        const sent = await this.app.sendTo(target, activity);
+
+        return {
+          id: sent.id || "",
+          threadId,
+          raw: activity,
+        };
+      } catch (error) {
+        this.logger.error("Teams API: send failed", { conversationId, error });
+        handleTeamsError(error, "postMessage");
+      }
+    }
+
+    // Regular text message
+    const text = convertEmojiPlaceholders(
+      this.formatConverter.renderPostable(message),
+      "teams"
+    );
+
+    const activity = new MessageActivity(text);
+    activity.textFormat = "markdown";
+    if (fileAttachments.length > 0) {
+      activity.attachments = fileAttachments;
+    }
+    applyAiGeneratedLabel(activity, message);
+
+    this.logger.debug("Teams API: send (message)", {
+      conversationId,
+      textLength: text.length,
+      fileCount: fileAttachments.length,
+    });
+
+    try {
+      const sent = await this.app.sendTo(target, activity);
+
+      this.logger.debug("Teams API: send response", { messageId: sent.id });
+
+      return {
+        id: sent.id || "",
+        threadId,
+        raw: activity,
+      };
+    } catch (error) {
+      this.logger.error("Teams API: send failed", { conversationId, error });
+      handleTeamsError(error, "postMessage");
+    }
+  }
+
+  async postEphemeral(
+    threadId: string,
+    userId: string,
+    message: AdapterPostableMessage
+  ): Promise<EphemeralMessage<unknown>> {
+    if (this.isDM(threadId)) {
+      const sent = await this.postMessage(threadId, message);
+      return {
+        id: sent.id,
+        threadId: sent.threadId,
+        usedFallback: true,
+        raw: sent.raw,
+      };
+    }
+
+    const target = this.decodeThreadId(threadId);
+    const { conversationId } = target;
+    const recipient = this.createTargetedRecipient(userId);
+
+    const files = extractFiles(message);
+    const fileAttachments =
+      files.length > 0 ? await this.filesToAttachments(files) : [];
+
+    const card = extractCard(message);
+
+    if (card) {
+      const adaptiveCard = cardToAdaptiveCard(card);
+      const activity = new MessageActivity().withRecipient(recipient, true);
+      activity.attachments = [
+        {
+          contentType: "application/vnd.microsoft.card.adaptive",
+          content: adaptiveCard,
+        },
+        ...fileAttachments,
+      ];
+      applyAiGeneratedLabel(activity, message);
+
+      this.logger.debug("Teams API: send (targeted adaptive card)", {
+        conversationId,
+        userId,
+        fileCount: fileAttachments.length,
+      });
+
+      try {
+        const sent = await this.app.sendTo(target, activity);
+        await this.rememberTargetedActivity(conversationId, sent.id || "");
+
+        return {
+          id: sent.id || "",
+          threadId,
+          usedFallback: false,
+          raw: activity,
+        };
+      } catch (error) {
+        this.logger.error("Teams API: targeted send failed", {
+          conversationId,
+          userId,
+          error,
+        });
+        handleTeamsError(error, "postEphemeral");
+      }
+    }
+
+    const text = convertEmojiPlaceholders(
+      this.formatConverter.renderPostable(message),
+      "teams"
+    );
+
+    const activity = new MessageActivity(text).withRecipient(recipient, true);
+    activity.textFormat = "markdown";
+    if (fileAttachments.length > 0) {
+      activity.attachments = fileAttachments;
+    }
+    applyAiGeneratedLabel(activity, message);
+
+    this.logger.debug("Teams API: send (targeted message)", {
+      conversationId,
+      userId,
+      textLength: text.length,
+      fileCount: fileAttachments.length,
+    });
+
+    try {
+      const sent = await this.app.sendTo(target, activity);
+      await this.rememberTargetedActivity(conversationId, sent.id || "");
+
+      this.logger.debug("Teams API: targeted send response", {
+        messageId: sent.id,
+      });
+
+      return {
+        id: sent.id || "",
+        threadId,
+        usedFallback: false,
+        raw: activity,
+      };
+    } catch (error) {
+      this.logger.error("Teams API: targeted send failed", {
+        conversationId,
+        userId,
+        error,
+      });
+      handleTeamsError(error, "postEphemeral");
+    }
+  }
+
+  /**
+   * Teams accepts an update or a delete for a targeted activity only through
+   * the `?isTargetedActivity=true` variant of the endpoint; the plain one
+   * answers `400`. Nothing on the wire tells us afterwards which activities
+   * were targeted, and `editMessage`/`deleteMessage` receive only a message id,
+   * so the ids we send targeted are recorded here and read back on mutation.
+   *
+   * Kept in the Chat state adapter rather than in process memory so a host that
+   * runs several instances, or restarts one, still edits the right endpoint.
+   */
+  private targetedActivityKey(conversationId: string, messageId: string) {
+    return `teams:targetedActivity:${conversationId}:${messageId}`;
+  }
+
+  /** Best effort: losing the record costs the 400, never the message. */
+  private async rememberTargetedActivity(
+    conversationId: string,
+    messageId: string
+  ): Promise<void> {
+    if (!(this.chat && messageId)) {
+      return;
+    }
+    try {
+      await this.chat
+        .getState()
+        .set(
+          this.targetedActivityKey(conversationId, messageId),
+          "1",
+          TARGETED_ACTIVITY_TTL_MS
+        );
+    } catch {
+      // A state adapter that cannot write must not fail the send.
+    }
+  }
+
+  private async isTargetedActivity(
+    conversationId: string,
+    messageId: string
+  ): Promise<boolean> {
+    if (!(this.chat && messageId)) {
+      return false;
+    }
+    try {
+      const recorded = await this.chat
+        .getState()
+        .get<string>(this.targetedActivityKey(conversationId, messageId));
+      return recorded === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  private async forgetTargetedActivity(
+    conversationId: string,
+    messageId: string
+  ): Promise<void> {
+    if (!(this.chat && messageId)) {
+      return;
+    }
+    try {
+      await this.chat
+        .getState()
+        .delete(this.targetedActivityKey(conversationId, messageId));
+    } catch {
+      // The TTL clears it anyway.
+    }
+  }
+
+  protected createTargetedRecipient(userId: string): Account {
+    return {
+      id: userId,
+      name: userId,
+      role: "user",
+    };
+  }
+
+  protected async filesToAttachments(
+    files: FileUpload[]
+  ): Promise<Array<{ contentType: string; contentUrl: string; name: string }>> {
+    const attachments: Array<{
+      contentType: string;
+      contentUrl: string;
+      name: string;
+    }> = [];
+
+    for (const file of files) {
+      const buffer = await toBuffer(file.data, {
+        platform: "teams",
+        throwOnUnsupported: false,
+      });
+      if (!buffer) {
+        continue;
+      }
+
+      const mimeType = file.mimeType || "application/octet-stream";
+      const dataUri = bufferToDataUri(buffer, mimeType);
+
+      attachments.push({
+        contentType: mimeType,
+        contentUrl: dataUri,
+        name: file.filename,
+      });
+    }
+
+    return attachments;
+  }
+
+  async editMessage(
+    threadId: string,
+    messageId: string,
+    message: AdapterPostableMessage
+  ): Promise<RawMessage<unknown>> {
+    const target = this.decodeThreadId(threadId);
+    const { conversationId, serviceUrl } = target;
+
+    const card = extractCard(message);
+
+    if (card) {
+      const adaptiveCard = cardToAdaptiveCard(card);
+      const activity = new MessageActivity();
+      activity.attachments = [
+        {
+          contentType: "application/vnd.microsoft.card.adaptive",
+          content: adaptiveCard,
+        },
+      ];
+      applyAiGeneratedLabel(activity, message);
+
+      const targeted = await this.isTargetedActivity(conversationId, messageId);
+
+      this.logger.debug("Teams API: updateActivity (adaptive card)", {
+        conversationId,
+        messageId,
+        targeted,
+      });
+
+      try {
+        const activities = this.app
+          .apiFor(serviceUrl)
+          .conversations.activities(conversationId);
+        await (targeted
+          ? activities.updateTargeted(messageId, activity)
+          : activities.update(messageId, activity));
+      } catch (error) {
+        this.logger.error("Teams API: updateActivity failed", {
+          conversationId,
+          messageId,
+          error,
+        });
+        handleTeamsError(error, "editMessage");
+      }
+
+      return { id: messageId, threadId, raw: activity };
+    }
+
+    const text = convertEmojiPlaceholders(
+      this.formatConverter.renderPostable(message),
+      "teams"
+    );
+
+    const activity = new MessageActivity(text);
+    activity.textFormat = "markdown";
+    applyAiGeneratedLabel(activity, message);
+
+    const targeted = await this.isTargetedActivity(conversationId, messageId);
+
+    this.logger.debug("Teams API: updateActivity", {
+      conversationId,
+      messageId,
+      textLength: text.length,
+      targeted,
+    });
+
+    try {
+      const activities = this.app
+        .apiFor(serviceUrl)
+        .conversations.activities(conversationId);
+      await (targeted
+        ? activities.updateTargeted(messageId, activity)
+        : activities.update(messageId, activity));
+    } catch (error) {
+      this.logger.error("Teams API: updateActivity failed", {
+        conversationId,
+        messageId,
+        error,
+      });
+      handleTeamsError(error, "editMessage");
+    }
+
+    this.logger.debug("Teams API: updateActivity response", { ok: true });
+
+    return { id: messageId, threadId, raw: activity };
+  }
+
+  async deleteMessage(threadId: string, messageId: string): Promise<void> {
+    const target = this.decodeThreadId(threadId);
+    const { conversationId, serviceUrl } = target;
+
+    const targeted = await this.isTargetedActivity(conversationId, messageId);
+
+    this.logger.debug("Teams API: deleteActivity", {
+      conversationId,
+      messageId,
+      targeted,
+    });
+
+    try {
+      const activities = this.app
+        .apiFor(serviceUrl)
+        .conversations.activities(conversationId);
+      await (targeted
+        ? activities.deleteTargeted(messageId)
+        : activities.delete(messageId));
+    } catch (error) {
+      this.logger.error("Teams API: deleteActivity failed", {
+        conversationId,
+        messageId,
+        error,
+      });
+      handleTeamsError(error, "deleteMessage");
+    }
+
+    await this.forgetTargetedActivity(conversationId, messageId);
+
+    this.logger.debug("Teams API: deleteActivity response", { ok: true });
+  }
+
+  async addReaction(
+    threadId: string,
+    messageId: string,
+    emoji: EmojiValue | string
+  ): Promise<void> {
+    const target = this.decodeThreadId(threadId);
+    const { conversationId, serviceUrl } = target;
+    const reactionType = resolveTeamsReactionType(emoji);
+
+    this.logger.debug("Teams API: addReaction", {
+      conversationId,
+      messageId,
+      reactionType,
+    });
+
+    try {
+      await this.app
+        .apiFor(serviceUrl)
+        .conversations.addReaction(conversationId, messageId, reactionType);
+    } catch (error) {
+      this.logger.error("Teams API: addReaction failed", {
+        conversationId,
+        messageId,
+        reactionType,
+        error,
+      });
+      handleTeamsError(error, "addReaction");
+    }
+
+    this.logger.debug("Teams API: addReaction response", { ok: true });
+  }
+
+  async removeReaction(
+    threadId: string,
+    messageId: string,
+    emoji: EmojiValue | string
+  ): Promise<void> {
+    const target = this.decodeThreadId(threadId);
+    const { conversationId, serviceUrl } = target;
+    const reactionType = resolveTeamsReactionType(emoji);
+
+    this.logger.debug("Teams API: deleteReaction", {
+      conversationId,
+      messageId,
+      reactionType,
+    });
+
+    try {
+      await this.app
+        .apiFor(serviceUrl)
+        .conversations.deleteReaction(conversationId, messageId, reactionType);
+    } catch (error) {
+      this.logger.error("Teams API: deleteReaction failed", {
+        conversationId,
+        messageId,
+        reactionType,
+        error,
+      });
+      handleTeamsError(error, "removeReaction");
+    }
+
+    this.logger.debug("Teams API: deleteReaction response", { ok: true });
+  }
+
+  async startTyping(threadId: string, _status?: string): Promise<void> {
+    const target = this.decodeThreadId(threadId);
+    const { conversationId } = target;
+
+    this.logger.debug("Teams API: send (typing)", { conversationId });
+
+    try {
+      await this.app.sendTo(target, new TypingActivity());
+    } catch (error) {
+      this.logger.error("Teams API: send (typing) failed", {
+        conversationId,
+        error,
+      });
+      handleTeamsError(error, "startTyping");
+    }
+
+    this.logger.debug("Teams API: send (typing) response", { ok: true });
+  }
+
+  /**
+   * Stream responses using the Teams SDK's native streaming protocol when
+   * an active IStreamer exists (DMs), falling back to a buffered final message otherwise.
+   */
+  async stream(
+    threadId: string,
+    textStream: AsyncIterable<string | StreamChunk>,
+    options?: StreamOptions
+  ): Promise<RawMessage<unknown> | null> {
+    const activeStream = this.activeStreams.get(threadId);
+
+    if (activeStream && !activeStream.canceled) {
+      return this.streamViaEmit(
+        threadId,
+        textStream,
+        activeStream,
+        options?.fallbackStreamingPlaceholderText,
+        options?.aiGenerated
+      );
+    }
+
+    if (
+      !activeStream &&
+      typeof options?.fallbackStreamingPlaceholderText === "string"
+    ) {
+      return null;
+    }
+
+    // No native streamer available (group chats, proactive messages) —
+    // accumulate and post as a single message instead of post+edit.
+    let accumulated = "";
+    for await (const chunk of textStream) {
+      if (typeof chunk === "string") {
+        accumulated += chunk;
+      } else if (chunk.type === "markdown_text") {
+        accumulated += chunk.text;
+      }
+    }
+    if (!accumulated) {
+      return { id: "", threadId, raw: { text: "" } };
+    }
+    return this.postMessage(threadId, {
+      markdown: accumulated,
+      aiGenerated: options?.aiGenerated,
+    });
+  }
+
+  /**
+   * Native streaming using the Teams SDK's IStreamer.emit().
+   * Sends typing activities with streamType: 'streaming', then a final
+   * message with streamType: 'final' on close (handled by the framework).
+   *
+   * We do NOT call stream.close() — the Teams SDK calls it automatically
+   * after the handler returns.
+   */
+  protected async streamViaEmit(
+    threadId: string,
+    textStream: AsyncIterable<string | StreamChunk>,
+    stream: IStreamer,
+    placeholderText?: string | null,
+    aiGenerated?: boolean
+  ): Promise<RawMessage<unknown>> {
+    let accumulated = "";
+    let messageId = "";
+
+    const idCaptured = new Promise<string>((resolve) => {
+      stream.events.once("chunk", (activity: SentActivity) => {
+        resolve(activity.id || "");
+      });
+    });
+
+    try {
+      if (typeof placeholderText === "string") {
+        stream.update(placeholderText);
+      }
+
+      for await (const chunk of textStream) {
+        if (stream.canceled) {
+          this.logger.debug("Teams stream canceled by user", { threadId });
+          break;
+        }
+
+        let text = "";
+        if (typeof chunk === "string") {
+          text = chunk;
+        } else if (chunk.type === "markdown_text") {
+          text = chunk.text;
+        }
+        if (!text) {
+          continue;
+        }
+
+        // The streamer builds the final message from the last emitted
+        // activity's entities, so every chunk carries the label.
+        stream.emit(
+          aiGenerated ? new MessageActivityInput(text).addAiGenerated() : text
+        );
+        accumulated += text;
+      }
+    } catch (error) {
+      if (!(error instanceof StreamCancelledError)) {
+        throw error;
+      }
+      this.logger.debug("Teams stream canceled during iteration", { threadId });
+    }
+
+    // Only await the chunk ID if we emitted text and the stream wasn't
+    // canceled before any chunk was delivered (which would hang forever).
+    if (accumulated && !stream.canceled) {
+      messageId = await idCaptured;
+    }
+
+    return { id: messageId, threadId, raw: { text: accumulated } };
+  }
+
+  async openDM(userId: string): Promise<string> {
+    // Look up cached serviceUrl and tenantId for this user from state
+    const cachedServiceUrl = await this.chat
+      ?.getState()
+      .get<string>(`teams:serviceUrl:${userId}`);
+    const cachedTenantId = await this.chat
+      ?.getState()
+      .get<string>(`teams:tenantId:${userId}`);
+
+    const serviceUrl =
+      cachedServiceUrl ||
+      this.app.api.serviceUrl ||
+      "https://smba.trafficmanager.net/teams/";
+    const tenantId = cachedTenantId || this.config.appTenantId;
+
+    this.logger.debug("Teams: creating 1:1 conversation", {
+      userId,
+      serviceUrl,
+      tenantId,
+      cachedServiceUrl: !!cachedServiceUrl,
+      cachedTenantId: !!cachedTenantId,
+    });
+
+    if (!tenantId) {
+      throw new ValidationError(
+        "teams",
+        "Cannot open DM: tenant ID not found. User must interact with the bot first (via @mention) to cache their tenant ID."
+      );
+    }
+
+    try {
+      const result = await this.app.apiFor(serviceUrl).conversations.create({
+        isGroup: false,
+        bot: { id: this.app.id, name: this.userName },
+        // Account requires role/name but Teams API only needs id for DM members
+        members: [{ id: userId, name: "", role: "user" }],
+        tenantId,
+        channelData: {
+          tenant: { id: tenantId },
+        },
+      });
+
+      const conversationId = result?.id;
+      if (!conversationId) {
+        throw new NetworkError(
+          "teams",
+          "Failed to create 1:1 conversation - no ID returned"
+        );
+      }
+
+      this.logger.debug("Teams: 1:1 conversation created", { conversationId });
+
+      return this.encodeThreadId({
+        conversationId,
+        conversationType: "personal",
+        serviceUrl,
+      });
+    } catch (error) {
+      if (error instanceof ValidationError || error instanceof NetworkError) {
+        throw error;
+      }
+      this.logger.error("Teams: openDM failed", { userId, error });
+      handleTeamsError(error, "openDM");
+    }
+  }
+
+  async fetchMessages(
+    threadId: string,
+    options: FetchOptions = {}
+  ): Promise<FetchResult<unknown>> {
+    return this.graphReader.fetchMessages(threadId, options);
+  }
+
+  async fetchThread(threadId: string): Promise<ThreadInfo> {
+    return this.graphReader.fetchThread(threadId);
+  }
+
+  channelIdFromThreadId(threadId: string): string {
+    const { conversationId, conversationType, serviceUrl } =
+      this.decodeThreadId(threadId);
+    const baseConversationId = conversationId.replace(
+      MESSAGEID_STRIP_PATTERN,
+      ""
+    );
+    return this.encodeThreadId({
+      conversationId: baseConversationId,
+      conversationType,
+      serviceUrl,
+    });
+  }
+
+  async fetchChannelMessages(
+    channelId: string,
+    options: FetchOptions = {}
+  ): Promise<FetchResult<unknown>> {
+    return this.graphReader.fetchChannelMessages(channelId, options);
+  }
+
+  async listThreads(
+    channelId: string,
+    options: ListThreadsOptions = {}
+  ): Promise<ListThreadsResult<unknown>> {
+    return this.graphReader.listThreads(channelId, options);
+  }
+
+  async fetchChannelInfo(channelId: string): Promise<ChannelInfo> {
+    return this.graphReader.fetchChannelInfo(channelId);
+  }
+
+  async postChannelMessage(
+    channelId: string,
+    message: AdapterPostableMessage
+  ): Promise<RawMessage<unknown>> {
+    const target = this.decodeThreadId(channelId);
+    const { conversationId } = target;
+    const baseConversationId = conversationId.replace(
+      MESSAGEID_STRIP_PATTERN,
+      ""
+    );
+
+    const isChannel =
+      target.conversationType === "channel" ||
+      (target.conversationType === undefined &&
+        baseConversationId.endsWith("@thread.tacv2"));
+    const getThreadId = (messageId?: string): string =>
+      messageId && isChannel
+        ? this.encodeThreadId({
+            ...target,
+            conversationId: `${baseConversationId};messageid=${messageId}`,
+          })
+        : channelId;
+
+    const files = extractFiles(message);
+    const fileAttachments =
+      files.length > 0 ? await this.filesToAttachments(files) : [];
+
+    const card = extractCard(message);
+
+    if (card) {
+      const adaptiveCard = cardToAdaptiveCard(card);
+      const activity = new MessageActivity();
+      activity.attachments = [
+        {
+          contentType: "application/vnd.microsoft.card.adaptive",
+          content: adaptiveCard,
+        },
+        ...fileAttachments,
+      ];
+      applyAiGeneratedLabel(activity, message);
+
+      try {
+        const sent = await this.app.sendTo(
+          { ...target, conversationId: baseConversationId },
+          activity
+        );
+        return {
+          id: sent.id || "",
+          threadId: getThreadId(sent.id),
+          raw: activity,
+        };
+      } catch (error) {
+        this.logger.error("Teams API: postChannelMessage failed", {
+          conversationId: baseConversationId,
+          error,
+        });
+        handleTeamsError(error, "postChannelMessage");
+      }
+    }
+
+    const text = convertEmojiPlaceholders(
+      this.formatConverter.renderPostable(message),
+      "teams"
+    );
+    const activity = new MessageActivity(text);
+    activity.textFormat = "markdown";
+    if (fileAttachments.length > 0) {
+      activity.attachments = fileAttachments;
+    }
+    applyAiGeneratedLabel(activity, message);
+
+    try {
+      const sent = await this.app.sendTo(
+        { ...target, conversationId: baseConversationId },
+        activity
+      );
+      this.logger.debug("Teams API: postChannelMessage response", {
+        messageId: sent.id,
+      });
+      return {
+        id: sent.id || "",
+        threadId: getThreadId(sent.id),
+        raw: activity,
+      };
+    } catch (error) {
+      this.logger.error("Teams API: postChannelMessage failed", {
+        conversationId: baseConversationId,
+        error,
+      });
+      handleTeamsError(error, "postChannelMessage");
+    }
+  }
+
+  encodeThreadId(platformData: TeamsThreadId): string {
+    return encodeThreadId(platformData);
+  }
+
+  private threadIdFromActivity(activity: Activity): string {
+    return this.encodeThreadId({
+      conversationId: activity.conversation?.id || "",
+      conversationType: conversationTypeFromActivity(activity),
+      serviceUrl: activity.serviceUrl || "",
+    });
+  }
+
+  isDM(threadId: string): boolean {
+    return isDM(threadId);
+  }
+
+  decodeThreadId(threadId: string): TeamsThreadId {
+    return decodeThreadId(threadId);
+  }
+
+  parseMessage(raw: unknown): Message<unknown> {
+    const activity = raw as Activity;
+    const threadId = this.threadIdFromActivity(activity);
+    return this.parseTeamsMessage(activity, threadId);
+  }
+
+  protected isMessageFromSelf(activity: Activity): boolean {
+    const fromId = activity.from?.id;
+    return fromId ? this.isBotAccountId(fromId) : false;
+  }
+
+  /**
+   * Whether the sender is a bot: a sender with the Bot Framework `bot` role,
+   * or an account ID that {@link isBotUserId} recognizes.
+   */
+  protected isBotSender(activity: Activity): boolean {
+    const fromId = activity.from?.id;
+    return (
+      activity.from?.role?.toLowerCase() === "bot" ||
+      (fromId ? this.isBotUserId(fromId) : false)
+    );
+  }
+
+  /** Whether a Teams user ID is this bot or another bot account (`28:`). */
+  private isBotUserId(userId: string): boolean {
+    return userId.startsWith(BOT_USER_ID_PREFIX) || this.isBotAccountId(userId);
+  }
+
+  private authorFromActivity(activity: Activity): Author {
+    return {
+      userId: activity.from?.id || "unknown",
+      userName: activity.from?.name || "unknown",
+      fullName: activity.from?.name || "unknown",
+      isBot: this.isBotSender(activity),
+      isMe: this.isMessageFromSelf(activity),
+    };
+  }
+
+  /**
+   * Whether a Teams account ID (`28:<appId>`, or a bare app ID) refers to
+   * this bot. GUID casing differs between configuration and Teams payloads,
+   * so the comparison is case-insensitive.
+   */
+  private isBotAccountId(accountId: string): boolean {
+    const appId = this.appInstance?.id?.toLowerCase();
+    if (!appId) {
+      return false;
+    }
+    const normalized = accountId.toLowerCase();
+    return normalized === appId || normalized.endsWith(`:${appId}`);
+  }
+
+  renderFormatted(content: FormattedContent): string {
+    return this.formatConverter.fromAst(content);
+  }
+}
+
+export function createTeamsAdapter(config?: TeamsAdapterConfig): TeamsAdapter {
+  return new TeamsAdapter(config ?? {});
+}
+
+// Re-export card converter for advanced use
+export { cardToAdaptiveCard, cardToFallbackText } from "./cards";
+export { TeamsFormatConverter } from "./markdown";
+export { decodeThreadId, encodeThreadId, isDM } from "./thread-id";
+export type {
+  TeamsAdapterConfig,
+  TeamsAuthCertificate,
+  TeamsAuthFederated,
+  TeamsThreadId,
+  TeamsWebhookVerifier,
+} from "./types";

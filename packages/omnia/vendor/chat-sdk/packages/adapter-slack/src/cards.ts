@@ -1,0 +1,766 @@
+/**
+ * Slack Block Kit converter for cross-platform cards.
+ *
+ * Converts CardElement to Slack Block Kit blocks.
+ * @see https://api.slack.com/block-kit
+ */
+
+import {
+  createEmojiConverter,
+  mapButtonStyle,
+  cardToFallbackText as sharedCardToFallbackText,
+} from "@chat-adapter/shared";
+import type {
+  ActionsElement,
+  ButtonElement,
+  CardChild,
+  CardElement,
+  ChartElement,
+  DividerElement,
+  FieldsElement,
+  ImageElement,
+  LinkButtonElement,
+  LinkElement,
+  RadioSelectElement,
+  SectionElement,
+  SelectElement,
+  TableElement,
+  TextElement,
+} from "chat";
+import {
+  cardChildToFallbackText,
+  chartElementToFallbackText,
+  tableElementToAscii,
+} from "chat";
+import { escapeSlackText, markdownBoldToSlackMrkdwn } from "./format";
+
+/**
+ * Convert emoji placeholders in text to Slack format.
+ */
+const convertEmoji = createEmojiConverter("slack");
+
+// Slack Block Kit types (simplified)
+export interface SlackBlock {
+  block_id?: string;
+  type: string;
+  [key: string]: unknown;
+}
+
+interface SlackTextObject {
+  emoji?: boolean;
+  text: string;
+  type: "plain_text" | "mrkdwn";
+}
+
+interface SlackButtonElement {
+  action_id: string;
+  style?: "primary" | "danger";
+  text: SlackTextObject;
+  type: "button";
+  value?: string;
+  visible_to_user_ids?: string[];
+}
+
+interface SlackLinkButtonElement {
+  action_id: string;
+  style?: "primary" | "danger";
+  text: SlackTextObject;
+  type: "button";
+  url: string;
+  visible_to_user_ids?: string[];
+}
+
+interface SlackOptionObject {
+  description?: SlackTextObject;
+  text: SlackTextObject;
+  value: string;
+}
+
+interface SlackSelectElement {
+  action_id: string;
+  initial_option?: SlackOptionObject;
+  options: SlackOptionObject[];
+  placeholder?: SlackTextObject;
+  type: "static_select";
+}
+
+interface SlackRadioSelectElement {
+  action_id: string;
+  initial_option?: SlackOptionObject;
+  options: SlackOptionObject[];
+  type: "radio_buttons";
+}
+
+/**
+ * Convert a CardElement to Slack Block Kit blocks.
+ */
+export function cardToBlockKit(card: CardElement): SlackBlock[] {
+  const blocks: SlackBlock[] = [];
+
+  // Add header if title is present
+  if (card.title) {
+    blocks.push({
+      type: "header",
+      text: {
+        type: "plain_text",
+        text: truncateSlackText(
+          convertEmoji(card.title),
+          HEADER_TEXT_MAX_CHARS
+        ),
+        emoji: true,
+      },
+    });
+  }
+
+  // Add subtitle as context if present
+  if (card.subtitle) {
+    blocks.push({
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: truncateSlackMrkdwn(
+            convertEmoji(card.subtitle),
+            CONTEXT_TEXT_MAX_CHARS
+          ),
+        },
+      ],
+    });
+  }
+
+  // Add header image if present
+  if (card.imageUrl) {
+    blocks.push({
+      type: "image",
+      image_url: card.imageUrl,
+      alt_text: card.title
+        ? truncateSlackText(card.title, IMAGE_ALT_TEXT_MAX_CHARS)
+        : "Card image",
+    });
+  }
+
+  // Convert children — track native table/chart block usage (Slack allows
+  // at most one table block and two data_visualization blocks per message)
+  const state = { usedNativeTable: false, chartCount: 0 };
+  for (const child of card.children) {
+    const childBlocks = convertChildToBlocks(child, state);
+    blocks.push(...childBlocks);
+  }
+
+  return blocks;
+}
+
+/** Per-message rendering state for Slack's native block usage limits. */
+interface CardRenderState {
+  chartCount: number;
+  usedNativeTable: boolean;
+}
+
+/**
+ * Convert a card child element to Slack blocks.
+ */
+function convertChildToBlocks(
+  child: CardChild,
+  state: CardRenderState
+): SlackBlock[] {
+  switch (child.type) {
+    case "text":
+      return [convertTextToBlock(child)];
+    case "image":
+      return [convertImageToBlock(child)];
+    case "divider":
+      return [convertDividerToBlock(child)];
+    case "actions":
+      return [convertActionsToBlock(child)];
+    case "section":
+      return convertSectionToBlocks(child, state);
+    case "fields":
+      return [convertFieldsToBlock(child)];
+    case "link":
+      return [convertLinkToBlock(child)];
+    case "table":
+      return convertTableToBlocks(child, state);
+    case "chart":
+      return [convertChartToBlock(child, state)];
+    case "text_input":
+      return [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: truncateSlackMrkdwn(
+              escapeSlackText(convertEmoji(child.label)),
+              SECTION_TEXT_MAX_CHARS
+            ),
+          },
+        },
+      ];
+    default: {
+      const text = cardChildToFallbackText(child);
+      if (text) {
+        return [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: truncateSlackMrkdwn(text, SECTION_TEXT_MAX_CHARS),
+            },
+          },
+        ];
+      }
+      return [];
+    }
+  }
+}
+
+export function convertTextToBlock(element: TextElement): SlackBlock {
+  const text = markdownBoldToSlackMrkdwn(convertEmoji(element.content));
+
+  if (element.style === "muted") {
+    // Slack doesn't have a muted style, use context block
+    return {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: truncateSlackMrkdwn(text, CONTEXT_TEXT_MAX_CHARS),
+        },
+      ],
+    };
+  }
+
+  const formattedText =
+    element.style === "bold"
+      ? `*${truncateSlackMrkdwn(text, SECTION_TEXT_MAX_CHARS - 2)}*`
+      : truncateSlackMrkdwn(text, SECTION_TEXT_MAX_CHARS);
+
+  return {
+    type: "section",
+    text: { type: "mrkdwn", text: formattedText },
+  };
+}
+
+function convertLinkToBlock(element: LinkElement): SlackBlock {
+  const labelBudget = SECTION_TEXT_MAX_CHARS - element.url.length - 3;
+  const label = truncateSlackMrkdwn(convertEmoji(element.label), labelBudget);
+  return {
+    type: "section",
+    text: { type: "mrkdwn", text: `<${element.url}|${label}>` },
+  };
+}
+
+function convertImageToBlock(element: ImageElement): SlackBlock {
+  return {
+    type: "image",
+    image_url: element.url,
+    alt_text: element.alt
+      ? truncateSlackText(element.alt, IMAGE_ALT_TEXT_MAX_CHARS)
+      : "Image",
+  };
+}
+
+function convertDividerToBlock(_element: DividerElement): SlackBlock {
+  return { type: "divider" };
+}
+
+type SlackActionElement =
+  | SlackButtonElement
+  | SlackLinkButtonElement
+  | SlackSelectElement
+  | SlackRadioSelectElement;
+
+function convertActionsToBlock(element: ActionsElement): SlackBlock {
+  const elements: SlackActionElement[] = element.children.map((child) => {
+    if (child.type === "link-button") {
+      return convertLinkButtonToElement(child);
+    }
+    if (child.type === "select") {
+      return convertSelectToElement(child);
+    }
+    if (child.type === "radio_select") {
+      return convertRadioSelectToElement(child);
+    }
+    return convertButtonToElement(child);
+  });
+
+  return {
+    type: "actions",
+    elements,
+  };
+}
+
+function convertButtonToElement(button: ButtonElement): SlackButtonElement {
+  const element: SlackButtonElement = {
+    type: "button",
+    text: {
+      type: "plain_text",
+      text: truncateSlackText(
+        convertEmoji(button.label),
+        BUTTON_TEXT_MAX_CHARS
+      ),
+      emoji: true,
+    },
+    action_id: button.id,
+  };
+
+  if (button.value) {
+    element.value = button.value;
+  }
+
+  const style = mapButtonStyle(button.style, "slack");
+  if (style) {
+    element.style = style as "primary" | "danger";
+  }
+
+  if (button.visibleTo?.length) {
+    element.visible_to_user_ids = button.visibleTo;
+  }
+
+  return element;
+}
+
+function convertLinkButtonToElement(
+  button: LinkButtonElement
+): SlackLinkButtonElement {
+  const element: SlackLinkButtonElement = {
+    type: "button",
+    text: {
+      type: "plain_text",
+      text: truncateSlackText(
+        convertEmoji(button.label),
+        BUTTON_TEXT_MAX_CHARS
+      ),
+      emoji: true,
+    },
+    action_id: button.id ?? `link-${button.url.slice(0, 200)}`,
+    url: button.url,
+  };
+
+  const style = mapButtonStyle(button.style, "slack");
+  if (style) {
+    element.style = style as "primary" | "danger";
+  }
+
+  if (button.visibleTo?.length) {
+    element.visible_to_user_ids = button.visibleTo;
+  }
+
+  return element;
+}
+
+function convertSelectToElement(select: SelectElement): SlackSelectElement {
+  const options: SlackOptionObject[] = select.options.map((opt) => {
+    const option: SlackOptionObject = {
+      text: {
+        type: "plain_text" as const,
+        text: truncateSlackText(convertEmoji(opt.label), OPTION_TEXT_MAX_CHARS),
+      },
+      value: opt.value,
+    };
+    if (opt.description) {
+      option.description = {
+        type: "plain_text",
+        text: truncateSlackText(
+          convertEmoji(opt.description),
+          OPTION_TEXT_MAX_CHARS
+        ),
+      };
+    }
+    return option;
+  });
+  const element: SlackSelectElement = {
+    type: "static_select",
+    action_id: select.id,
+    options,
+  };
+  if (select.placeholder) {
+    element.placeholder = {
+      type: "plain_text",
+      text: truncateSlackText(
+        convertEmoji(select.placeholder),
+        SELECT_PLACEHOLDER_MAX_CHARS
+      ),
+    };
+  }
+  if (select.initialOption) {
+    const initialOpt = options.find((o) => o.value === select.initialOption);
+    if (initialOpt) {
+      element.initial_option = initialOpt;
+    }
+  }
+  return element;
+}
+
+function convertRadioSelectToElement(
+  radioSelect: RadioSelectElement
+): SlackRadioSelectElement {
+  const limitedOptions = radioSelect.options.slice(0, 10);
+  const options: SlackOptionObject[] = limitedOptions.map((opt) => {
+    const option: SlackOptionObject = {
+      text: {
+        type: "mrkdwn" as const,
+        text: truncateSlackMrkdwn(
+          convertEmoji(opt.label),
+          OPTION_TEXT_MAX_CHARS
+        ),
+      },
+      value: opt.value,
+    };
+    if (opt.description) {
+      option.description = {
+        type: "mrkdwn",
+        text: truncateSlackMrkdwn(
+          convertEmoji(opt.description),
+          OPTION_TEXT_MAX_CHARS
+        ),
+      };
+    }
+    return option;
+  });
+
+  const element: SlackRadioSelectElement = {
+    type: "radio_buttons",
+    action_id: radioSelect.id,
+    options,
+  };
+  if (radioSelect.initialOption) {
+    const initialOpt = options.find(
+      (o) => o.value === radioSelect.initialOption
+    );
+    if (initialOpt) {
+      element.initial_option = initialOpt;
+    }
+  }
+  return element;
+}
+
+const ELLIPSIS = "…";
+const CODE_FENCE = "```";
+const CODE_FENCE_PATTERN = /```/g;
+// A mention, channel, or special token, or a link whose scheme may itself be cut
+const UNCLOSED_TOKEN_PATTERN = /<(?:[@#!]|[a-z][a-z\d+.-]*(?::|$))[^>]*$/i;
+const PARTIAL_ENTITY_PATTERN = /&(?:lt?|gt?|a(?:mp?)?)?$/;
+// Slack's header block text limit
+const HEADER_TEXT_MAX_CHARS = 150;
+// Slack's button element text limit
+const BUTTON_TEXT_MAX_CHARS = 75;
+// Slack's section text object limit
+const SECTION_TEXT_MAX_CHARS = 3000;
+// Slack's section block per-field text limit
+const FIELD_TEXT_MAX_CHARS = 2000;
+// Slack's text object limit (the context block page sets no lower one)
+const CONTEXT_TEXT_MAX_CHARS = 3000;
+// Slack's image block alt_text limit
+const IMAGE_ALT_TEXT_MAX_CHARS = 2000;
+// Slack's option object text and description limit
+const OPTION_TEXT_MAX_CHARS = 75;
+// Slack's static select placeholder limit
+const SELECT_PLACEHOLDER_MAX_CHARS = 150;
+
+function truncateSlackText(text: string, maxLength: number): string {
+  if (text.length <= maxLength) {
+    return text;
+  }
+  if (maxLength <= 0) {
+    return "";
+  }
+
+  let end = maxLength - ELLIPSIS.length;
+  const boundary = text.charCodeAt(end - 1);
+  if (end > 0 && boundary >= 0xd800 && boundary <= 0xdbff) {
+    end -= 1;
+  }
+
+  return `${text.slice(0, end)}${ELLIPSIS}`;
+}
+
+/**
+ * Cut mrkdwn without leaving a partial `<...>` token or HTML entity, and
+ * close an open code fence when the closing fence still fits.
+ */
+function truncateSlackMrkdwn(text: string, maxLength: number): string {
+  if (text.length <= maxLength || maxLength <= 0) {
+    return truncateSlackText(text, maxLength);
+  }
+
+  const kept = keepMrkdwnPrefix(text, maxLength);
+  const closing = `\n${CODE_FENCE}`;
+  if (!hasOpenFence(kept) || maxLength <= closing.length + ELLIPSIS.length) {
+    return `${kept}${ELLIPSIS}`;
+  }
+  const shorter = keepMrkdwnPrefix(text, maxLength - closing.length);
+  return hasOpenFence(shorter)
+    ? `${shorter}${ELLIPSIS}${closing}`
+    : `${shorter}${ELLIPSIS}`;
+}
+
+/** The text a cut to `maxLength` keeps before its ellipsis. */
+function keepMrkdwnPrefix(text: string, maxLength: number): string {
+  return truncateSlackText(text, maxLength)
+    .slice(0, -ELLIPSIS.length)
+    .replace(PARTIAL_ENTITY_PATTERN, "")
+    .replace(UNCLOSED_TOKEN_PATTERN, "");
+}
+
+function hasOpenFence(text: string): boolean {
+  return (text.match(CODE_FENCE_PATTERN)?.length ?? 0) % 2 === 1;
+}
+
+/**
+ * Wrap ASCII fallback content in a fenced code block inside a section,
+ * truncating the content so the section text stays within Slack's
+ * 3,000-character limit while keeping the closing fence intact.
+ */
+function asciiFallbackBlock(content: string): SlackBlock {
+  const fence = (body: string) => `${CODE_FENCE}\n${body}\n${CODE_FENCE}`;
+  const budget = SECTION_TEXT_MAX_CHARS - fence("").length;
+  const text = fence(truncateSlackText(content, budget));
+  return { type: "section", text: { type: "mrkdwn", text } };
+}
+
+const DATA_TABLE_MAX_ROWS = 100;
+const DATA_TABLE_MAX_COLS = 20;
+// A single table (all cells combined) can't exceed 10,000 characters
+const DATA_TABLE_MAX_CHARS = 10_000;
+const DATA_TABLE_MIN_PAGE_SIZE = 1;
+const DATA_TABLE_MAX_PAGE_SIZE = 100;
+
+/**
+ * Convert a table element to Slack Block Kit blocks.
+ * Uses the data table block (paginated + sortable) with first-row-as-headers
+ * schema when the table has at least one data row.
+ * Falls back to the plain table block for header-only tables, and to an
+ * ASCII code block for tables exceeding Slack limits (100 data rows,
+ * 20 columns, 10,000 characters) or when a native table block has already
+ * been used in this message.
+ * @see https://docs.slack.dev/reference/block-kit/blocks/data-table-block/
+ */
+function convertTableToBlocks(
+  element: TableElement,
+  state: CardRenderState
+): SlackBlock[] {
+  const cellCharCount = [element.headers, ...element.rows]
+    .flat()
+    .reduce((total, cell) => total + cell.length, 0);
+
+  if (
+    state.usedNativeTable ||
+    element.rows.length > DATA_TABLE_MAX_ROWS ||
+    element.headers.length > DATA_TABLE_MAX_COLS ||
+    cellCharCount > DATA_TABLE_MAX_CHARS
+  ) {
+    // Fall back to ASCII table in a code block
+    return [
+      asciiFallbackBlock(tableElementToAscii(element.headers, element.rows)),
+    ];
+  }
+
+  state.usedNativeTable = true;
+
+  // First row is headers, subsequent rows are data
+  const headerRow = element.headers.map((header) => ({
+    type: "raw_text" as const,
+    text: convertEmoji(header) || " ",
+  }));
+
+  const dataRows = element.rows.map((row) =>
+    row.map((cell) => ({
+      type: "raw_text" as const,
+      text: convertEmoji(cell) || " ",
+    }))
+  );
+
+  // The data table block requires a header row plus at least one data row
+  if (dataRows.length === 0) {
+    return [
+      {
+        type: "table",
+        rows: [headerRow],
+      },
+    ];
+  }
+
+  const block: SlackBlock = {
+    type: "data_table",
+    caption: convertEmoji(element.caption || "Table"),
+    rows: [headerRow, ...dataRows],
+  };
+  if (element.pageSize !== undefined) {
+    block.page_size = Math.min(
+      DATA_TABLE_MAX_PAGE_SIZE,
+      Math.max(DATA_TABLE_MIN_PAGE_SIZE, Math.floor(element.pageSize))
+    );
+  }
+  return [block];
+}
+
+const CHART_MAX_TITLE_CHARS = 50;
+const CHART_MAX_LABEL_CHARS = 20;
+const CHART_MAX_SEGMENTS = 12;
+const CHART_MAX_SERIES = 12;
+const CHART_MAX_DATA_POINTS = 20;
+// Slack rejects messages with more than 2 data_visualization blocks
+// (undocumented; enforced by the API as of July 2026)
+const CHART_MAX_PER_MESSAGE = 2;
+
+/**
+ * Convert a chart element to a Slack data visualization block.
+ * Falls back to the chart's data rendered as an ASCII table in a code block
+ * when the chart violates Slack constraints (label lengths, series counts,
+ * category/data-point mismatches, more than 2 charts per message), since
+ * Slack rejects invalid charts outright rather than truncating them.
+ * @see https://docs.slack.dev/reference/block-kit/blocks/data-visualization-block/
+ */
+function convertChartToBlock(
+  element: ChartElement,
+  state: CardRenderState
+): SlackBlock {
+  const block =
+    state.chartCount < CHART_MAX_PER_MESSAGE
+      ? chartToDataVisualization(element)
+      : null;
+  if (block) {
+    state.chartCount += 1;
+    return block;
+  }
+  return asciiFallbackBlock(chartElementToFallbackText(element));
+}
+
+/**
+ * Build a data_visualization block, or return null if the chart violates
+ * Slack constraints.
+ */
+function chartToDataVisualization(element: ChartElement): SlackBlock | null {
+  const title = convertEmoji(element.title);
+  if (title.length === 0 || title.length > CHART_MAX_TITLE_CHARS) {
+    return null;
+  }
+
+  const { chart } = element;
+
+  if (chart.type === "pie") {
+    const validSegments =
+      chart.segments.length >= 1 &&
+      chart.segments.length <= CHART_MAX_SEGMENTS &&
+      chart.segments.every(
+        (segment) => isValidChartLabel(segment.label) && segment.value > 0
+      );
+    if (!validSegments) {
+      return null;
+    }
+    return {
+      type: "data_visualization",
+      title,
+      chart: {
+        type: "pie",
+        segments: chart.segments.map((segment) => ({
+          label: segment.label,
+          value: segment.value,
+        })),
+      },
+    };
+  }
+
+  const { categories, series } = chart;
+  const validShape =
+    categories.length >= 1 &&
+    categories.length <= CHART_MAX_DATA_POINTS &&
+    categories.every((category) => isValidChartLabel(category)) &&
+    new Set(categories).size === categories.length &&
+    series.length >= 1 &&
+    series.length <= CHART_MAX_SERIES &&
+    series.every((s) => isValidChartLabel(s.name)) &&
+    new Set(series.map((s) => s.name)).size === series.length &&
+    (chart.xLabel === undefined ||
+      chart.xLabel.length <= CHART_MAX_TITLE_CHARS) &&
+    (chart.yLabel === undefined ||
+      chart.yLabel.length <= CHART_MAX_TITLE_CHARS);
+  if (!validShape) {
+    return null;
+  }
+
+  // Each series needs exactly one data point per category; normalize
+  // point order to the category order Slack expects.
+  const normalizedSeries: { name: string; data: unknown[] }[] = [];
+  for (const s of series) {
+    if (s.data.length !== categories.length) {
+      return null;
+    }
+    const byLabel = new Map(s.data.map((point) => [point.label, point]));
+    const data: unknown[] = [];
+    for (const category of categories) {
+      const point = byLabel.get(category);
+      if (!point) {
+        return null;
+      }
+      data.push({ label: category, value: point.value });
+    }
+    normalizedSeries.push({ name: s.name, data });
+  }
+
+  const axisConfig: Record<string, unknown> = { categories };
+  if (chart.xLabel !== undefined) {
+    axisConfig.x_label = chart.xLabel;
+  }
+  if (chart.yLabel !== undefined) {
+    axisConfig.y_label = chart.yLabel;
+  }
+
+  return {
+    type: "data_visualization",
+    title,
+    chart: {
+      type: chart.type,
+      series: normalizedSeries,
+      axis_config: axisConfig,
+    },
+  };
+}
+
+function isValidChartLabel(label: string): boolean {
+  return label.length >= 1 && label.length <= CHART_MAX_LABEL_CHARS;
+}
+
+function convertSectionToBlocks(
+  element: SectionElement,
+  state: CardRenderState
+): SlackBlock[] {
+  // Flatten section children into blocks
+  const blocks: SlackBlock[] = [];
+  for (const child of element.children) {
+    blocks.push(...convertChildToBlocks(child, state));
+  }
+  return blocks;
+}
+
+export function convertFieldsToBlock(element: FieldsElement): SlackBlock {
+  const fields: SlackTextObject[] = [];
+
+  // Room for the `*` pair around the label and the newline
+  const budget = FIELD_TEXT_MAX_CHARS - 3;
+  for (const field of element.children) {
+    const rawLabel = markdownBoldToSlackMrkdwn(convertEmoji(field.label));
+    const rawValue = markdownBoldToSlackMrkdwn(convertEmoji(field.value));
+    const valueReserve = Math.min(rawValue.length, Math.floor(budget / 2));
+    const label = truncateSlackMrkdwn(rawLabel, budget - valueReserve);
+    const value = truncateSlackMrkdwn(rawValue, budget - label.length);
+    fields.push({ type: "mrkdwn", text: `*${label}*\n${value}` });
+  }
+
+  return {
+    type: "section",
+    fields,
+  };
+}
+
+/**
+ * Generate fallback text from a card element.
+ * Used when blocks aren't supported or for notifications.
+ */
+export function cardToFallbackText(card: CardElement): string {
+  return sharedCardToFallbackText(card, {
+    boldFormat: "*",
+    lineBreak: "\n",
+    platform: "slack",
+  });
+}
