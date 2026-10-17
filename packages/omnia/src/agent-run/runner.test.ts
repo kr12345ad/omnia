@@ -52,6 +52,41 @@ describe("headless run", () => {
     }
   })
 
+  test("continues a named session without creating another", async () => {
+    // The baseline read happens before the prompt, so the fixture is empty then
+    // and holds the answer afterwards - exactly how a real transcript grows.
+    let reads = 0
+    const calls: Array<{ method: string; path: string }> = []
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (request) => {
+        const url = new URL(request.url)
+        calls.push({ method: request.method, path: url.pathname })
+        if (request.method === "POST") return Response.json({})
+        if (url.pathname === "/session/status") return Response.json({ ses_7: { type: "idle" } })
+        if (url.pathname === "/session/ses_7/message") {
+          reads += 1
+          return Response.json(
+            reads === 1 ? [] : [{ info: { role: "assistant" }, parts: [{ type: "text", text: "continued" }] }],
+          )
+        }
+        return new Response("not found", { status: 404 })
+      },
+    })
+    const config: OpenCodeRunnerConfig = { url: server.url.origin, username: "opencode", password: "secret" }
+    try {
+      const result = await runHeadless(config, { prompt: "again", sessionId: "ses_7", pollMs: 10, timeoutMs: 5_000 })
+      expect(result.ok).toBe(true)
+      if (result.ok) {
+        expect(result.sessionId).toBe("ses_7")
+        expect(result.text).toBe("continued")
+      }
+      expect(calls.some((call) => call.method === "POST" && call.path === "/session")).toBe(false)
+    } finally {
+      server.stop()
+    }
+  })
+
   test("waits while busy before reading", async () => {
     let polls = 0
     const { server, config } = fakeServer({
@@ -69,6 +104,43 @@ describe("headless run", () => {
     }
   })
 
+  test("a session that has not started yet is not finished", async () => {
+    // The prompt is queued before opencode puts the session in its status map,
+    // so an absent entry must not be read as "done" - that returned an empty
+    // answer while the turn was still starting.
+    let polls = 0
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (request) => {
+        const url = new URL(request.url)
+        if (request.method === "POST" && url.pathname === "/session") return Response.json({ id: "ses_5" })
+        if (request.method === "POST") return Response.json({})
+        if (url.pathname === "/session/status") {
+          polls += 1
+          if (polls === 1) return Response.json({})
+          if (polls === 2) return Response.json({ ses_5: { type: "busy" } })
+          return Response.json({ ses_5: { type: "idle" } })
+        }
+        if (url.pathname === "/session/ses_5/message") {
+          return Response.json(
+            polls < 2 ? [] : [{ info: { role: "assistant" }, parts: [{ type: "text", text: "pong" }] }],
+          )
+        }
+        return new Response("not found", { status: 404 })
+      },
+    })
+    const config: OpenCodeRunnerConfig = { url: server.url.origin, username: "opencode", password: "secret" }
+    try {
+      const result = await runHeadless(config, { prompt: "go", pollMs: 5, timeoutMs: 5_000 })
+      expect(result.ok).toBe(true)
+      if (result.ok) expect(result.text).toBe("pong")
+      expect(polls).toBeGreaterThanOrEqual(3)
+    } finally {
+      server.stop()
+    }
+  })
+
+  // The run clamps its budget to five seconds, so this test needs headroom.
   test("aborts on timeout instead of running forever", async () => {
     const { server, calls, config } = fakeServer({
       "POST /session": { id: "ses_3", title: "Run" },
@@ -81,6 +153,108 @@ describe("headless run", () => {
       expect(result.ok).toBe(false)
       if (!result.ok) expect(result.timedOut).toBe(true)
       expect(calls.some((call) => call.path === "/session/ses_3/abort")).toBe(true)
+    } finally {
+      server.stop()
+    }
+  }, 15_000)
+
+  test("a continued session answers the new turn instead of repeating the previous answer", async () => {
+    // The dangerous window: the prompt is queued but the session is not in the
+    // status map yet. The previous answer is already in the transcript, so the
+    // run must only look at messages created after the prompt.
+    const previous = [
+      { info: { role: "user" }, parts: [{ type: "text", text: "old question" }] },
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "old answer" }] },
+    ]
+    const answered = [
+      ...previous,
+      { info: { role: "user" }, parts: [{ type: "text", text: "new question" }] },
+      { info: { role: "assistant" }, parts: [{ type: "text", text: "new answer" }] },
+    ]
+    let reads = 0
+    const progress: number[] = []
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (request) => {
+        const url = new URL(request.url)
+        if (request.method === "POST") return Response.json({})
+        if (url.pathname === "/session/status") return Response.json({})
+        if (url.pathname === "/session/ses_9/message") {
+          reads += 1
+          return Response.json(reads === 1 ? previous : answered)
+        }
+        return new Response("not found", { status: 404 })
+      },
+    })
+    const config: OpenCodeRunnerConfig = { url: server.url.origin, username: "opencode", password: "secret" }
+    try {
+      const result = await runHeadless(config, {
+        prompt: "new question",
+        sessionId: "ses_9",
+        pollMs: 5,
+        timeoutMs: 5_000,
+        onProgress: (messages) => progress.push(messages.length),
+      })
+      expect(result.ok).toBe(true)
+      if (result.ok) expect(result.text).toBe("new answer")
+      // Progress carries this turn only, never the previous answer's steps.
+      expect(progress[0]).toBe(2)
+    } finally {
+      server.stop()
+    }
+  })
+
+  test("reports the transcript while the run is still working", async () => {
+    let polls = 0
+    const seen: number[] = []
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (request) => {
+        const url = new URL(request.url)
+        if (request.method === "POST" && url.pathname === "/session") return Response.json({ id: "ses_8" })
+        if (request.method === "POST") return Response.json({})
+        if (url.pathname === "/session/status") {
+          polls += 1
+          return Response.json(polls < 3 ? { ses_8: { type: "busy" } } : { ses_8: { type: "idle" } })
+        }
+        if (url.pathname === "/session/ses_8/message") {
+          return Response.json([{ info: { role: "assistant" }, parts: [{ type: "reasoning", text: "working" }] }])
+        }
+        return new Response("not found", { status: 404 })
+      },
+    })
+    const config: OpenCodeRunnerConfig = { url: server.url.origin, username: "opencode", password: "secret" }
+    try {
+      const result = await runHeadless(config, {
+        prompt: "go",
+        pollMs: 5,
+        timeoutMs: 5_000,
+        onProgress: (messages) => seen.push(messages.length),
+      })
+      expect(result.ok).toBe(true)
+      expect(seen.length).toBeGreaterThanOrEqual(2)
+    } finally {
+      server.stop()
+    }
+  })
+
+  test("a provider error on the assistant message fails the run instead of returning empty text", async () => {
+    const { server, config } = fakeServer({
+      "POST /session": { id: "ses_6", title: "Run" },
+      "POST /session/ses_6/prompt_async": {},
+      "GET /session/status": { ses_6: { type: "idle" } },
+      "GET /session/ses_6/message": [
+        { info: { role: "user" }, parts: [{ type: "text", text: "go" }] },
+        {
+          info: { role: "assistant", error: { name: "APIError", data: { message: "The provider refused the plan." } } },
+          parts: [],
+        },
+      ],
+    })
+    try {
+      const result = await runHeadless(config, { prompt: "go", pollMs: 10, timeoutMs: 5_000 })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.error).toContain("refused the plan")
     } finally {
       server.stop()
     }

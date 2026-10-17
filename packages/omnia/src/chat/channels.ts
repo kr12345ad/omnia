@@ -18,15 +18,15 @@ export interface ChatChannelsStore {
   readonly channels: readonly ChatChannelConfig[]
 }
 
-const FILE = join(homedir(), ".local/share/omnia/chat-channels.json")
+const DEFAULT_FILE = join(homedir(), ".local/share/omnia/chat-channels.json")
 
 function defaultStore(): ChatChannelsStore {
   return { channels: [] }
 }
 
-function load(): ChatChannelsStore {
+function load(file: string): ChatChannelsStore {
   try {
-    const raw = readFileSync(FILE, "utf8")
+    const raw = readFileSync(file, "utf8")
     const parsed = JSON.parse(raw) as unknown
     if (typeof parsed !== "object" || parsed === null) return defaultStore()
     const channels = (parsed as { channels?: unknown }).channels
@@ -60,13 +60,19 @@ function load(): ChatChannelsStore {
   }
 }
 
-function save(store: ChatChannelsStore): void {
-  mkdirSync(dirname(FILE), { recursive: true })
-  writeFileSync(FILE, JSON.stringify(store, null, 2), { mode: 0o600 })
+function save(file: string, store: ChatChannelsStore): void {
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, JSON.stringify(store, null, 2), { mode: 0o600 })
 }
 
 export class ChatChannelsService {
-  private store: ChatChannelsStore = load()
+  private readonly file: string
+  private store: ChatChannelsStore
+
+  constructor(options: { file?: string } = {}) {
+    this.file = options.file ?? DEFAULT_FILE
+    this.store = load(this.file)
+  }
 
   list(): readonly ChatChannelConfig[] {
     return this.store.channels
@@ -94,7 +100,7 @@ export class ChatChannelsService {
     }
     const channels = this.store.channels.filter((channel) => channel.platform !== platform)
     this.store = { channels: [...channels, next] }
-    save(this.store)
+    save(this.file, this.store)
     return next
   }
 
@@ -102,7 +108,7 @@ export class ChatChannelsService {
     const channels = this.store.channels.filter((channel) => channel.platform !== platform)
     if (channels.length === this.store.channels.length) return false
     this.store = { channels }
-    save(this.store)
+    save(this.file, this.store)
     return true
   }
 
@@ -112,7 +118,7 @@ export class ChatChannelsService {
     const next = { ...channel, enabled }
     const channels = this.store.channels.map((item) => (item.platform === platform ? next : item))
     this.store = { channels }
-    save(this.store)
+    save(this.file, this.store)
     return next
   }
 
@@ -122,7 +128,7 @@ export class ChatChannelsService {
     const next = { ...channel, lastMessageAt: Date.now(), messageCount: (channel.messageCount ?? 0) + 1 }
     const channels = this.store.channels.map((item) => (item.platform === platform ? next : item))
     this.store = { channels }
-    save(this.store)
+    save(this.file, this.store)
   }
 
   setError(platform: string, error: string): void {
@@ -131,7 +137,7 @@ export class ChatChannelsService {
     const next = { ...channel, error }
     const channels = this.store.channels.map((item) => (item.platform === platform ? next : item))
     this.store = { channels }
-    save(this.store)
+    save(this.file, this.store)
   }
 
   clearError(platform: string): void {
@@ -140,6 +146,6 @@ export class ChatChannelsService {
     const { error: _error, ...rest } = channel
     const channels = this.store.channels.map((item) => (item.platform === platform ? rest : item))
     this.store = { channels }
-    save(this.store)
+    save(this.file, this.store)
   }
 }

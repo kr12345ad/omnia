@@ -98,8 +98,87 @@ export async function promptAsync(
   config: OpenCodeRunnerConfig,
   sessionId: string,
   parts: readonly { readonly type: "text"; readonly text: string }[],
+  // Without an explicit model the server falls back to its configured default,
+  // which on a hosted install can be a plan the provider refuses for headless
+  // callers. A caller that needs a working provider names it here.
+  model?: { readonly providerID: string; readonly modelID: string },
 ): Promise<void> {
-  await call(config, "POST", `/session/${encodeURIComponent(sessionId)}/prompt_async`, { parts })
+  await call(config, "POST", `/session/${encodeURIComponent(sessionId)}/prompt_async`, {
+    parts,
+    ...(model === undefined ? {} : { model }),
+  })
+}
+
+export interface ModelSummary {
+  readonly providerID: string
+  readonly modelID: string
+  readonly name?: string
+  /** No per-token cost and offered by the free tier: usable, but rate limited. */
+  readonly free?: boolean
+}
+
+// The configured providers and their models, flattened. A chat command lists
+// these, so it needs ids and human names, not capabilities or pricing.
+export async function listModels(config: OpenCodeRunnerConfig): Promise<ModelSummary[]> {
+  const result = await call(config, "GET", "/config/providers")
+  if (typeof result !== "object" || result === null) return []
+  const providers = (result as { providers?: unknown }).providers
+  if (!Array.isArray(providers)) return []
+  return providers.flatMap((entry): ModelSummary[] => {
+    if (typeof entry !== "object" || entry === null) return []
+    const providerID = (entry as { id?: unknown }).id
+    if (typeof providerID !== "string" || providerID.length === 0) return []
+    const models = (entry as { models?: unknown }).models
+    if (typeof models !== "object" || models === null) return []
+    return Object.entries(models as Record<string, unknown>).flatMap(([modelID, value]) => {
+      if (modelID.length === 0) return []
+      const model = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {}
+      const name = typeof model.name === "string" && model.name.length > 0 ? model.name : undefined
+      const cost = typeof model.cost === "object" && model.cost !== null ? (model.cost as Record<string, unknown>) : {}
+      const free = cost.input === 0 && cost.output === 0 && isFreeTier(providerID, modelID, name)
+      return [{ providerID, modelID, ...(name === undefined ? {} : { name }), ...(free ? { free } : {}) }]
+    })
+  })
+}
+
+/**
+ * A zero price alone is not "free": models included in a paid plan also report
+ * 0. The free tier is the provider that only offers free models, plus anything
+ * whose own id or name says so.
+ */
+function isFreeTier(providerID: string, modelID: string, name: string | undefined): boolean {
+  if (providerID === "opencode") return true
+  return /free/i.test(modelID) || (name !== undefined && /free/i.test(name))
+}
+
+export interface SessionSummary {
+  readonly id: string
+  readonly title?: string
+  readonly updatedAt?: number
+}
+
+// Existing sessions, newest first, so a chat conversation can list what it may
+// resume instead of guessing ids.
+export async function listSessions(config: OpenCodeRunnerConfig): Promise<SessionSummary[]> {
+  const result = await call(config, "GET", "/session")
+  if (!Array.isArray(result)) return []
+  return result
+    .flatMap((entry): SessionSummary[] => {
+      if (typeof entry !== "object" || entry === null) return []
+      const id = (entry as { id?: unknown }).id
+      if (typeof id !== "string" || id.length === 0) return []
+      const title = (entry as { title?: unknown }).title
+      const time = (entry as { time?: unknown }).time
+      const updatedAt = typeof time === "object" && time !== null ? (time as { updated?: unknown }).updated : undefined
+      return [
+        {
+          id,
+          ...(typeof title === "string" ? { title } : {}),
+          ...(typeof updatedAt === "number" ? { updatedAt } : {}),
+        },
+      ]
+    })
+    .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))
 }
 
 export async function abortSession(config: OpenCodeRunnerConfig, sessionId: string): Promise<void> {

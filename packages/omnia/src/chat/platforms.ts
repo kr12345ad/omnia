@@ -66,6 +66,12 @@ export const CHAT_PLATFORMS: readonly ChatPlatformSpec[] = [
     polling: false,
     fields: [
       { key: "credentials", label: "Service account JSON", secret: true, required: true },
+      {
+        key: "audience",
+        label: "Webhook audience",
+        required: true,
+        hint: "The Chat app's authentication audience: its endpoint URL or project number",
+      },
       { key: "projectId", label: "Project ID", required: false },
     ],
     webhookPath: "/v1/chat/gchat/webhook",

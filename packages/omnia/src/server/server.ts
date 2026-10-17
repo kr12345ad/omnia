@@ -28,6 +28,11 @@ import {
   type RoutingWeights,
 } from "../computer-use"
 import { GitHubAuth, defaultGitHubAuthFile } from "../auth/github"
+import { createDiscordTransport } from "../chat/discord"
+import { createGChatTransport } from "../chat/gchat"
+import { conversationKeyFor, createChatAgentRunner } from "../chat/runner"
+import { ChatChannelsRuntime } from "../chat/service"
+import { ChatSessionStore } from "../chat/sessions"
 import { ComputerManager, type BrowserController, type ExecuteOutcome, type ServerActionRequest, type ServerComputerDriver } from "./computers"
 import { PermissionManager, requiredScopesForAction, type ApprovalPolicy, type OmniaScope, type PermissionState } from "./permissions"
 import { ApprovalRegistry } from "../security/approval"
@@ -73,6 +78,8 @@ export interface OmniaServerOptions {
   readonly credentialsFile?: string
   readonly computerUseFile?: string
   readonly pairingsFile?: string
+  readonly chatChannelsFile?: string
+  readonly chatSessionsFile?: string
   readonly authFile?: string
   readonly auditFile?: string
   readonly computerUseAuditFile?: string
@@ -110,6 +117,7 @@ export interface OmniaServerHandle {
   readonly permissions: PermissionManager
   readonly credentials: CredentialStore
   readonly pairings: PairingManager
+  readonly chatChannels: ChatChannelsRuntime
   readonly computerUse: ComputerUseService
   readonly auth: GitHubAuth
   register: (driver: ServerComputerDriver) => () => void
@@ -285,6 +293,47 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
   const pairings = new PairingManager({
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.pairingsFile === undefined ? {} : { file: options.pairingsFile }),
+  })
+  // Chat channels answer on messaging platforms. The runtime owns the
+  // connection table and the webhook receiver; a platform that has to be
+  // dialled out to gets a transport only once an operator connects it.
+  const chatChannels = new ChatChannelsRuntime(
+    options.chatChannelsFile === undefined ? {} : { file: options.chatChannelsFile },
+  )
+  // One agent session per conversation, remembered across restarts so a
+  // channel keeps its context when the control plane comes back.
+  const chatSessions = new ChatSessionStore(
+    options.chatSessionsFile === undefined ? {} : { file: options.chatSessionsFile },
+  )
+  chatChannels.setAgentRunner(createChatAgentRunner({ sessions: chatSessions }))
+  // A channel that already has a session is a conversation: plain messages
+  // there belong to Omnia. Anywhere else the bot waits to be mentioned.
+  chatChannels.setConversationCheck(
+    (platform, channelId) => chatSessions.get(conversationKeyFor(platform, channelId)) !== undefined,
+  )
+  chatChannels.setTransportFactory(({ platform, credentials, onMessage, onError, isConversation }) => {
+    // Google Chat delivers each interaction to the webhook route; this side is
+    // what replies, traces and chunks, authenticated by the service account.
+    if (platform === "gchat") {
+      const serviceAccount = credentials.credentials
+      if (serviceAccount === undefined || serviceAccount.length === 0) return undefined
+      return createGChatTransport({
+        credentials: serviceAccount,
+        onMessage,
+        onError,
+        log: (line) => console.log(`[chat:gchat] ${line}`),
+      })
+    }
+    if (platform !== "discord") return undefined
+    const token = credentials.botToken
+    if (token === undefined || token.length === 0) return undefined
+    return createDiscordTransport({
+      token,
+      onMessage,
+      onError,
+      isConversation,
+      log: (line) => console.log(`[chat:discord] ${line}`),
+    })
   })
   const calibration = new CalibrationManager(options.now === undefined ? {} : { now: options.now })
   const auth = new GitHubAuth({
@@ -562,6 +611,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     permissions,
     credentials,
     pairings,
+    chatChannels,
     remote,
     pairingUrl,
     catalog: () => catalog,
@@ -912,6 +962,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     permissions,
     credentials,
     pairings,
+    chatChannels,
     computerUse: computerUseService,
     auth,
     register: (driver) => registerComputer(driver),
@@ -924,6 +975,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       await localModels.unload()
       scheduler?.stop()
       superskillBridges.close()
+      chatChannels.stop()
       remote.close()
       pairingDiscovery?.close()
       for (const [responder, unsubscribe] of subscribers) {

@@ -1,0 +1,442 @@
+import { describe, expect, test } from "bun:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import type { ModelSummary, OpenCodeRunnerConfig, SessionSummary } from "../agent-run/client"
+import type { HeadlessRunInput, HeadlessRunResult } from "../agent-run/runner"
+import { chatPrompt, conversationKey, createChatAgentRunner, renderTrace } from "./runner"
+import type { ChatMessage } from "./service"
+import { ChatSessionStore } from "./sessions"
+
+const config: OpenCodeRunnerConfig = { url: "http://127.0.0.1:1", username: "opencode", password: "secret" }
+
+function message(text: string, channelId = "C1"): ChatMessage {
+  return { platform: "discord", channelId, userId: "U1", userName: "krishnaa", text, receivedAt: 0 }
+}
+
+function setup() {
+  const dir = mkdtempSync(join(tmpdir(), "omnia-chat-sessions-"))
+  const sessions = new ChatSessionStore({ file: join(dir, "sessions.json") })
+  return { sessions, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+function harness(
+  handler: (input: HeadlessRunInput) => HeadlessRunResult | Promise<HeadlessRunResult>,
+  listed: SessionSummary[] = [],
+  catalog: ModelSummary[] = [],
+  model?: () => { providerID: string; modelID: string } | undefined,
+) {
+  const { sessions, cleanup } = setup()
+  const inputs: HeadlessRunInput[] = []
+  const runner = createChatAgentRunner({
+    sessions,
+    resolve: () => config,
+    run: async (_config, input) => {
+      inputs.push(input)
+      return handler(input)
+    },
+    list: async () => listed,
+    models: async () => catalog,
+    ...(model === undefined ? {} : { model }),
+  })
+  return { sessions, inputs, runner, cleanup }
+}
+
+const CATALOG: ModelSummary[] = [
+  { providerID: "opencode-go", modelID: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+  { providerID: "anthropic", modelID: "claude-sonnet-4", name: "Claude Sonnet 4" },
+]
+
+const answer = (sessionId: string, text = "ok"): HeadlessRunResult => ({ ok: true, sessionId, text, elapsedMs: 1 })
+
+describe("the chat prompt", () => {
+  test("names the platform, the sender and the raw message", () => {
+    const prompt = chatPrompt(message("what broke the deploy?"))
+    expect(prompt).toContain("discord")
+    expect(prompt).toContain("krishnaa")
+    expect(prompt).toContain("C1")
+    expect(prompt.endsWith("what broke the deploy?")).toBe(true)
+  })
+
+  test("a conversation is one per channel", () => {
+    expect(conversationKey(message("hi", "C1"))).toBe("discord:C1")
+    expect(conversationKey(message("hi", "C2"))).not.toBe(conversationKey(message("hi", "C1")))
+  })
+})
+
+describe("the live trace", () => {
+  test("renders reasoning and tool steps as subtext and leaves the answer out", () => {
+    const trace = renderTrace([
+      {
+        info: { role: "assistant" },
+        parts: [
+          { type: "reasoning", text: "Let me look at the config\nand then decide" },
+          { type: "tool", tool: "bash", state: { status: "completed", title: "ls -la" } },
+          { type: "text", text: "the answer itself" },
+        ],
+      },
+    ])
+    expect(trace).toContain("-# 🧠 Let me look at the config")
+    expect(trace).toContain("-# ✓ bash · ls -la")
+    expect(trace).not.toContain("the answer itself")
+    expect(trace.split("\n").every((line) => line.startsWith("-# "))).toBe(true)
+  })
+
+  test("says it is thinking before there is anything to show", () => {
+    expect(renderTrace([])).toBe("-# thinking…")
+  })
+
+  test("shows the elapsed time so a long run never reads as stuck", () => {
+    expect(renderTrace([], 65_000)).toBe("-# thinking… · 1:05")
+    const withStep = renderTrace(
+      [{ info: { role: "assistant" }, parts: [{ type: "tool", tool: "bash", state: { status: "completed", title: "ls" } }] }],
+      9_000,
+    )
+    expect(withStep).toBe("-# ✓ bash · ls · 0:09")
+  })
+
+  test("shows a failed tool and keeps only the last steps", () => {
+    const parts = Array.from({ length: 12 }, (_, index) => ({
+      type: "tool",
+      tool: "bash",
+      state: { status: "error", title: `cmd ${index}` },
+    }))
+    const trace = renderTrace([{ info: { role: "assistant" }, parts }])
+    expect(trace).toContain("✗ bash")
+    expect(trace.split("\n")).toHaveLength(8)
+  })
+
+  test("a tool without a title falls back to its command", () => {
+    const trace = renderTrace([
+      { info: { role: "assistant" }, parts: [{ type: "tool", tool: "bash", state: { status: "running", input: { command: "git status" } } }] },
+    ])
+    expect(trace).toContain("… bash · git status")
+  })
+})
+
+describe("chat session continuity", () => {
+  test("the first message opens a session and later messages continue it", async () => {
+    const { runner, inputs, sessions, cleanup } = harness(() => answer("ses_1"))
+    try {
+      expect(await runner(message("first"))).toBe("ok")
+      expect(await runner(message("second"))).toBe("ok")
+      expect(inputs[0]?.sessionId).toBeUndefined()
+      expect(inputs[0]?.title).toContain("discord")
+      expect(inputs[1]?.sessionId).toBe("ses_1")
+      expect(sessions.get("discord:C1")).toBe("ses_1")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("each channel gets its own session", async () => {
+    let created = 0
+    const { runner, inputs, sessions, cleanup } = harness((input) => {
+      created += input.sessionId === undefined ? 1 : 0
+      return answer(input.sessionId ?? `ses_${created}`)
+    })
+    try {
+      await runner(message("hello", "C1"))
+      await runner(message("hello", "C2"))
+      await runner(message("again", "C1"))
+      expect(sessions.get("discord:C1")).toBe("ses_1")
+      expect(sessions.get("discord:C2")).toBe("ses_2")
+      expect(inputs[2]?.sessionId).toBe("ses_1")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("a stale session is replaced instead of leaving the channel dead", async () => {
+    const { runner, sessions, cleanup } = harness((input) => {
+      if (input.sessionId !== undefined) throw new Error("The paired opencode server answered HTTP 404 for /session/x/prompt_async.")
+      return answer("ses_new", "recovered")
+    })
+    try {
+      sessions.bind("discord:C1", "ses_gone")
+      expect(await runner(message("still there?"))).toBe("recovered")
+      expect(sessions.get("discord:C1")).toBe("ses_new")
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe("conversation commands", () => {
+  test("/session reports the bound session without spending a turn", async () => {
+    const { runner, inputs, sessions, cleanup } = harness(() => answer("ses_1"))
+    try {
+      sessions.bind("discord:C1", "ses_1")
+      const reply = await runner(message("/session"))
+      expect(reply).toContain("ses_1")
+      expect(inputs).toHaveLength(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("/new starts over", async () => {
+    const { runner, inputs, sessions, cleanup } = harness(() => answer("ses_1"))
+    try {
+      sessions.bind("discord:C1", "ses_1")
+      expect(await runner(message("/new"))).toContain("fresh session")
+      expect(sessions.get("discord:C1")).toBeUndefined()
+      await runner(message("start again"))
+      expect(inputs[0]?.sessionId).toBeUndefined()
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("/sessions lists what can be resumed", async () => {
+    const { runner, cleanup } = harness(() => answer("ses_1"), [
+      { id: "ses_a", title: "Deploy fix" },
+      { id: "ses_b", title: "Email triage" },
+    ])
+    try {
+      const reply = await runner(message("/sessions"))
+      expect(reply).toContain("ses_a")
+      expect(reply).toContain("Deploy fix")
+      expect(reply).toContain("/resume")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("/resume binds an existing session and verifies it exists first", async () => {
+    const { runner, inputs, sessions, cleanup } = harness(() => answer("ses_a"), [{ id: "ses_a", title: "Deploy fix" }])
+    try {
+      expect(await runner(message("/resume ses_b"))).toContain("No session ses_b")
+      expect(sessions.get("discord:C1")).toBeUndefined()
+
+      expect(await runner(message("/resume ses_a"))).toContain("ses_a")
+      await runner(message("continue please"))
+      expect(inputs[0]?.sessionId).toBe("ses_a")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("a plain message that only looks like a path is not a command", async () => {
+    const { runner, inputs, cleanup } = harness(() => answer("ses_1"))
+    try {
+      await runner(message("/etc/passwd is broken"))
+      expect(inputs).toHaveLength(1)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+const noEnvModel = () => undefined
+
+describe("switching models from chat", () => {
+  test("/models lists the catalog and marks the current choice without spending a turn", async () => {
+    const { runner, inputs, sessions, cleanup } = harness(() => answer("ses_1"), [], CATALOG)
+    try {
+      sessions.setModel("discord:C1", { providerID: "anthropic", modelID: "claude-sonnet-4" })
+      const reply = await runner(message("/models"))
+      expect(reply).toContain("1. opencode-go/deepseek-v4.1-flash — DeepSeek V4.1 Flash")
+      expect(reply).toContain("2. anthropic/claude-sonnet-4 — Claude Sonnet 4 ← current")
+      expect(inputs).toHaveLength(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("/models 2 switches this channel and the next turn uses it", async () => {
+    const { runner, inputs, sessions, cleanup } = harness(() => answer("ses_1"), [], CATALOG)
+    try {
+      expect(await runner(message("/models 2"))).toContain("anthropic/claude-sonnet-4")
+      expect(sessions.getModel("discord:C1")).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4" })
+      await runner(message("go"))
+      expect(inputs[0]?.model).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4" })
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("one channel's model does not follow the bot into another channel", async () => {
+    const { runner, inputs, cleanup } = harness(() => answer("ses_1"), [], CATALOG, noEnvModel)
+    try {
+      await runner(message("/models anthropic/claude-sonnet-4", "C1"))
+      await runner(message("go", "C2"))
+      expect(inputs[0]?.model).toBeUndefined()
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("/models default goes back to the server's choice", async () => {
+    const { runner, inputs, sessions, cleanup } = harness(() => answer("ses_1"), [], CATALOG, noEnvModel)
+    try {
+      sessions.setModel("discord:C1", { providerID: "anthropic", modelID: "claude-sonnet-4" })
+      expect(await runner(message("/models default"))).toContain("server's default")
+      expect(sessions.getModel("discord:C1")).toBeUndefined()
+      await runner(message("go"))
+      expect(inputs[0]?.model).toBeUndefined()
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("an unknown model or index is refused and leaves the choice alone", async () => {
+    const { runner, sessions, cleanup } = harness(() => answer("ses_1"), [], CATALOG)
+    try {
+      sessions.setModel("discord:C1", { providerID: "anthropic", modelID: "claude-sonnet-4" })
+      expect(await runner(message("/models nope"))).toContain("No model matches")
+      expect(await runner(message("/models 9"))).toContain("There is no model 9")
+      expect(sessions.getModel("discord:C1")).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4" })
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("!model list separates the free tier and warns that it is rate limited", async () => {
+    const withFree: ModelSummary[] = [
+      { providerID: "opencode", modelID: "deepseek-v4.1-flash-free", name: "DeepSeek V4.1 Flash Free", free: true },
+      { providerID: "opencode-go", modelID: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+    ]
+    const { runner, cleanup } = harness(() => answer("ses_1"), [], withFree)
+    try {
+      const reply = await runner(message("!model list"))
+      // Paid models are numbered first so a paid pick keeps its number.
+      expect(reply).toContain("1. opencode-go/deepseek-v4.1-flash — DeepSeek V4.1 Flash")
+      expect(reply).toContain("Free models (rate limited):")
+      expect(reply).toContain("2. opencode/deepseek-v4.1-flash-free — DeepSeek V4.1 Flash Free · free (rate limited)")
+      expect(reply).toContain("throttled")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("picking a free model warns, and it is the model the turn uses", async () => {
+    const withFree: ModelSummary[] = [
+      { providerID: "opencode", modelID: "deepseek-v4.1-flash-free", name: "DeepSeek V4.1 Flash Free", free: true },
+      { providerID: "opencode-go", modelID: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+    ]
+    const { runner, inputs, sessions, cleanup } = harness(() => answer("ses_1"), [], withFree, noEnvModel)
+    try {
+      const reply = await runner(message("!model 2"))
+      expect(reply).toContain("rate-limited")
+      expect(sessions.getModel("discord:C1")).toEqual({ providerID: "opencode", modelID: "deepseek-v4.1-flash-free" })
+      await runner(message("go"))
+      expect(inputs[0]?.model).toEqual({ providerID: "opencode", modelID: "deepseek-v4.1-flash-free" })
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("!model list shows the catalog without spending a turn", async () => {
+    const { runner, inputs, cleanup } = harness(() => answer("ses_1"), [], CATALOG)
+    try {
+      const reply = await runner(message("!model list"))
+      expect(reply).toContain("opencode-go/deepseek-v4.1-flash")
+      expect(reply).toContain("anthropic/claude-sonnet-4")
+      expect(inputs).toHaveLength(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("!model switches by name and by index", async () => {
+    const { runner, sessions, cleanup } = harness(() => answer("ses_1"), [], CATALOG)
+    try {
+      expect(await runner(message("!model anthropic/claude-sonnet-4"))).toContain("anthropic/claude-sonnet-4")
+      expect(sessions.getModel("discord:C1")).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4" })
+      expect(await runner(message("!model 1"))).toContain("opencode-go/deepseek-v4.1-flash")
+      expect(sessions.getModel("discord:C1")).toEqual({ providerID: "opencode-go", modelID: "deepseek-v4.1-flash" })
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("the ! prefix works where Discord's slash picker gets in the way", async () => {
+    const { runner, sessions, cleanup } = harness(() => answer("ses_1"), [], CATALOG)
+    try {
+      expect(await runner(message("!models 2"))).toContain("anthropic/claude-sonnet-4")
+      expect(sessions.getModel("discord:C1")).toEqual({ providerID: "anthropic", modelID: "claude-sonnet-4" })
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("a bare model id offered by two providers asks for the full name", async () => {
+    const shared: ModelSummary[] = [
+      { providerID: "alpha", modelID: "shared" },
+      { providerID: "beta", modelID: "shared" },
+    ]
+    const { runner, sessions, cleanup } = harness(() => answer("ses_1"), [], shared)
+    try {
+      const reply = await runner(message("/models shared"))
+      expect(reply).toContain("alpha, beta")
+      expect(sessions.getModel("discord:C1")).toBeUndefined()
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe("the chat agent runner", () => {
+  test("a timed out run says why instead of echoing an error object", async () => {
+    const { runner, cleanup } = harness(() => ({
+      ok: false,
+      sessionId: "S1",
+      error: "budget",
+      timedOut: true,
+      elapsedMs: 5,
+    }))
+    try {
+      expect(await runner(message("go"))).toBe("That took longer than Omnia's chat budget, so the run was stopped.")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("a provider refusal is repeated back rather than hidden", async () => {
+    const { runner, cleanup } = harness(() => ({
+      ok: false,
+      sessionId: "S1",
+      error: "OpenCode's free tier can only be used from within OpenCode.",
+      timedOut: false,
+      elapsedMs: 5,
+    }))
+    try {
+      const reply = await runner(message("go"))
+      expect(reply).toContain("could not answer")
+      expect(reply).toContain("free tier")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("the configured chat model is sent with the prompt", async () => {
+    const previous = process.env.OMNIA_CHAT_MODEL
+    process.env.OMNIA_CHAT_MODEL = "opencode-go/deepseek-v4.1-flash"
+    const { runner, inputs, cleanup } = harness(() => answer("ses_1"))
+    try {
+      await runner(message("go"))
+      expect(inputs[0]?.model).toEqual({ providerID: "opencode-go", modelID: "deepseek-v4.1-flash" })
+    } finally {
+      if (previous === undefined) delete process.env.OMNIA_CHAT_MODEL
+      else process.env.OMNIA_CHAT_MODEL = previous
+      cleanup()
+    }
+  })
+
+  test("a control plane with no executor says so plainly", async () => {
+    const { sessions, cleanup } = setup()
+    try {
+      const runner = createChatAgentRunner({
+        sessions,
+        resolve: () => undefined,
+        run: async () => {
+          throw new Error("must not run")
+        },
+      })
+      expect(await runner(message("go"))).toContain("no headless executor configured")
+    } finally {
+      cleanup()
+    }
+  })
+})

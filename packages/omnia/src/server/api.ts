@@ -38,6 +38,7 @@ import {
 } from "./permissions"
 import { isCredentialKind, isCredentialRuleKind, summarizeCredential, type CredentialStore } from "../credentials"
 import type { PairingManager } from "../pairing"
+import type { ChatChannelsRuntime } from "../chat/service"
 import { formatPairingCode } from "../pairing"
 import { parseRemotePublicKey, type RemoteRegistry } from "./remote"
 import { REMOTE_KEY_ID_HEADER, REMOTE_SIGNATURE_HEADER, REMOTE_TIMESTAMP_HEADER } from "../remote/signing"
@@ -127,6 +128,7 @@ export interface ApiContext {
   readonly permissions: PermissionManager
   readonly credentials: CredentialStore
   readonly pairings: PairingManager
+  readonly chatChannels: ChatChannelsRuntime
   readonly remote: RemoteRegistry
   readonly pairingUrl: () => string
   readonly catalog: () => ServerCatalog
@@ -246,6 +248,11 @@ export function isPublicApiRoute(method: string, pathname: string): boolean {
   // path rather than method so a misconfigured Stripe dashboard gets an honest
   // "POST only" instead of a 401 that looks like a credential problem.
   if (route === "/billing/stripe/webhook") return true
+  // Slack, Telegram and the rest cannot present an Omnia bearer either. Each
+  // adapter verifies the platform's own signature over the raw body before
+  // anything is answered, and an unknown platform or an unconnected channel is
+  // refused inside the route, so the path being public grants nothing by itself.
+  if (method === "POST" && /^\/chat\/[a-z0-9-]+\/webhook$/.test(route)) return true
   return false
 }
 
@@ -675,6 +682,7 @@ export const CAPABILITY_CHECK_TIMEOUT_MS = 5_000
 /** How a capability is named to the person who just got refused. */
 const CAPABILITY_LABELS: Readonly<Partial<Record<Capability, string>>> = {
   input_freeze: "Freezing physical input",
+  chat_channels: "Chat channels",
 }
 
 function billingControlPlane(): { readonly base: string; readonly token: string } | undefined {
@@ -2078,6 +2086,115 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
     }
     json(response, 404, { ok: false, error: "Unknown memory route." })
     return true
+  }
+
+  // Chat channels: the messaging platforms Omnia answers on. The catalog and the
+  // connection table are the server's own, and a stored credential value is
+  // never read back out: a response carries the fields that are configured and
+  // none of their values.
+  if (segments.length >= 2 && segments[1] === "chat") {
+    if (parsed.method === "GET" && segments.length === 3 && segments[2] === "platforms") {
+      json(response, 200, { ok: true, platforms: context.chatChannels.platforms() })
+      return true
+    }
+
+    // A platform posts here, and it cannot present an Omnia bearer, so this route
+    // is public (see isPublicApiRoute) and the platform's own signature is
+    // verified over the raw body inside handleWebhook. The body is read as bytes
+    // because a signature covers exactly what was sent, and re-serialising parsed
+    // JSON would change it.
+    if (parsed.method === "POST" && segments.length === 4 && segments[3] === "webhook") {
+      const platform = segments[2]
+      if (platform !== undefined) {
+        const raw = await readBodyBytes(request)
+        const headers = new Headers()
+        for (const [key, value] of Object.entries(request.headers)) {
+          if (typeof value === "string") headers.set(key, value)
+          else if (Array.isArray(value)) headers.set(key, value.join(", "))
+        }
+        const result = await context.chatChannels.handleWebhook(platform, headers, raw.toString("utf8"))
+        json(response, result.status, {
+          ok: result.ok,
+          ...(result.reply === undefined ? {} : { reply: result.reply }),
+        })
+        return true
+      }
+    }
+
+    if (segments.length >= 3 && segments[2] === "channels") {
+      // Connecting a channel stores a platform's own credentials, so it belongs
+      // to the signed-in operator and nobody else: a client token is a
+      // provisioning credential and has no business holding a Slack bot token.
+      if (!isTrustedDesktopRequest(context, request)) {
+        json(response, 403, { ok: false, error: "Only the signed-in desktop can manage chat channels." })
+        return true
+      }
+      // Chat channels are a paid capability. The refusal is a typed failure and
+      // never an empty channel list: a caller handed [] cannot tell "not
+      // entitled" from "nothing connected" and reports a bot that never existed.
+      const unbilled = await capabilityDenied(context, "chat_channels", { request })
+      if (unbilled !== undefined) {
+        json(response, unbilled.status, unbilled.payload)
+        return true
+      }
+
+      if (parsed.method === "GET" && segments.length === 3) {
+        json(response, 200, { ok: true, channels: context.chatChannels.describe() })
+        return true
+      }
+
+      if (parsed.method === "POST" && segments.length === 3) {
+        const body = await readBoundBody(context, request)
+        const record = isRecord(body) ? body : {}
+        const requested = typeof record.platform === "string" ? record.platform.trim() : ""
+        const spec = requested.length === 0 ? undefined : context.chatChannels.spec(requested)
+        if (spec === undefined) {
+          json(response, 400, { ok: false, error: "A known chat platform is required." })
+          return true
+        }
+        // Only the platform's own fields are stored, so a client cannot park
+        // arbitrary values in the channel table.
+        const supplied = isRecord(record.credentials) ? record.credentials : {}
+        const credentials: Record<string, string> = {}
+        for (const field of spec.fields) {
+          const value = supplied[field.key]
+          if (typeof value === "string" && value.length > 0) credentials[field.key] = value
+        }
+        const missing = spec.fields.filter((field) => field.required === true && credentials[field.key] === undefined)
+        if (missing.length > 0) {
+          json(response, 400, {
+            ok: false,
+            error: `Missing ${missing.map((field) => field.label).join(", ")}.`,
+          })
+          return true
+        }
+        const channel = context.chatChannels.connect(requested, credentials)
+        context.chatChannels.sync()
+        json(response, 200, { ok: true, channel })
+        return true
+      }
+
+      const platform = segments[3]
+      if (platform !== undefined && parsed.method === "PATCH" && segments.length === 4) {
+        const body = await readBoundBody(context, request)
+        const record = isRecord(body) ? body : {}
+        const channel = context.chatChannels.setEnabled(platform, record.enabled === true)
+        if (channel === undefined) {
+          json(response, 404, { ok: false, error: `${platform} is not connected.` })
+          return true
+        }
+        context.chatChannels.sync()
+        json(response, 200, { ok: true, channel })
+        return true
+      }
+
+      if (platform !== undefined && parsed.method === "DELETE" && segments.length === 4) {
+        const removed = context.chatChannels.disconnect(platform)
+        context.chatChannels.sync()
+        json(response, 200, { ok: true, removed })
+        return true
+      }
+    }
   }
 
   if (segments.length >= 2 && segments[1] === "superskills") {
