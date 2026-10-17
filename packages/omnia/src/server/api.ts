@@ -2116,6 +2116,8 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, result.status, {
           ok: result.ok,
           ...(result.reply === undefined ? {} : { reply: result.reply }),
+          // Slack's Request URL handshake only accepts the challenge echoed back.
+          ...(result.challenge === undefined ? {} : { challenge: result.challenge }),
         })
         return true
       }
@@ -2170,7 +2172,10 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         }
         const channel = context.chatChannels.connect(requested, credentials)
         context.chatChannels.sync()
-        json(response, 200, { ok: true, channel })
+        // Storing credentials is not the same as being reachable: ask now, so the
+        // panel shows why a channel stays silent instead of a green "Connected".
+        await context.chatChannels.verify(requested)
+        json(response, 200, { ok: true, channel: context.chatChannels.describeOne(requested) ?? channel })
         return true
       }
 

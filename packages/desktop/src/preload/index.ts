@@ -83,6 +83,13 @@ const api: ElectronAPI = {
       remove: (computerId: string, id: string) => ipcRenderer.invoke("credentials-remove", computerId, id),
     },
   },
+  chat: {
+    platforms: () => ipcRenderer.invoke("chat-platforms"),
+    list: () => ipcRenderer.invoke("chat-channels"),
+    connect: (input) => ipcRenderer.invoke("chat-connect", input),
+    disconnect: (platform: string) => ipcRenderer.invoke("chat-disconnect", platform),
+    setEnabled: (platform: string, enabled: boolean) => ipcRenderer.invoke("chat-set-enabled", platform, enabled),
+  },
   computerUse: {
     models: () => ipcRenderer.invoke("computer-use-models"),
     status: () => ipcRenderer.invoke("computer-use-status"),

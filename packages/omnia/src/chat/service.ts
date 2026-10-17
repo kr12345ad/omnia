@@ -1,5 +1,6 @@
 import { ChatChannelsService as Store } from "./channels"
 import { CHAT_PLATFORMS, type ChatPlatformSpec } from "./platforms"
+import { slackChallenge } from "./slack"
 import { verifyGChat, verifyWebhook, type WebhookVerificationResult } from "./verify"
 
 export interface ChatMessage {
@@ -71,6 +72,15 @@ export interface ChatChannelSummary {
   readonly error?: string
 }
 
+/**
+ * Whether a platform can actually reach this Omnia: returns why it cannot, or
+ * undefined when it can. Only platforms that can answer the question have one.
+ */
+export type ChatChannelCheck = (
+  platform: string,
+  credentials: Readonly<Record<string, string>>,
+) => Promise<string | undefined>
+
 export type ChatWebhookVerifier = (
   platform: string,
   headers: Headers,
@@ -84,6 +94,7 @@ export class ChatChannelsRuntime {
   private agentRunner: AgentRunner | undefined
   private transportFactory: ChatTransportFactory | undefined
   private conversationCheck: ((platform: string, channelId: string) => boolean) | undefined
+  private channelCheck: ChatChannelCheck | undefined
   private readonly transports = new Map<string, ChatTransport>()
   private readonly messageLog: ChatMessage[] = []
 
@@ -127,6 +138,28 @@ export class ChatChannelsRuntime {
    */
   setConversationCheck(check: ((platform: string, channelId: string) => boolean) | undefined): void {
     this.conversationCheck = check
+  }
+
+  setChannelCheck(check: ChatChannelCheck | undefined): void {
+    this.channelCheck = check
+  }
+
+  /**
+   * Ask the platform whether it will actually reach us, and record the answer on
+   * the channel. Storing credentials proves nothing: an app that was never
+   * configured keeps them, never receives a message and looks connected, so the
+   * reason belongs where the settings panel can show it.
+   */
+  async verify(platform: string): Promise<string | undefined> {
+    const channel = this.store.get(platform)
+    const check = this.channelCheck
+    if (channel === undefined || check === undefined) return undefined
+    const problem = await check(platform, channel.credentials).catch((error: unknown) =>
+      error instanceof Error ? error.message : String(error),
+    )
+    if (problem === undefined) this.store.clearError(platform)
+    else this.store.setError(platform, problem)
+    return problem
   }
 
   setTransportFactory(factory: ChatTransportFactory | undefined): void {
@@ -196,7 +229,11 @@ export class ChatChannelsRuntime {
     return CHAT_PLATFORMS
   }
 
-  async handleWebhook(platform: string, headers: Headers, body: string): Promise<{ ok: boolean; status: number; reply?: string }> {
+  async handleWebhook(
+    platform: string,
+    headers: Headers,
+    body: string,
+  ): Promise<{ ok: boolean; status: number; reply?: string; challenge?: string }> {
     const channel = this.store.get(platform)
     if (channel === undefined || !channel.enabled) {
       return { ok: false, status: 404 }
@@ -217,6 +254,12 @@ export class ChatChannelsRuntime {
       return { ok: false, status: 401 }
     }
     this.store.clearError(platform)
+    // Slack saves a Request URL only when the challenge it posts comes back in
+    // the response body, so this is answered before anything reads the event.
+    if (platform === "slack") {
+      const challenge = slackChallenge(body)
+      if (challenge !== undefined) return { ok: true, status: 200, challenge }
+    }
     // A live transport knows its platform's event shape. Hand it the delivery
     // and answer at once: an agent turn can outlast the platform's timeout, so
     // the reply goes out over the transport instead of back down this request.

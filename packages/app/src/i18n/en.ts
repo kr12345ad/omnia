@@ -1261,6 +1261,22 @@ export const dict = {
   "computerUse.permission.outcome.pending": "Waiting for the action to finish…",
   "computerUse.permission.outcome.observed": "Observed",
   "computerUse.permission.outcome.none": "Nothing was observed after the action.",
+  "settings.chatChannels.title": "Chat Channels",
+  "settings.chatChannels.description":
+    "Messaging platforms Omnia answers on. The connections are held by the Omnia Server, so the agent keeps replying wherever it is running.",
+  "settings.chatChannels.unavailable": "Chat channels are available in the desktop app.",
+  "settings.chatChannels.unsupported":
+    "This Omnia Server does not offer chat channels yet, so there is nothing to connect here. Update the server and reopen this page.",
+  "settings.chatChannels.empty": "No chat platform is connected yet.",
+  "settings.chatChannels.connected": "Connected",
+  "settings.chatChannels.polling": "No public URL needed — this platform polls for messages.",
+  "settings.chatChannels.webhook": "Webhook path",
+  "settings.chatChannels.copy": "Copy",
+  "settings.chatChannels.copied": "Copied",
+  "settings.chatChannels.docs": "Setup guide",
+  "settings.chatChannels.required": "Required",
+  "settings.chatChannels.messages": "{{count}} messages received",
+  "settings.chatChannels.missingFields": "Missing {{fields}}.",
   "settings.computers.title": "Computers",
   "settings.computers.description":
     "Computers the agent can control, and the credentials it may use on them. Everything is stored on this machine.",

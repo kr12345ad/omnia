@@ -78,6 +78,45 @@ export function createGChatTransport(options: GChatTransportOptions): ChatTransp
   return new GChatTransport(options, account)
 }
 
+export interface GChatAppCheck {
+  /** The service-account JSON, exactly as Google Cloud exports it. */
+  readonly credentials: string
+  readonly apiUrl?: string
+  readonly tokenUrl?: string
+  readonly now?: () => number
+}
+
+const APP_NOT_CONFIGURED =
+  "Google has no Chat app configured for this project, so it will never deliver a message here. In the Google Cloud console open APIs & Services > Google Chat API > Configuration, point the HTTP endpoint URL and the authentication audience at this webhook and save. Google only allows that from a Google Workspace account."
+
+/**
+ * Why Google will not deliver anything yet, or undefined when the app is live.
+ * Connecting a channel only stores credentials: an app that was never
+ * configured in the console accepts every reply-less call with "Chat app not
+ * found" and stays silent forever, which looks exactly like a healthy channel.
+ * Listing spaces is the cheapest call a configured app answers.
+ */
+export async function checkGChatApp(options: GChatAppCheck): Promise<string | undefined> {
+  const account = readServiceAccount(options.credentials)
+  if (account === undefined) {
+    return "Google Chat credentials are not a service-account JSON object with client_email and private_key."
+  }
+  const granted = await serviceAccountToken(account, options.tokenUrl ?? TOKEN_URL, options.now?.() ?? Date.now()).then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, reason: error instanceof Error ? error.message : String(error) }),
+  )
+  if (!granted.ok) return `Google Chat rejected the service-account key: ${granted.reason}`
+  const response = await fetch(`${options.apiUrl ?? CHAT_API}/spaces?pageSize=1`, {
+    headers: { authorization: `Bearer ${granted.value.value}` },
+    signal: AbortSignal.timeout(10_000),
+  }).catch(() => undefined)
+  if (response === undefined) return "Google Chat could not be reached from here."
+  if (response.ok) return undefined
+  const detail = (await response.text().catch(() => "")).slice(0, 200)
+  if (response.status === 404 && detail.includes("Chat app not found")) return APP_NOT_CONFIGURED
+  return `Google Chat answered ${response.status}${detail.length === 0 ? "" : `: ${detail}`}`
+}
+
 class GChatTransport implements ChatTransport {
   private readonly apiUrl: string
   private readonly tokenUrl: string
@@ -246,37 +285,8 @@ class GChatTransport implements ChatTransport {
   private async accessToken(): Promise<string> {
     const token = this.token
     if (token !== undefined && token.expiresAt > this.now()) return token.value
-    const issuedAt = Math.floor(this.now() / 1_000)
-    const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }))
-    const claims = base64url(
-      JSON.stringify({
-        iss: this.account.client_email,
-        scope: CHAT_SCOPE,
-        aud: this.tokenUrl,
-        iat: issuedAt,
-        exp: issuedAt + 3_600,
-      }),
-    )
-    const signature = base64url(createSign("RSA-SHA256").update(`${header}.${claims}`).sign(this.account.private_key))
-    const response = await fetch(this.tokenUrl, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-        assertion: `${header}.${claims}.${signature}`,
-      }),
-      signal: AbortSignal.timeout(10_000),
-    })
-    const granted = (await response.json().catch(() => undefined)) as unknown
-    const value = isRecord(granted) ? granted.access_token : undefined
-    if (!response.ok || typeof value !== "string") {
-      const reason = isRecord(granted) ? granted.error_description ?? granted.error : undefined
-      throw new Error(`Google Chat token request answered ${response.status}${typeof reason === "string" ? `: ${reason}` : ""}`)
-    }
-    const lifetime = isRecord(granted) && typeof granted.expires_in === "number" ? granted.expires_in : 3_600
-    // Refresh early: a token that expires mid-answer would fail the last piece.
-    this.token = { value, expiresAt: this.now() + Math.max(60, lifetime - 60) * 1_000 }
-    return value
+    this.token = await serviceAccountToken(this.account, this.tokenUrl, this.now())
+    return this.token.value
   }
 
   private async request(
@@ -418,6 +428,46 @@ function retryDelay(response: Response, now: number): number {
     if (Number.isFinite(date)) return Math.min(Math.max(0, date - now), MAX_RETRY_WAIT_MS)
   }
   return 1_000
+}
+
+/**
+ * A service-account JWT exchanged for a Chat API access token. It is refreshed
+ * early: a token that expires mid-answer would fail the last piece of a reply.
+ */
+async function serviceAccountToken(
+  account: ServiceAccount,
+  tokenUrl: string,
+  now: number,
+): Promise<{ value: string; expiresAt: number }> {
+  const issuedAt = Math.floor(now / 1_000)
+  const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }))
+  const claims = base64url(
+    JSON.stringify({
+      iss: account.client_email,
+      scope: CHAT_SCOPE,
+      aud: tokenUrl,
+      iat: issuedAt,
+      exp: issuedAt + 3_600,
+    }),
+  )
+  const signature = base64url(createSign("RSA-SHA256").update(`${header}.${claims}`).sign(account.private_key))
+  const response = await fetch(tokenUrl, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: `${header}.${claims}.${signature}`,
+    }),
+    signal: AbortSignal.timeout(10_000),
+  })
+  const granted = (await response.json().catch(() => undefined)) as unknown
+  const value = isRecord(granted) ? granted.access_token : undefined
+  if (!response.ok || typeof value !== "string") {
+    const reason = isRecord(granted) ? granted.error_description ?? granted.error : undefined
+    throw new Error(`Google Chat token request answered ${response.status}${typeof reason === "string" ? `: ${reason}` : ""}`)
+  }
+  const lifetime = isRecord(granted) && typeof granted.expires_in === "number" ? granted.expires_in : 3_600
+  return { value, expiresAt: now + Math.max(60, lifetime - 60) * 1_000 }
 }
 
 function base64url(input: string | Buffer): string {

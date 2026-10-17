@@ -73,6 +73,7 @@ export function ShellSidebar() {
   const tabs = useTabs()
   const params = useParams<{ dir?: string; id?: string }>()
   const openSettings = useSettingsDialog()
+  const openChatChannels = useSettingsDialog("chat-channels")
   const [searching, setSearching] = createSignal(false)
   const [query, setQuery] = createSignal("")
   let searchBox: HTMLDivElement | undefined
@@ -301,6 +302,12 @@ export function ShellSidebar() {
           icon={<IconV2 name="settings-gear" size="small" />}
           label={language.t("sidebar.settings")}
           onSelect={() => openSettings()}
+        />
+        <SidebarAction
+          collapsed={collapsed()}
+          icon={<IconV2 name="message" size="small" />}
+          label={language.t("settings.chatChannels.title")}
+          onSelect={() => openChatChannels()}
         />
         <SidebarAction
           collapsed={collapsed()}

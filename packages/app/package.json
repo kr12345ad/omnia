@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./chat": "./src/chat.ts",
     "./computers": "./src/computers.ts",
     "./computer-use": "./src/computer-use.ts",
     "./context/platform": "./src/context/platform.tsx",

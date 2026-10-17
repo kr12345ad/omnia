@@ -15,6 +15,7 @@ import { SettingsSuperskills } from "../settings-superskills"
 import { SettingsMcpMarketplace } from "../settings-mcp-marketplace"
 import { SettingsMemory } from "../settings-memory"
 import { SettingsComputers } from "../settings-computers"
+import { SettingsChatChannels } from "../settings-chat-channels"
 import { SettingsComputerUse } from "../settings-computer-use"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { useLayout } from "@/context/layout"
@@ -70,6 +71,10 @@ export const DialogSettings: Component<{
                     <TabsV2.Trigger value="account">
                       <Icon name="shield" />
                       {language.t("desktop.menu.account")}
+                    </TabsV2.Trigger>
+                    <TabsV2.Trigger value="chat-channels">
+                      <Icon name="comment" />
+                      {language.t("settings.chatChannels.title")}
                     </TabsV2.Trigger>
                     <TabsV2.Trigger value="shortcuts">
                       <Icon name="keyboard" />
@@ -134,6 +139,9 @@ export const DialogSettings: Component<{
         </TabsV2.Content>
         <TabsV2.Content value="account" class="settings-v2-panel">
           <SettingsAccount />
+        </TabsV2.Content>
+        <TabsV2.Content value="chat-channels" class="settings-v2-panel">
+          <SettingsChatChannels />
         </TabsV2.Content>
         <TabsV2.Content value="shortcuts" class="settings-v2-panel">
           <SettingsKeybinds v2 />

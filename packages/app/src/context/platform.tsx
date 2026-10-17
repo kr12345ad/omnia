@@ -9,6 +9,7 @@ import type { DraftStore } from "@/utils/draft-store"
 import type { SuperskillPlatform } from "@/superskills"
 import type { MemoryPlatform } from "@/memory"
 import type { ComputerPlatform } from "@/computers"
+import type { ChatPlatform } from "@/chat"
 import type { ComputerUsePlatform } from "@/computer-use"
 
 export type GitHubProfile = {
@@ -180,6 +181,9 @@ type PlatformBase = {
 
   /** Connected computers and their stored credentials (desktop only) */
   computers?: ComputerPlatform
+
+  /** Messaging platforms Omnia answers on, on Pro and above (desktop only) */
+  chat?: ChatPlatform
 
   /** Local computer-use models: download, load, and remove them on demand (desktop only) */
   computerUse?: ComputerUsePlatform

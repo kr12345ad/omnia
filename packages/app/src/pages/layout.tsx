@@ -2226,6 +2226,11 @@ export default function LegacyLayout(props: ParentProps) {
             onSelect={() => openSettings("account")}
           />
           <SidebarFooterItem
+            icon="message"
+            label={language.t("settings.chatChannels.title")}
+            onSelect={() => openSettings("chat-channels")}
+          />
+          <SidebarFooterItem
             icon="help"
             label={language.t("sidebar.help")}
             onSelect={() => platform.openExternal("https://opencode.ai/desktop-feedback")}

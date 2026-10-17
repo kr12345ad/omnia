@@ -3,7 +3,7 @@ import { generateKeyPairSync } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createGChatTransport, toGChatMarkdown } from "./gchat"
+import { checkGChatApp, createGChatTransport, toGChatMarkdown } from "./gchat"
 import { ChatChannelsRuntime, type ChatMessage } from "./service"
 
 const keys = generateKeyPairSync("rsa", {
@@ -329,6 +329,91 @@ describe("the google chat webhook", () => {
       expect(runtime.describeOne("gchat")?.error).toContain("service-account")
     } finally {
       runtime.stop()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("the google chat app check", () => {
+  function stub(handler: (url: URL, request: Request) => Response) {
+    const api = Bun.serve({ port: 0, fetch: (request) => handler(new URL(request.url), request) })
+    return {
+      apiUrl: `http://127.0.0.1:${api.port}/v1`,
+      tokenUrl: `http://127.0.0.1:${api.port}/token`,
+      close: () => api.stop(true),
+    }
+  }
+
+  test("reports nothing when the app answers", async () => {
+    const server = stub((url) =>
+      url.pathname === "/token"
+        ? Response.json({ access_token: "token", expires_in: 3_600 })
+        : Response.json({ spaces: [] }),
+    )
+    try {
+      const problem = await checkGChatApp({ credentials: CREDENTIALS, apiUrl: server.apiUrl, tokenUrl: server.tokenUrl })
+      expect(problem).toBeUndefined()
+    } finally {
+      server.close()
+    }
+  })
+
+  test("names the missing console app when google has none", async () => {
+    const server = stub((url) =>
+      url.pathname === "/token"
+        ? Response.json({ access_token: "token", expires_in: 3_600 })
+        : // Google's own answer for a project whose Chat app was never configured.
+          Response.json(
+            {
+              error: {
+                code: 404,
+                message:
+                  "Google Chat app not found. To create a Chat app, you must turn on the Chat API and configure the app in the Google Cloud console.",
+                status: "NOT_FOUND",
+              },
+            },
+            { status: 404 },
+          ),
+    )
+    try {
+      const problem = await checkGChatApp({ credentials: CREDENTIALS, apiUrl: server.apiUrl, tokenUrl: server.tokenUrl })
+      expect(problem).toContain("no Chat app configured")
+      // The real prerequisite has to be in the message, not a bare status code.
+      expect(problem).toContain("Google Workspace")
+    } finally {
+      server.close()
+    }
+  })
+
+  test("surfaces a key google refuses", async () => {
+    const server = stub(() => Response.json({ error: "invalid_grant" }, { status: 400 }))
+    try {
+      const problem = await checkGChatApp({ credentials: CREDENTIALS, tokenUrl: server.tokenUrl })
+      expect(problem).toContain("rejected the service-account key")
+      expect(problem).toContain("400")
+    } finally {
+      server.close()
+    }
+  })
+
+  test("rejects credentials that are not a service account", async () => {
+    expect(await checkGChatApp({ credentials: "{}" })).toContain("service-account")
+  })
+
+  test("records the reason on the channel so the panel can show it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omnia-gchat-"))
+    const runtime = new ChatChannelsRuntime({ file: join(dir, "channels.json") })
+    try {
+      runtime.connect("gchat", { credentials: "{}", audience: "https://example.test/webhook" })
+      expect(runtime.describeOne("gchat")?.error).toBeUndefined()
+      runtime.setChannelCheck(async (platform) => (platform === "gchat" ? "configure the app" : undefined))
+      expect(await runtime.verify("gchat")).toBe("configure the app")
+      expect(runtime.describeOne("gchat")?.error).toBe("configure the app")
+      // Once the console is configured the stale reason goes away.
+      runtime.setChannelCheck(async () => undefined)
+      expect(await runtime.verify("gchat")).toBeUndefined()
+      expect(runtime.describeOne("gchat")?.error).toBeUndefined()
+    } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })

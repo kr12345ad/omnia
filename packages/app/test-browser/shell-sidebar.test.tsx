@@ -122,7 +122,14 @@ mock.module("@/context/permission", () => ({ usePermission: () => ({ autoRespond
 mock.module("@/context/global", () => ({
   useGlobal: () => ({ servers: { list: () => [] }, ensureServerCtx: () => ({ projects: { list: () => [] } }) }),
 }))
-mock.module("@/components/settings-dialog", () => ({ useSettingsDialog: () => () => undefined }))
+// A footer row opens a settings page rather than a dialog the test would have to
+// mount, so the page each row asks for is captured here.
+const openedSettings: Array<string | undefined> = []
+mock.module("@/components/settings-dialog", () => ({
+  useSettingsDialog: (defaultValue?: string) => () => {
+    openedSettings.push(defaultValue)
+  },
+}))
 mock.module("@opencode-ai/ui/context/dialog", () => ({
   useDialog: () => ({ show: () => undefined, close: () => undefined }),
 }))
@@ -190,5 +197,30 @@ describe("shell sidebar toggle", () => {
 
     expect(labels(container)[0]).toBe(en["command.session.new"])
     expect(labels(container)).not.toContain("Close Sidebar")
+  })
+})
+
+describe("shell sidebar footer", () => {
+  test("offers Settings, Chat Channels and Help, and Chat Channels opens its own page", async () => {
+    setOS("windows")
+    const container = await mount()
+    const footer = container.querySelector<HTMLElement>('[data-slot="shell-sidebar-footer"]')
+    expect(footer).not.toBeNull()
+    const rows = [...footer!.querySelectorAll<HTMLButtonElement>('[data-slot="shell-sidebar-action"]')]
+    expect(rows.map((row) => row.getAttribute("aria-label"))).toEqual([
+      en["sidebar.settings"],
+      en["settings.chatChannels.title"],
+      en["sidebar.help"],
+    ])
+    // A row draws a real glyph: an unknown icon name silently falls back to the
+    // plus icon, so an icon that does not exist still looks like an icon.
+    expect(rows[1]!.querySelector('[data-slot="shell-sidebar-icon"]')?.innerHTML).toContain(
+      "opencode-v2-icon-message",
+    )
+
+    openedSettings.length = 0
+    rows[1]!.click()
+    await settle()
+    expect(openedSettings).toEqual(["chat-channels"])
   })
 })

@@ -31,6 +31,7 @@ import { registerSpecialistIpcHandlers } from "./omnia/specialists"
 import { registerRunIpcHandlers } from "./omnia/runs"
 import { registerGitHubAuthIpcHandlers } from "./omnia/auth"
 import { registerComputerIpcHandlers } from "./omnia/computers"
+import { registerChatIpcHandlers } from "./omnia/chat"
 import { registerComputerUseIpcHandlers } from "./omnia/computer-use"
 import { registerRemoteAgentIpcHandlers } from "./omnia/remote-agent"
 
@@ -81,6 +82,7 @@ export function registerIpcHandlers(deps: Deps) {
   registerRunIpcHandlers()
   registerGitHubAuthIpcHandlers()
   registerComputerIpcHandlers()
+  registerChatIpcHandlers()
   registerComputerUseIpcHandlers()
   registerRemoteAgentIpcHandlers()
   const drafts = createDesktopDraftStore(join(app.getPath("userData"), "drafts.sqlite"))

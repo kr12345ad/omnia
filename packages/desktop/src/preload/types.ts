@@ -1,6 +1,7 @@
 import type { DesktopMenuAction } from "@opencode-ai/app/desktop-menu"
 import type { BrowserPanelPlatform, GitHubAuthPlatform, SpecialistsPlatform, RunsPlatform } from "@opencode-ai/app/context/platform"
 import type { ComputerPlatform } from "@opencode-ai/app/computers"
+import type { ChatPlatform } from "@opencode-ai/app/chat"
 import type { ComputerUsePlatform } from "@opencode-ai/app/computer-use"
 import type { WslServersPlatform } from "@opencode-ai/app/wsl/types"
 import type { UpdaterState } from "@opencode-ai/app/updater"
@@ -145,6 +146,7 @@ export type ElectronAPI = {
   runs: RunsPlatform
   auth: GitHubAuthPlatform
   computers: ComputerPlatform
+  chat: ChatPlatform
   computerUse: ComputerUsePlatform
   browserPanel: BrowserPanelPlatform
   killSidecar: () => Promise<void>

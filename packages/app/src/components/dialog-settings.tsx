@@ -15,6 +15,7 @@ import { SettingsSuperskills } from "./settings-superskills"
 import { SettingsMcpMarketplace } from "./settings-mcp-marketplace"
 import { SettingsMemory } from "./settings-memory"
 import { SettingsComputers } from "./settings-computers"
+import { SettingsChatChannels } from "./settings-chat-channels"
 import { SettingsComputerUse } from "./settings-computer-use"
 import { useLayout } from "@/context/layout"
 import { useTabs } from "@/context/tabs"
@@ -66,6 +67,10 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
                     <Tabs.Trigger value="account">
                       <Icon name="shield" />
                       {language.t("desktop.menu.account")}
+                    </Tabs.Trigger>
+                    <Tabs.Trigger value="chat-channels">
+                      <Icon name="comment" />
+                      {language.t("settings.chatChannels.title")}
                     </Tabs.Trigger>
                     <Tabs.Trigger value="shortcuts">
                       <Icon name="keyboard" />
@@ -130,6 +135,9 @@ export const DialogSettings: Component<{ defaultValue?: string }> = (props) => {
         </Tabs.Content>
         <Tabs.Content value="account" class="no-scrollbar">
           <SettingsAccount />
+        </Tabs.Content>
+        <Tabs.Content value="chat-channels" class="no-scrollbar">
+          <SettingsChatChannels />
         </Tabs.Content>
         <Tabs.Content value="shortcuts" class="no-scrollbar">
           <SettingsKeybinds />

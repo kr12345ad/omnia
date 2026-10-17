@@ -76,6 +76,7 @@ for (const [path, name] of [
   ["settings-memory", "SettingsMemory"],
   ["settings-computers", "SettingsComputers"],
   ["settings-computer-use", "SettingsComputerUse"],
+  ["settings-chat-channels", "SettingsChatChannels"],
   ["settings-v2/general", "SettingsGeneralV2"],
   ["settings-v2/providers", "SettingsProvidersV2"],
   ["settings-v2/models", "SettingsModelsV2"],
@@ -164,6 +165,15 @@ describe.skipIf(isServer)("Settings Account navigation", () => {
       expect(tab(container, "account").textContent).toBe(en["desktop.menu.account"])
       const tabs = [...container.querySelectorAll("[role=tab]")]
       expect(tabs.indexOf(tab(container, "account"))).toBe(tabs.indexOf(tab(container, "general")) + 1)
+      // Chat Channels lives directly below Account, in both dialogs.
+      expect(tab(container, "chat-channels").textContent).toBe(en["settings.chatChannels.title"])
+      expect(tabs.indexOf(tab(container, "chat-channels"))).toBe(tabs.indexOf(tab(container, "account")) + 1)
+    })
+
+    test(`${name} opens the Chat Channels page under Account`, async () => {
+      const container = await mount(() => createComponent(module!.DialogSettings, { defaultValue: "chat-channels" }))
+      expect(tab(container, "chat-channels").getAttribute("aria-selected")).toBe("true")
+      expect(container.querySelector('[data-test-panel="settings-chat-channels"]')).not.toBeNull()
     })
 
     test(`${name} lets the user navigate between General and Account`, async () => {

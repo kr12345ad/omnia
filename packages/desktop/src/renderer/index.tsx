@@ -316,6 +316,8 @@ const createPlatform = (windowState: DesktopWindowState): Platform => {
 
     computers: window.api.computers,
 
+    chat: window.api.chat,
+
     computerUse: window.api.computerUse,
 
     browserPanel: window.api.browserPanel,

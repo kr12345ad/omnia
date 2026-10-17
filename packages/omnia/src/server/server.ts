@@ -29,7 +29,8 @@ import {
 } from "../computer-use"
 import { GitHubAuth, defaultGitHubAuthFile } from "../auth/github"
 import { createDiscordTransport } from "../chat/discord"
-import { createGChatTransport } from "../chat/gchat"
+import { checkGChatApp, createGChatTransport } from "../chat/gchat"
+import { createSlackTransport } from "../chat/slack"
 import { conversationKeyFor, createChatAgentRunner } from "../chat/runner"
 import { ChatChannelsRuntime } from "../chat/service"
 import { ChatSessionStore } from "../chat/sessions"
@@ -324,6 +325,18 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
         log: (line) => console.log(`[chat:gchat] ${line}`),
       })
     }
+    // Slack posts each mention and DM to the webhook route; this side is the
+    // reply half, authenticated by the bot token of the installed app.
+    if (platform === "slack") {
+      const botToken = credentials.botToken
+      if (botToken === undefined || botToken.length === 0) return undefined
+      return createSlackTransport({
+        token: botToken,
+        onMessage,
+        onError,
+        log: (line) => console.log(`[chat:slack] ${line}`),
+      })
+    }
     if (platform !== "discord") return undefined
     const token = credentials.botToken
     if (token === undefined || token.length === 0) return undefined
@@ -335,6 +348,13 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       log: (line) => console.log(`[chat:discord] ${line}`),
     })
   })
+  // A Google Chat app exists only after it is configured in the console, and
+  // until then Google answers every call with "Chat app not found" and never
+  // delivers anything. Asking its API is the difference between a channel that
+  // is switched on and one that will actually answer.
+  chatChannels.setChannelCheck((platform, credentials) =>
+    platform === "gchat" ? checkGChatApp({ credentials: credentials.credentials ?? "" }) : Promise.resolve(undefined),
+  )
   const calibration = new CalibrationManager(options.now === undefined ? {} : { now: options.now })
   const auth = new GitHubAuth({
     events,

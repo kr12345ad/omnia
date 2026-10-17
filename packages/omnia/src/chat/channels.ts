@@ -67,19 +67,30 @@ function save(file: string, store: ChatChannelsStore): void {
 
 export class ChatChannelsService {
   private readonly file: string
-  private store: ChatChannelsStore
 
   constructor(options: { file?: string } = {}) {
     this.file = options.file ?? DEFAULT_FILE
-    this.store = load(this.file)
+  }
+
+  // Every read and write goes to the file, never to a copy held since boot.
+  // More than one Omnia process can share this file (the hosted control plane
+  // and a desktop instance), and a process that answers from memory it loaded
+  // hours ago overwrites every channel another one connected since -- silently
+  // deleting them on the next recorded message.
+  private channels(): readonly ChatChannelConfig[] {
+    return load(this.file).channels
+  }
+
+  private save(channels: readonly ChatChannelConfig[]): void {
+    save(this.file, { channels })
   }
 
   list(): readonly ChatChannelConfig[] {
-    return this.store.channels
+    return this.channels()
   }
 
   get(platform: string): ChatChannelConfig | undefined {
-    return this.store.channels.find((channel) => channel.platform === platform)
+    return this.channels().find((channel) => channel.platform === platform)
   }
 
   spec(platform: string): ChatPlatformSpec | undefined {
@@ -98,17 +109,16 @@ export class ChatChannelsService {
       connectedAt: now,
       messageCount: 0,
     }
-    const channels = this.store.channels.filter((channel) => channel.platform !== platform)
-    this.store = { channels: [...channels, next] }
-    save(this.file, this.store)
+    const others = this.channels().filter((channel) => channel.platform !== platform)
+    this.save([...others, next])
     return next
   }
 
   disconnect(platform: string): boolean {
-    const channels = this.store.channels.filter((channel) => channel.platform !== platform)
-    if (channels.length === this.store.channels.length) return false
-    this.store = { channels }
-    save(this.file, this.store)
+    const current = this.channels()
+    const channels = current.filter((channel) => channel.platform !== platform)
+    if (channels.length === current.length) return false
+    this.save(channels)
     return true
   }
 
@@ -116,9 +126,7 @@ export class ChatChannelsService {
     const channel = this.get(platform)
     if (channel === undefined) return undefined
     const next = { ...channel, enabled }
-    const channels = this.store.channels.map((item) => (item.platform === platform ? next : item))
-    this.store = { channels }
-    save(this.file, this.store)
+    this.save(this.channels().map((item) => (item.platform === platform ? next : item)))
     return next
   }
 
@@ -126,26 +134,20 @@ export class ChatChannelsService {
     const channel = this.get(platform)
     if (channel === undefined) return
     const next = { ...channel, lastMessageAt: Date.now(), messageCount: (channel.messageCount ?? 0) + 1 }
-    const channels = this.store.channels.map((item) => (item.platform === platform ? next : item))
-    this.store = { channels }
-    save(this.file, this.store)
+    this.save(this.channels().map((item) => (item.platform === platform ? next : item)))
   }
 
   setError(platform: string, error: string): void {
     const channel = this.get(platform)
     if (channel === undefined) return
     const next = { ...channel, error }
-    const channels = this.store.channels.map((item) => (item.platform === platform ? next : item))
-    this.store = { channels }
-    save(this.file, this.store)
+    this.save(this.channels().map((item) => (item.platform === platform ? next : item)))
   }
 
   clearError(platform: string): void {
     const channel = this.get(platform)
     if (channel === undefined) return
     const { error: _error, ...rest } = channel
-    const channels = this.store.channels.map((item) => (item.platform === platform ? rest : item))
-    this.store = { channels }
-    save(this.file, this.store)
+    this.save(this.channels().map((item) => (item.platform === platform ? rest : item)))
   }
 }
