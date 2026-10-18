@@ -87,6 +87,9 @@ export interface OmniaServerOptions {
   readonly githubClientId?: string
   readonly githubClientSecret?: string
   readonly githubRedirectUri?: string
+  readonly googleClientId?: string
+  readonly googleClientSecret?: string
+  readonly googleRedirectUri?: string
   readonly githubFetch?: typeof fetch
   readonly modelsDir?: string
   readonly modelDirs?: readonly string[]
@@ -298,9 +301,12 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
   // Chat channels answer on messaging platforms. The runtime owns the
   // connection table and the webhook receiver; a platform that has to be
   // dialled out to gets a transport only once an operator connects it.
-  const chatChannels = new ChatChannelsRuntime(
-    options.chatChannelsFile === undefined ? {} : { file: options.chatChannelsFile },
-  )
+  const chatChannels = new ChatChannelsRuntime({
+    ...(options.chatChannelsFile === undefined ? {} : { file: options.chatChannelsFile }),
+    // The channel binding is signed with the server's own token, so editing the
+    // channel file to point at another account is refused instead of obeyed.
+    secret: token,
+  })
   // One agent session per conversation, remembered across restarts so a
   // channel keeps its context when the control plane comes back.
   const chatSessions = new ChatSessionStore(
@@ -363,9 +369,15 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     ...(options.githubClientId === undefined ? {} : { clientId: options.githubClientId }),
     ...(options.githubClientSecret === undefined ? {} : { clientSecret: options.githubClientSecret }),
     ...(options.githubRedirectUri === undefined ? {} : { redirectUri: options.githubRedirectUri }),
+    ...(options.googleClientId === undefined ? {} : { googleClientId: options.googleClientId }),
+    ...(options.googleClientSecret === undefined ? {} : { googleClientSecret: options.googleClientSecret }),
+    ...(options.googleRedirectUri === undefined ? {} : { googleRedirectUri: options.googleRedirectUri }),
     ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
     ...(options.githubFetch === undefined ? {} : { fetchImpl: options.githubFetch }),
   })
+  // Channels answer as the account that connected them. A later sign-in with a
+  // different account pauses every channel instead of running under it.
+  chatChannels.setIdentity(() => auth.status().profile)
   const computerUseCatalog = createComputerUseCatalog()
   const localModels = new LocalModelManager({
     catalog: computerUseCatalog,
@@ -844,7 +856,12 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
         // Limit caller-controlled pathname size; query strings never enter logs.
         const bearer = request.headers.authorization?.replace(/^Bearer /, "")
         const profile = bearer === undefined ? undefined : auth.clientTokenProfile(bearer)
-        const actor = profile !== undefined ? `github:${profile.id}` : bearer === token ? "deployment-operator" : "remote-runtime"
+        const actor =
+          profile !== undefined
+            ? `${profile.provider ?? "github"}:${profile.id}`
+            : bearer === token
+              ? "deployment-operator"
+              : "remote-runtime"
         const admission = { at: now(), serverId, method: request.method, route: route.slice(0, 256), address, actor }
         try {
           audit.append({ ...admission, type: "request.received" })

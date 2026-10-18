@@ -10,13 +10,16 @@ import {
   renderGitHubCallbackPage,
   type GitHubAuthOptions,
 } from "./github"
+import { GOOGLE_OAUTH_TOKEN, GOOGLE_OAUTH_USERINFO } from "./google"
 
 const dirs: string[] = []
 const redirect = "https://control.example/omnia/v1/auth/github/callback"
+const googleRedirect = "https://control.example/omnia/v1/auth/google/callback"
 
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
   delete process.env.OMNIA_GITHUB_REDIRECT_URI
+  delete process.env.OMNIA_GOOGLE_REDIRECT_URI
 })
 
 function tempFile(): string {
@@ -25,7 +28,7 @@ function tempFile(): string {
   return join(dir, "auth.json")
 }
 
-function fakeFetch(): typeof fetch {
+function fakeFetch(emails: { github?: string; google?: string } = {}): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
     if (url === GITHUB_OAUTH_TOKEN) {
@@ -43,7 +46,23 @@ function fakeFetch(): typeof fetch {
       })
     }
     if (url === GITHUB_API_EMAILS) {
-      return Response.json([{ email: "octocat@github.com", primary: true, verified: true }])
+      return Response.json([{ email: emails.github ?? "octocat@github.com", primary: true, verified: true }])
+    }
+    if (url === GOOGLE_OAUTH_TOKEN) {
+      const body = String(init?.body ?? "")
+      if (!body.includes("code_verifier=") || !body.includes("grant_type=authorization_code")) {
+        return Response.json({ error: "missing_code_verifier" })
+      }
+      return Response.json({ access_token: "ya29.test_token" })
+    }
+    if (url === GOOGLE_OAUTH_USERINFO) {
+      return Response.json({
+        sub: "107834588031326048827",
+        email: emails.google ?? "octocat@gmail.com",
+        email_verified: true,
+        name: "The Octocat",
+        picture: "https://lh3.example/octocat",
+      })
     }
     return fetch(input, init)
   }) as typeof fetch
@@ -56,6 +75,9 @@ function configured(overrides: Partial<GitHubAuthOptions> = {}): GitHubAuth {
     clientId: "test-client-id",
     clientSecret: "test-client-secret",
     redirectUri: redirect,
+    googleClientId: "test-google-client-id",
+    googleClientSecret: "test-google-client-secret",
+    googleRedirectUri: googleRedirect,
     ...overrides,
   })
 }
@@ -224,6 +246,157 @@ describe("github auth public callback", () => {
     expect(restored.status().authenticated).toBe(true)
     expect(restored.status().profile?.login).toBe("octocat")
     expect(restored.status().oauthClientConfigured).toBe(true)
+  })
+})
+
+describe("google auth", () => {
+  test("builds a Google authorize URL with PKCE and the account picker", async () => {
+    const auth = configured()
+    const started = await auth.start("browser", "google")
+    const url = new URL(started.authorizeUrl)
+    expect(url.origin + url.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth")
+    expect(url.searchParams.get("client_id")).toBe("test-google-client-id")
+    expect(url.searchParams.get("redirect_uri")).toBe(googleRedirect)
+    expect(url.searchParams.get("scope")).toBe("openid email profile")
+    expect(url.searchParams.get("response_type")).toBe("code")
+    expect(url.searchParams.get("prompt")).toBe("select_account")
+    expect(url.searchParams.get("code_challenge_method")).toBe("S256")
+    expect(url.searchParams.get("code_challenge")?.length).toBeGreaterThan(20)
+    expect(url.searchParams.get("state")).toBe(started.state)
+    expect(started.redirectUri).toBe(googleRedirect)
+    expect(started.status.providers).toEqual({ github: true, google: true })
+  })
+
+  test("defaults the Google redirect to the public URL callback path", async () => {
+    const auth = configured({ googleRedirectUri: undefined, publicUrl: "https://control.example/omnia/" })
+    expect(auth.redirectUri("google")).toBe(googleRedirect)
+    const started = await auth.start("browser", "google")
+    expect(started.redirectUri).toBe(googleRedirect)
+  })
+
+  test("honors OMNIA_GOOGLE_REDIRECT_URI when no option is set", async () => {
+    process.env.OMNIA_GOOGLE_REDIRECT_URI = googleRedirect
+    const auth = configured({ googleRedirectUri: undefined })
+    expect(auth.redirectUri("google")).toBe(googleRedirect)
+  })
+
+  test("requires a configured Google client", async () => {
+    const auth = configured({ googleClientId: "" })
+    await expect(auth.start("browser", "google")).rejects.toThrow(/Google OAuth is not configured/)
+    expect(auth.status().providers).toEqual({ github: true, google: false })
+  })
+
+  test("completes a Google flow with the subject as the profile id", async () => {
+    const file = tempFile()
+    const auth = configured({ file })
+    const started = await auth.start("browser", "google")
+    const result = await auth.completeCallback(started.state, "test-code")
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.profile.id).toBe("107834588031326048827")
+    expect(result.profile.provider).toBe("google")
+    expect(result.profile.login).toBe("octocat")
+    expect(result.profile.email).toBe("octocat@gmail.com")
+    expect(result.profile.avatarUrl).toBe("https://lh3.example/octocat")
+
+    // A string id must survive a restart: it is the key entitlements bill to.
+    const restored = new GitHubAuth({ file })
+    expect(restored.status().profile?.id).toBe("107834588031326048827")
+    expect(restored.status().profile?.provider).toBe("google")
+    expect(restored.clientTokenProfile(result.clientToken)?.id).toBe("107834588031326048827")
+  })
+
+  test("refuses Google when the email is already connected to GitHub", async () => {
+    const file = tempFile()
+    const auth = configured({ file })
+    const github = await auth.start("browser", "github")
+    expect((await auth.completeCallback(github.state, "test-code")).ok).toBe(true)
+
+    // The Google account shares the address the GitHub account already owns.
+    const sharing = configured({ file, fetchImpl: fakeFetch({ google: "octocat@github.com" }) })
+    const google = await sharing.start("browser", "google")
+    const result = await sharing.completeCallback(google.state, "test-code")
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.status).toBe(409)
+    expect(result.message).toContain("already connected to a GitHub account")
+    // Nothing replaced the GitHub session, so the plan and runs stay attached
+    // to the profile id that GitHub signed in with.
+    expect(sharing.status().profile?.provider).toBe("github")
+    expect(sharing.status().profile?.id).toBe(583231)
+    // The app is told to stop waiting instead of polling until it times out.
+    expect(sharing.poll(google.state)).toEqual({ authenticated: false, failure: result.message })
+  })
+
+  test("refuses GitHub when the email is already connected to Google", async () => {
+    const file = tempFile()
+    const auth = configured({ file })
+    const google = await auth.start("browser", "google")
+    expect((await auth.completeCallback(google.state, "test-code")).ok).toBe(true)
+
+    const sharing = configured({ file, fetchImpl: fakeFetch({ github: "octocat@gmail.com" }) })
+    const github = await sharing.start("browser", "github")
+    const result = await sharing.completeCallback(github.state, "test-code")
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.status).toBe(409)
+    expect(result.message).toContain("already connected to a Google account")
+    expect(sharing.status().profile?.provider).toBe("google")
+  })
+
+  test("keeps refusing after sign-out", async () => {
+    const file = tempFile()
+    const auth = configured({ file })
+    const github = await auth.start("browser", "github")
+    expect((await auth.completeCallback(github.state, "test-code")).ok).toBe(true)
+    await auth.logout()
+    expect(auth.status().authenticated).toBe(false)
+
+    // Signing out clears the session but not which provider owns the address.
+    const sharing = configured({ file, fetchImpl: fakeFetch({ google: "octocat@github.com" }) })
+    const google = await sharing.start("browser", "google")
+    const result = await sharing.completeCallback(google.state, "test-code")
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.status).toBe(409)
+    expect(sharing.status().authenticated).toBe(false)
+  })
+
+  test("protects an email stored before the ledger existed", async () => {
+    const file = tempFile()
+    writeFileSync(
+      file,
+      JSON.stringify({
+        profile: { id: 583231, login: "octocat", provider: "github", email: "Octocat@GitHub.com" },
+        token: "gho_old_token",
+        signedInAt: 1,
+      }),
+    )
+    // Matching is case-insensitive: providers do not agree on casing.
+    const sharing = configured({ file, fetchImpl: fakeFetch({ google: "octocat@github.com" }) })
+    const google = await sharing.start("browser", "google")
+    const result = await sharing.completeCallback(google.state, "test-code")
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.status).toBe(409)
+  })
+
+  test("allows the same provider to sign in again", async () => {
+    const file = tempFile()
+    const auth = configured({ file })
+    const first = await auth.start("browser", "github")
+    expect((await auth.completeCallback(first.state, "test-code")).ok).toBe(true)
+    const second = await auth.start("browser", "github")
+    expect((await auth.completeCallback(second.state, "test-code")).ok).toBe(true)
+    expect(auth.status().profile?.provider).toBe("github")
+  })
+
+  test("a later GitHub sign-in replaces the Google session", async () => {
+    const auth = configured()
+    const google = await auth.start("browser", "google")
+    await auth.completeCallback(google.state, "test-code")
+    const github = await auth.start("browser", "github")
+    await auth.completeCallback(github.state, "test-code")
+    expect(auth.status().profile?.provider).toBe("github")
+    expect(auth.status().profile?.login).toBe("octocat")
   })
 })
 

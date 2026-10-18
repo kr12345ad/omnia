@@ -59,6 +59,7 @@ test("first launch blocks on the required GitHub sign-in gate", async () => {
     await expect(gate).toBeVisible()
     await expect(page.getByText("Sign in to Omnia")).toBeVisible()
     await expect(page.getByText("Continue with GitHub")).toBeVisible()
+    await expect(page.getByText("Continue with Google")).toBeVisible()
     // The app UI must not be usable before sign-in: the gate is the only root.
     await expect(page.locator("main")).toHaveCount(0)
     mkdirSync("artifacts", { recursive: true })

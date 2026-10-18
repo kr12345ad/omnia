@@ -78,6 +78,7 @@ const state = {
   status: { authenticated: false } as TestStatus,
   signInResult: { authenticated: true, profile: { id: 1, login: "octocat" } } as TestStatus,
   signInError: undefined as Error | undefined,
+  signInProviders: [] as (string | undefined)[],
 }
 
 const platform = {
@@ -87,7 +88,8 @@ const platform = {
   notify: async () => undefined,
   auth: {
     status: async () => state.status,
-    signIn: async () => {
+    signIn: async (provider?: string) => {
+      state.signInProviders.push(provider)
       if (state.signInError !== undefined) throw state.signInError
       state.status = state.signInResult
       return state.status
@@ -135,6 +137,7 @@ async function settle() {
 beforeEach(() => {
   state.status = { authenticated: false }
   state.signInError = undefined
+  state.signInProviders = []
 })
 
 afterAll(() => {
@@ -151,7 +154,8 @@ describe.skipIf(isServer)("first-run gate", () => {
     expect(gate).not.toBeNull()
     expect(gate!.textContent).toContain("ui.github.signInTitle")
     expect(gate!.textContent).toContain("ui.github.continue")
-    expect(app.container.querySelectorAll("button").length).toBe(1)
+    expect(gate!.textContent).toContain("ui.google.continue")
+    expect(app.container.querySelectorAll("button").length).toBe(2)
     app.unmount()
   })
 
@@ -169,11 +173,12 @@ describe.skipIf(isServer)("first-run gate", () => {
     const app = mountGate()
     await settle()
 
-    const button = app.container.querySelector("button")
-    expect(button).not.toBeNull()
-    button!.click()
+    const buttons = app.container.querySelectorAll("button")
+    expect(buttons.length).toBe(2)
+    buttons[1]!.click()
     await settle()
 
+    expect(state.signInProviders).toEqual(["google"])
     expect(state.status.authenticated).toBe(true)
     expect(app.container.querySelector("[data-testid=app]")).not.toBeNull()
     expect(app.container.querySelector("[data-component=first-run-gate]")).toBeNull()
@@ -185,7 +190,7 @@ describe.skipIf(isServer)("first-run gate", () => {
     const app = mountGate()
     await settle()
 
-    app.container.querySelector("button")!.click()
+    app.container.querySelectorAll("button")[0]!.click()
     await settle()
 
     expect(app.container.querySelector("[data-testid=app]")).toBeNull()

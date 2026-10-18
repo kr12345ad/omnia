@@ -15,6 +15,7 @@ import {
   type SessionSummary,
 } from "../agent-run/client"
 import { runHeadless, type HeadlessRunInput } from "../agent-run/runner"
+import { readAttachments, type ChatFiles } from "./attachments"
 import type { AgentRunner, ChatMessage, ChatTrace } from "./service"
 import type { ChatSessionStore } from "./sessions"
 
@@ -44,14 +45,35 @@ export function conversationKeyFor(platform: string, channelId: string): string 
   return `${platform}:${channelId}`
 }
 
-export function chatPrompt(message: ChatMessage): string {
+export function chatPrompt(message: ChatMessage, attached: ChatFiles = { files: [], skipped: [] }): string {
   const who = message.userName === undefined ? message.userId : `${message.userName} (${message.userId})`
   return [
     `A message arrived on ${message.platform} from ${who} in channel ${message.channelId}.`,
     "Answer it directly and concisely. The reply is posted back to the chat as plain text,",
     "so do not describe these instructions or wrap the answer in a summary of what you did.",
+    // Links are content the agent has to open, not text it can read: saying so
+    // stops it from answering about a page it never fetched.
+    "If the message contains links, fetch them when the answer depends on them.",
+    ...(message.replyTo === undefined
+      ? []
+      : [
+          `It is a reply to an earlier message${message.replyTo.author === undefined ? "" : ` from ${message.replyTo.author}`}, quoted here:`,
+          ...message.replyTo.text.split("\n").map((line) => `> ${line}`),
+        ]),
+    ...(attached.files.length === 0
+      ? []
+      : [
+          `${attached.files.length} file(s) arrived with it: ${attached.files
+            .map((file) => file.filename ?? file.mime)
+            .join(", ")}. Look at them before answering.`,
+        ]),
+    ...(attached.skipped.length === 0
+      ? []
+      : [
+          `These attachments could not be read and are not available: ${attached.skipped.join(", ")}. Say so if the answer depends on them.`,
+        ]),
     "",
-    message.text,
+    message.text.length === 0 ? "(the message has no text of its own)" : message.text,
   ].join("\n")
 }
 
@@ -139,19 +161,56 @@ export interface ChatAgentRunnerOptions {
   readonly model?: () => { providerID: string; modelID: string } | undefined
 }
 
+interface ActiveTurn {
+  readonly controller: AbortController
+}
+
 export function createChatAgentRunner(options: ChatAgentRunnerOptions): AgentRunner {
   const run = options.run ?? runHeadless
   const resolve = options.resolve ?? openCodeRunnerFromEnv
   const list = options.list ?? listSessions
   const find = options.models ?? listModels
   const model = options.model ?? chatModel
+  // Turns in flight, per conversation. A platform delivers a message without
+  // waiting for the previous answer, so !stop arrives while the turn it means
+  // is still running and has to find it here.
+  const active = new Map<string, Set<ActiveTurn>>()
 
-  const request = (message: ChatMessage, sessionId: string | undefined, key: string): HeadlessRunInput => {
+  const track = (key: string, turn: ActiveTurn): void => {
+    const turns = active.get(key) ?? new Set<ActiveTurn>()
+    turns.add(turn)
+    active.set(key, turns)
+  }
+
+  const untrack = (key: string, turn: ActiveTurn): void => {
+    const turns = active.get(key)
+    if (turns === undefined) return
+    turns.delete(turn)
+    if (turns.size === 0) active.delete(key)
+  }
+
+  /** Aborting the turn ends the provider request, not just this poll loop. */
+  const stop = (key: string): string => {
+    const turns = [...(active.get(key) ?? [])]
+    if (turns.length === 0) return "Nothing is running in this channel right now."
+    turns.forEach((turn) => turn.controller.abort())
+    return turns.length === 1
+      ? "Stopping the turn running in this channel."
+      : `Stopping ${turns.length} turns running in this channel.`
+  }
+
+  const request = (
+    message: ChatMessage,
+    sessionId: string | undefined,
+    key: string,
+    attached: ChatFiles,
+  ): HeadlessRunInput => {
     // A model chosen with /models wins over the environment default: it is this
     // conversation's own answer to "use this one instead".
     const chosen = options.sessions.getModel(key) ?? model()
     return {
-      prompt: chatPrompt(message),
+      prompt: chatPrompt(message, attached),
+      ...(attached.files.length === 0 ? {} : { files: attached.files }),
       timeoutMs: CHAT_TIMEOUT_MS,
       ...(sessionId === undefined
         ? { title: `Chat · ${message.platform} · ${message.channelId}`.slice(0, 120) }
@@ -162,6 +221,7 @@ export function createChatAgentRunner(options: ChatAgentRunnerOptions): AgentRun
 
   const reply = (result: Awaited<ReturnType<typeof runHeadless>>): string => {
     if (!result.ok) {
+      if (result.interrupted === true) return "Stopped."
       if (result.timedOut) return "That took longer than Omnia's chat budget, so the run was stopped."
       return `Omnia could not answer that one right now: ${result.error}`.slice(0, 300)
     }
@@ -172,13 +232,19 @@ export function createChatAgentRunner(options: ChatAgentRunnerOptions): AgentRun
   return async (message, trace) => {
     const key = conversationKey(message)
     const command = parseCommand(message.text)
-    if (command !== undefined) return runCommand(command, key, { sessions: options.sessions, resolve, list, find })
+    if (command !== undefined)
+      return runCommand(command, key, { sessions: options.sessions, resolve, list, find, stop })
 
     const config = resolve()
     if (config === undefined) {
       return "Omnia is connected, but this control plane has no headless executor configured, so there is no agent to answer with."
     }
+    // Downloads happen here, before the turn exists: a file that cannot be
+    // read is named in the prompt rather than failing the answer.
+    const attached = await readAttachments(message.attachments)
     const bound = options.sessions.get(key)
+    const turn: ActiveTurn = { controller: new AbortController() }
+    track(key, turn)
     const started = Date.now()
     let latest: readonly unknown[] = []
     // Progress is scaffolding: a platform whose trace edit fails must never
@@ -195,37 +261,49 @@ export function createChatAgentRunner(options: ChatAgentRunnerOptions): AgentRun
     const onProgress = trace === undefined ? undefined : publish
     const ticker = trace === undefined ? undefined : setInterval(() => publish(), TRACE_TICK_MS)
 
+    const live = {
+      signal: turn.controller.signal,
+      ...(onProgress === undefined ? {} : { onProgress }),
+    }
     let result: Awaited<ReturnType<typeof runHeadless>>
     try {
-      result = await run(config, { ...request(message, bound, key), ...(onProgress === undefined ? {} : { onProgress }) })
+      result = await run(config, { ...request(message, bound, key, attached), ...live })
     } catch (error) {
       // A bound session that was deleted or archived answers 404. The binding is
       // stale, not the channel: forget it and open a fresh session once.
       if (bound !== undefined && isMissingSession(error)) {
         options.sessions.clear(key)
-        const retry = await run(config, { ...request(message, undefined, key), ...(onProgress === undefined ? {} : { onProgress }) })
+        const retry = await run(config, { ...request(message, undefined, key, attached), ...live })
         if (retry.ok) options.sessions.bind(key, retry.sessionId)
         return reply(retry)
       }
-      return `Omnia could not answer that one right now: ${error instanceof Error ? error.message : String(error)}`.slice(0, 300)
+      return `Omnia could not answer that one right now: ${error instanceof Error ? error.message : String(error)}`.slice(
+        0,
+        300,
+      )
     } finally {
       if (ticker !== undefined) clearInterval(ticker)
+      untrack(key, turn)
     }
-
-    if (result.ok) options.sessions.bind(key, result.sessionId)
+    // An interrupted turn still has a session worth continuing: the next
+    // message resumes there rather than starting over from nothing.
+    if (result.ok || result.interrupted === true) options.sessions.bind(key, result.sessionId)
     return reply(result)
   }
 }
 
 const HELP = [
+  "/stop — interrupt the turn running in this channel (!stop also works)",
   "/new — start a fresh session in this channel",
   "/session — show which session this channel continues",
   "/sessions — list the most recent sessions",
   "/resume <id> — continue an existing session here",
   "!model — list models, or switch this channel's model (/models also works)",
+  "!model search <text> [--free|--paid] — find models by id or name",
 ].join("\n")
 
 const MODEL_LIST_LIMIT = 20
+const MODEL_SEARCH_LIMIT = 25
 
 interface Command {
   readonly name: string
@@ -253,9 +331,13 @@ async function runCommand(
     resolve: () => OpenCodeRunnerConfig | undefined
     list: typeof listSessions
     find: typeof listModels
+    stop: (key: string) => string
   },
 ): Promise<string> {
   if (command.name === "help") return HELP
+  // Stopping is conversation state too: it must answer while another turn in
+  // this channel is still running, which is exactly when a model turn would not.
+  if (command.name === "stop" || command.name === "abort" || command.name === "cancel") return tools.stop(key)
   // Switching models is conversation state, not a question: answering it spends
   // no turn and takes effect on the next message.
   if (command.name === "models" || command.name === "model") return runModels(command, key, tools)
@@ -274,7 +356,8 @@ async function runCommand(
   }
 
   const config = tools.resolve()
-  if (config === undefined) return "This control plane has no headless executor configured, so there are no sessions to list."
+  if (config === undefined)
+    return "This control plane has no headless executor configured, so there are no sessions to list."
 
   if (command.argument === undefined) {
     const listed = await tools.list(config).catch(() => [] as SessionSummary[])
@@ -311,7 +394,8 @@ async function runModels(
   },
 ): Promise<string> {
   const config = tools.resolve()
-  if (config === undefined) return "This control plane has no headless executor configured, so there are no models to offer."
+  if (config === undefined)
+    return "This control plane has no headless executor configured, so there are no models to offer."
   // Paid models are numbered first and free ones last, and the SAME order is
   // used for /model <n>, so a number means one model.
   const listed = orderModels(await tools.find(config).catch(() => [] as ModelSummary[]))
@@ -319,6 +403,11 @@ async function runModels(
   const chosen = tools.sessions.getModel(key)
   const argument = command.argument?.trim().toLowerCase()
   if (argument === undefined || argument === "list" || argument === "ls") return describeModels(listed, chosen)
+  // Search runs before the id and index forms: "search" is neither a number nor
+  // a model id, and a query may contain words the matcher would otherwise read
+  // as an exact id.
+  const search = parseModelSearch(command.argument)
+  if (search !== undefined) return describeModelSearch(listed, search, chosen)
   if (argument === "default" || argument === "auto" || argument === "reset") {
     return tools.sessions.clearModel(key)
       ? "This channel follows the server's default model again."
@@ -358,18 +447,23 @@ function orderModels(listed: readonly ModelSummary[]): ModelSummary[] {
   return [...listed.filter((model) => model.free !== true), ...listed.filter((model) => model.free === true)]
 }
 
-function describeModels(listed: readonly ModelSummary[], chosen: { providerID: string; modelID: string } | undefined): string {
+function describeModels(
+  listed: readonly ModelSummary[],
+  chosen: { providerID: string; modelID: string } | undefined,
+): string {
   const position = (model: ModelSummary) => listed.indexOf(model) + 1
   const line = (model: ModelSummary) => {
     const current = chosen !== undefined && chosen.providerID === model.providerID && chosen.modelID === model.modelID
-    return `${position(model)}. ${label(model)}${marker(model)}${current ? " ← current" : ""}`
+    return `${position(model)}. ${label(model, current)}${marker(model)}${current ? " ← current" : ""}`
   }
   const paid = listed.filter((model) => model.free !== true)
   const free = listed.filter((model) => model.free === true)
   return [
     `Current model: ${chosen === undefined ? "this server's default" : label(chosen)}`,
     ...paid.slice(0, MODEL_LIST_LIMIT).map(line),
-    ...(paid.length > MODEL_LIST_LIMIT ? [`…and ${paid.length - MODEL_LIST_LIMIT} more paid models (use !model provider/model).`] : []),
+    ...(paid.length > MODEL_LIST_LIMIT
+      ? [`…and ${paid.length - MODEL_LIST_LIMIT} more paid models (use !model provider/model).`]
+      : []),
     ...(free.length === 0 ? [] : ["", "Free models (rate limited):", ...free.map(line)]),
     "",
     ...(free.length === 0
@@ -379,9 +473,91 @@ function describeModels(listed: readonly ModelSummary[], chosen: { providerID: s
   ].join("\n")
 }
 
-function label(model: { providerID: string; modelID: string; name?: string }): string {
+interface ModelSearch {
+  readonly query: string
+  /** Restrict to one price class; absent lists both. */
+  readonly filter?: "free" | "paid"
+  /** Set when the flags cannot be honoured, explained instead of searched. */
+  readonly problem?: string
+}
+
+/**
+ * `!model search <text> [--free|--paid]`. The query may be quoted so an id with
+ * spaces survives, and the flags may come before or after the words. Anything
+ * that is not the `search` subcommand is left to the switch and list forms.
+ */
+function parseModelSearch(argument: string | undefined): ModelSearch | undefined {
+  if (argument === undefined) return undefined
+  const words = argument.match(/"[^"]*"|'[^']*'|\S+/g) ?? []
+  if ((words[0] ?? "").toLowerCase() !== "search") return undefined
+  const rest = words.slice(1)
+  const flags = rest.filter((word) => word.startsWith("--")).map((word) => word.slice(2).toLowerCase())
+  const unknown = flags.find((flag) => flag !== "free" && flag !== "paid")
+  if (unknown !== undefined) return { query: "", problem: `Unknown flag --${unknown}. Use --free or --paid.` }
+  if (flags.includes("free") && flags.includes("paid")) {
+    return { query: "", problem: "Choose one of --free or --paid, not both." }
+  }
+  const query = rest
+    .filter((word) => !word.startsWith("--"))
+    .map((word) => word.replace(/^["']|["']$/g, ""))
+    .join(" ")
+    .trim()
+  return {
+    query,
+    ...(flags.includes("free")
+      ? { filter: "free" as const }
+      : flags.includes("paid")
+        ? { filter: "paid" as const }
+        : {}),
+  }
+}
+
+function describeModelSearch(
+  listed: readonly ModelSummary[],
+  search: ModelSearch,
+  chosen: { providerID: string; modelID: string } | undefined,
+): string {
+  if (search.problem !== undefined) return search.problem
+  const wanted = search.query.toLowerCase()
+  const matches = listed.filter((model) => {
+    if (search.filter === "free" && model.free !== true) return false
+    if (search.filter === "paid" && model.free === true) return false
+    if (wanted.length === 0) return true
+    const name = model.name?.toLowerCase() ?? ""
+    return `${model.providerID}/${model.modelID}`.toLowerCase().includes(wanted) || name.includes(wanted)
+  })
+  const scope = search.filter === undefined ? "" : `${search.filter} `
+  const subject = search.query.length === 0 ? "" : ` matching "${search.query}"`
+  if (matches.length === 0) {
+    return `No ${scope}model matches${subject}. !model lists everything this server offers.`
+  }
+  // The number is the position in the same ordered list !model <number> picks
+  // from, so a search result can be selected exactly as it is printed.
+  const position = (model: ModelSummary) => listed.indexOf(model) + 1
+  return [
+    `${matches.length} ${scope}model${matches.length === 1 ? "" : "s"}${subject}:`,
+    ...matches.slice(0, MODEL_SEARCH_LIMIT).map((model) => {
+      const current = chosen !== undefined && chosen.providerID === model.providerID && chosen.modelID === model.modelID
+      return `${position(model)}. ${label(model, current)} · ${model.free === true ? "free" : "paid"}${current ? " ← current" : ""}`
+    }),
+    ...(matches.length > MODEL_SEARCH_LIMIT
+      ? [`…and ${matches.length - MODEL_SEARCH_LIMIT} more. Narrow the search.`]
+      : []),
+    "",
+    "Switch with !model <number> or !model <provider/model>.",
+  ].join("\n")
+}
+
+/**
+ * `**id**` is bold in Discord and in Chat's Markdown mode, and Slack's
+ * mrkdwn rewrite turns it into `*id*`. Bolding the id -- not the descriptive
+ * name -- is what makes the model a channel already answers with stand out in
+ * a list of near-identical ids.
+ */
+function label(model: { providerID: string; modelID: string; name?: string }, bold = false): string {
   const id = `${model.providerID}/${model.modelID}`
-  return model.name === undefined ? id : `${id} — ${model.name}`
+  const text = bold ? `**${id}**` : id
+  return model.name === undefined ? text : `${text} — ${model.name}`
 }
 
 function marker(model: ModelSummary): string {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ModelSummary, OpenCodeRunnerConfig, SessionSummary } from "../agent-run/client"
 import type { HeadlessRunInput, HeadlessRunResult } from "../agent-run/runner"
+import { CHAT_PLATFORMS } from "./platforms"
 import { chatPrompt, conversationKey, createChatAgentRunner, renderTrace } from "./runner"
 import type { ChatMessage } from "./service"
 import { ChatSessionStore } from "./sessions"
@@ -56,6 +57,16 @@ describe("the chat prompt", () => {
     expect(prompt).toContain("krishnaa")
     expect(prompt).toContain("C1")
     expect(prompt.endsWith("what broke the deploy?")).toBe(true)
+  })
+
+  test("quotes the message a reply answers so the question has a subject", () => {
+    const prompt = chatPrompt({
+      ...message("what about the tests?"),
+      replyTo: { author: "omnia", text: "The deploy broke on the migration step." },
+    })
+    expect(prompt).toContain("It is a reply to an earlier message from omnia")
+    expect(prompt).toContain("> The deploy broke on the migration step.")
+    expect(prompt.endsWith("what about the tests?")).toBe(true)
   })
 
   test("a conversation is one per channel", () => {
@@ -237,7 +248,8 @@ describe("switching models from chat", () => {
       sessions.setModel("discord:C1", { providerID: "anthropic", modelID: "claude-sonnet-4" })
       const reply = await runner(message("/models"))
       expect(reply).toContain("1. opencode-go/deepseek-v4.1-flash — DeepSeek V4.1 Flash")
-      expect(reply).toContain("2. anthropic/claude-sonnet-4 — Claude Sonnet 4 ← current")
+      // The current model's id is bold, so the marker is readable at a glance.
+      expect(reply).toContain("2. **anthropic/claude-sonnet-4** — Claude Sonnet 4 ← current")
       expect(inputs).toHaveLength(0)
     } finally {
       cleanup()
@@ -351,6 +363,94 @@ describe("switching models from chat", () => {
     }
   })
 
+  test("!model search finds models by id or name and tags each one free or paid", async () => {
+    const catalog: ModelSummary[] = [
+      { providerID: "opencode-go", modelID: "longcat-2.5-preview-free", name: "LongCat 2.5 Preview Free", free: true },
+      { providerID: "opencode-go", modelID: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+      { providerID: "opencode", modelID: "big-pickle", name: "Big Pickle", free: true },
+    ]
+    const { runner, inputs, cleanup } = harness(() => answer("ses_1"), [], catalog)
+    try {
+      const reply = await runner(message('!model search "longcat"'))
+      expect(reply).toContain('1 model matching "longcat"')
+      // Paid models are numbered first, so this result is number 2 in the same
+      // list !model <number> picks from.
+      expect(reply).toContain("2. opencode-go/longcat-2.5-preview-free — LongCat 2.5 Preview Free · free")
+      // A search is an answer, not a turn.
+      expect(inputs).toHaveLength(0)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("a search bolds the model this channel already answers with and keeps ← current", async () => {
+    const catalog: ModelSummary[] = [
+      { providerID: "opencode-go", modelID: "beam-free", name: "Beam Free", free: true },
+      { providerID: "opencode-go", modelID: "beam-pro", name: "Beam Pro" },
+    ]
+    const { runner, sessions, cleanup } = harness(() => answer("ses_1"), [], catalog)
+    try {
+      sessions.setModel("discord:C1", { providerID: "opencode-go", modelID: "beam-free" })
+      const reply = await runner(message("!model search beam"))
+      expect(reply).toContain("**opencode-go/beam-free** — Beam Free · free ← current")
+      // A model that is not selected stays plain.
+      expect(reply).toContain("opencode-go/beam-pro — Beam Pro · paid")
+      expect(reply).not.toContain("**opencode-go/beam-pro**")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("search filters by --free and --paid, and names the price of every match", async () => {
+    const catalog: ModelSummary[] = [
+      { providerID: "opencode-go", modelID: "longcat-2.5-preview-free", name: "LongCat 2.5 Preview Free", free: true },
+      { providerID: "opencode-go", modelID: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+      { providerID: "opencode", modelID: "big-pickle", name: "Big Pickle", free: true },
+    ]
+    const { runner, cleanup } = harness(() => answer("ses_1"), [], catalog)
+    try {
+      const free = await runner(message("!model search --free"))
+      expect(free).toContain("2 free models:")
+      expect(free).toContain("· free")
+      expect(free).not.toContain("deepseek-v4.1-flash — DeepSeek V4.1 Flash")
+
+      const paid = await runner(message("!model search --paid"))
+      expect(paid).toContain("1 paid model:")
+      expect(paid).toContain("deepseek-v4.1-flash — DeepSeek V4.1 Flash · paid")
+      expect(paid).not.toContain("longcat")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("a search result can be picked by its printed number, on any platform", async () => {
+    const catalog: ModelSummary[] = [
+      { providerID: "opencode-go", modelID: "longcat-2.5-preview-free", name: "LongCat 2.5 Preview Free", free: true },
+      { providerID: "opencode-go", modelID: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+    ]
+    const { runner, sessions, cleanup } = harness(() => answer("ses_1"), [], catalog)
+    try {
+      const slack: ChatMessage = { platform: "slack", channelId: "D1", userId: "U1", text: "!model search longcat", receivedAt: 0 }
+      expect(await runner(slack)).toContain("2. opencode-go/longcat-2.5-preview-free")
+      // The platform does not change how a command is read.
+      expect(await runner({ ...slack, platform: "gchat", text: "!model 2" })).toContain("opencode-go/longcat-2.5-preview-free")
+      expect(sessions.getModel("gchat:D1")).toEqual({ providerID: "opencode-go", modelID: "longcat-2.5-preview-free" })
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("a search that matches nothing, or asks for both prices, explains itself", async () => {
+    const { runner, cleanup } = harness(() => answer("ses_1"), [], CATALOG)
+    try {
+      expect(await runner(message("!model search nosuchmodel"))).toContain("No model matches")
+      expect(await runner(message("!model search free --free --paid"))).toContain("Choose one of --free or --paid")
+      expect(await runner(message("!model search x --costly"))).toContain("Unknown flag --costly")
+    } finally {
+      cleanup()
+    }
+  })
+
   test("the ! prefix works where Discord's slash picker gets in the way", async () => {
     const { runner, sessions, cleanup } = harness(() => answer("ses_1"), [], CATALOG)
     try {
@@ -435,6 +535,160 @@ describe("the chat agent runner", () => {
         },
       })
       expect(await runner(message("go"))).toContain("no headless executor configured")
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe("interrupting a running turn", () => {
+  /** A turn that stays busy until it is aborted, like a real model run. */
+  const busy = (sessions: ChatSessionStore) => {
+    const signals: AbortSignal[] = []
+    const runner = createChatAgentRunner({
+      sessions,
+      resolve: () => config,
+      run: async (_config, input) => {
+        const signal = input.signal
+        if (signal === undefined) throw new Error("a chat turn must be interruptible")
+        signals.push(signal)
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) return resolve()
+          signal.addEventListener("abort", () => resolve(), { once: true })
+        })
+        return {
+          ok: false,
+          sessionId: "ses_stop",
+          error: "The run was interrupted.",
+          timedOut: false,
+          interrupted: true,
+          elapsedMs: 1,
+        }
+      },
+    })
+    return { runner, signals }
+  }
+
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 5))
+
+  test("/stop aborts this channel's turn and resumes the same session afterwards", async () => {
+    const { sessions, cleanup } = setup()
+    const { runner, signals } = busy(sessions)
+    try {
+      const running = runner(message("do the long work"))
+      await settle()
+      expect(await runner(message("/stop"))).toBe("Stopping the turn running in this channel.")
+      expect(await running).toBe("Stopped.")
+      expect(signals[0]?.aborted).toBe(true)
+      // The session survived the interruption, so the next message continues it.
+      expect(sessions.get("discord:C1")).toBe("ses_stop")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("every platform interrupts with the same command", async () => {
+    const { sessions, cleanup } = setup()
+    const { runner } = busy(sessions)
+    try {
+      for (const platform of CHAT_PLATFORMS) {
+        const channelId = `${platform.id}-1`
+        const running = runner({ platform: platform.id, channelId, userId: "U1", text: "long job", receivedAt: 0 })
+        await settle()
+        const stopped = await runner({ platform: platform.id, channelId, userId: "U1", text: "!stop", receivedAt: 0 })
+        expect(stopped).toContain("Stopping")
+        expect(await running).toBe("Stopped.")
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("stopping one channel leaves another channel's turn running", async () => {
+    const { sessions, cleanup } = setup()
+    const { runner } = busy(sessions)
+    try {
+      const first = runner(message("job one", "C1"))
+      const second = runner(message("job two", "C2"))
+      await settle()
+      expect(await runner(message("/stop", "C1"))).toContain("Stopping")
+      expect(await first).toBe("Stopped.")
+      let settled = false
+      void second.then(() => {
+        settled = true
+      })
+      await settle()
+      expect(settled).toBe(false)
+      await runner(message("/stop", "C2"))
+      expect(await second).toBe("Stopped.")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("stopping with nothing running says so instead of failing", async () => {
+    const { runner, inputs, cleanup } = harness(() => answer("ses_1"))
+    try {
+      expect(await runner(message("!stop"))).toBe("Nothing is running in this channel right now.")
+      expect(inputs).toHaveLength(0)
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe("files attached in chat", () => {
+  const attachment = (name: string, mime: string, url: string | undefined) => ({
+    name,
+    mime,
+    load: async () => url,
+  })
+
+  test("an image reaches the model as a file part and is named in the prompt", async () => {
+    const { runner, inputs, cleanup } = harness(() => answer("ses_1"))
+    const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+    try {
+      const reply = await runner({
+        ...message("what is this?"),
+        attachments: [attachment("shot.png", "image/png", png)],
+      })
+      expect(reply).toBe("ok")
+      expect(inputs[0]?.files).toEqual([{ mime: "image/png", filename: "shot.png", url: png }])
+      expect(inputs[0]?.prompt).toContain("shot.png")
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("a screenshot with no words is still a prompt", async () => {
+    const { runner, inputs, cleanup } = harness(() => answer("ses_1"))
+    const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+    try {
+      await runner({ ...message(""), attachments: [attachment("shot.png", "image/png", png)] })
+      expect(inputs[0]?.prompt).toContain("no text of its own")
+      expect(inputs[0]?.files).toHaveLength(1)
+    } finally {
+      cleanup()
+    }
+  })
+
+  test("text is inlined, and an unreadable or unsupported file is named instead of failing the turn", async () => {
+    const { runner, inputs, cleanup } = harness(() => answer("ses_1"))
+    const notes = "data:text/markdown;base64,IyBOb3Rlcw=="
+    try {
+      const reply = await runner({
+        ...message("read these"),
+        attachments: [
+          attachment("notes.md", "text/markdown", notes),
+          attachment("archive.zip", "application/zip", "data:application/zip;base64,AA=="),
+          attachment("broken.png", "image/png", undefined),
+        ],
+      })
+      expect(reply).toBe("ok")
+      // opencode inlines text/plain; a markdown subtype would arrive as a file.
+      expect(inputs[0]?.files).toEqual([{ mime: "text/plain", filename: "notes.md", url: notes }])
+      expect(inputs[0]?.prompt).toContain("archive.zip")
+      expect(inputs[0]?.prompt).toContain("broken.png")
     } finally {
       cleanup()
     }

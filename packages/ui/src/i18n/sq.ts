@@ -178,6 +178,7 @@ export const dict: Record<string, string> = {
   "ui.message.forkMessage": "Degëzo në një sesion të ri",
   "ui.message.revertMessage": "Rikthe mesazhin",
   "ui.message.copyResponse": "Kopjo përgjigjen",
+  "ui.message.reply": "Përgjigju",
   "ui.message.copied": "E kopjuar",
   "ui.message.duration.seconds": "{{count}}s",
   "ui.message.duration.minutesSeconds": "{{minutes}}m {{seconds}}s",

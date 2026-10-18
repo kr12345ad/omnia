@@ -982,6 +982,7 @@ export function MessageTimeline(props: {
                 showAssistantCopyPartID={assistantCopyPartID(row().userMessageID)}
                 turnDurationMs={turnDurationMs(row().userMessageID)}
                 useV2Actions={settings.general.newLayoutDesigns()}
+                actions={props.actions}
                 defaultOpen={defaultOpen()}
                 toolOpen={toolOpen[part().id] ?? defaultOpen()}
                 onToolOpenChange={(open) => setToolOpen(part().id, open)}
@@ -1187,26 +1188,26 @@ export function MessageTimeline(props: {
   }
 
   const APPEARED_ROWS_LIMIT = 4000
-const appearedRows = new Set<string>()
+  const appearedRows = new Set<string>()
 
-// New timeline rows (thinking, tool rows, response parts) fade in instead of
-// popping in. Keys already rendered once are skipped so virtualized scrolling
-// never re-animates recycled rows.
-function fadeInRow(element: HTMLElement | undefined, key: string) {
-  if (element === undefined || appearedRows.has(key)) return
-  if (appearedRows.size >= APPEARED_ROWS_LIMIT) appearedRows.clear()
-  appearedRows.add(key)
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return
-  animate(element, {
-    opacity: [0, 1],
-    translateY: [10, 0],
-    scale: [0.985, 1],
-    duration: 420,
-    ease: "outBack(1.4)",
-  })
-}
+  // New timeline rows (thinking, tool rows, response parts) fade in instead of
+  // popping in. Keys already rendered once are skipped so virtualized scrolling
+  // never re-animates recycled rows.
+  function fadeInRow(element: HTMLElement | undefined, key: string) {
+    if (element === undefined || appearedRows.has(key)) return
+    if (appearedRows.size >= APPEARED_ROWS_LIMIT) appearedRows.clear()
+    appearedRows.add(key)
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return
+    animate(element, {
+      opacity: [0, 1],
+      translateY: [10, 0],
+      scale: [0.985, 1],
+      duration: 420,
+      ease: "outBack(1.4)",
+    })
+  }
 
-function VirtualTimelineRow(props: { rowKey: string }) {
+  function VirtualTimelineRow(props: { rowKey: string }) {
     let element: HTMLDivElement
     const initialItem = virtualItemByKey().get(props.rowKey)!
     const initialRow = timelineRowByKey().get(props.rowKey)!

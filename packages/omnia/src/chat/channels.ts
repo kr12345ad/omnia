@@ -3,6 +3,16 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { CHAT_PLATFORMS, type ChatPlatformSpec } from "./platforms"
 
+// The account a channel answers as. A channel is set up by one person, and it
+// stays that person's channel: signing in as somebody else must not hand the
+// bot, its plan or its history to the new account.
+export interface ChatChannelOwner {
+  readonly provider: "github" | "google"
+  readonly id: string
+  readonly login: string
+  readonly boundAt: number
+}
+
 export interface ChatChannelConfig {
   readonly platform: string
   readonly enabled: boolean
@@ -12,6 +22,10 @@ export interface ChatChannelConfig {
   readonly lastMessageAt?: number
   readonly messageCount?: number
   readonly error?: string
+  readonly owner?: ChatChannelOwner
+  // HMAC of the owner binding, keyed by the control plane's own token, so an
+  // edited channel file cannot point a channel at another account.
+  readonly ownerBinding?: string
 }
 
 export interface ChatChannelsStore {
@@ -41,6 +55,7 @@ function load(file: string): ChatChannelsStore {
         typeof record.credentials === "object" && record.credentials !== null && !Array.isArray(record.credentials)
           ? (record.credentials as Record<string, string>)
           : {}
+      const owner = readOwner(record.owner)
       return [
         {
           platform: record.platform,
@@ -51,6 +66,8 @@ function load(file: string): ChatChannelsStore {
           ...(typeof record.lastMessageAt === "number" ? { lastMessageAt: record.lastMessageAt } : {}),
           ...(typeof record.messageCount === "number" ? { messageCount: record.messageCount } : {}),
           ...(typeof record.error === "string" ? { error: record.error } : {}),
+          ...(owner === undefined ? {} : { owner }),
+          ...(typeof record.ownerBinding === "string" ? { ownerBinding: record.ownerBinding } : {}),
         },
       ]
     })
@@ -63,6 +80,22 @@ function load(file: string): ChatChannelsStore {
 function save(file: string, store: ChatChannelsStore): void {
   mkdirSync(dirname(file), { recursive: true })
   writeFileSync(file, JSON.stringify(store, null, 2), { mode: 0o600 })
+}
+
+function readOwner(value: unknown): ChatChannelOwner | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const provider = record.provider === "google" ? "google" : record.provider === "github" ? "github" : undefined
+  const id =
+    typeof record.id === "string" ? record.id.trim() : typeof record.id === "number" ? String(record.id) : undefined
+  if (provider === undefined || id === undefined || id.length === 0 || id.length > 128) return undefined
+  if (typeof record.login !== "string" || record.login.length === 0) return undefined
+  return {
+    provider,
+    id,
+    login: record.login,
+    boundAt: typeof record.boundAt === "number" ? record.boundAt : 0,
+  }
 }
 
 export class ChatChannelsService {
@@ -97,7 +130,13 @@ export class ChatChannelsService {
     return CHAT_PLATFORMS.find((item) => item.id === platform)
   }
 
-  connect(platform: string, credentials: Record<string, string>, webhookSecret?: string): ChatChannelConfig {
+  connect(
+    platform: string,
+    credentials: Record<string, string>,
+    webhookSecret?: string,
+    owner?: ChatChannelOwner,
+    ownerBinding?: string,
+  ): ChatChannelConfig {
     const spec = this.spec(platform)
     if (spec === undefined) throw new Error(`Unknown chat platform ${platform}.`)
     const now = Date.now()
@@ -108,6 +147,8 @@ export class ChatChannelsService {
       ...(webhookSecret === undefined ? {} : { webhookSecret }),
       connectedAt: now,
       messageCount: 0,
+      ...(owner === undefined ? {} : { owner }),
+      ...(ownerBinding === undefined ? {} : { ownerBinding }),
     }
     const others = this.channels().filter((channel) => channel.platform !== platform)
     this.save([...others, next])

@@ -174,6 +174,42 @@ describe("sign-in flow", () => {
     expect(auth.authStatus().authenticated).toBe(true)
   })
 
+  test("signs in with Google when the renderer picks it", async () => {
+    responses = [
+      jsonResponse({
+        ok: true,
+        authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth?client_id=test",
+        state: "google-state",
+      }),
+      jsonResponse({
+        ok: true,
+        authenticated: true,
+        profile: {
+          id: "107834588031326048827",
+          login: "octocat",
+          provider: "google",
+          email: "octocat@gmail.com",
+          avatarUrl: "https://lh3.example/octocat",
+        },
+        clientToken: "client-token-google",
+      }),
+    ]
+
+    const status = await auth.startSignIn({ provider: "google", intervalMs: 1, timeoutMs: 1000 })
+
+    expect(opened).toEqual(["https://accounts.google.com/o/oauth2/v2/auth?client_id=test"])
+    expect(requests.map((request) => request.url)).toEqual([
+      `${controlPlane}/v1/auth/google/start`,
+      `${controlPlane}/v1/auth/google/poll`,
+    ])
+    expect(status.authenticated).toBe(true)
+    expect(status.profile?.provider).toBe("google")
+    // A Google subject is wider than a safe integer, so it must stay text.
+    expect(status.profile?.id).toBe("107834588031326048827")
+    expect(auth.loadAuthSession()?.profile?.provider).toBe("google")
+    expect(auth.authStatus().profile?.id).toBe("107834588031326048827")
+  })
+
   test("rejects a start response without an authorize URL", async () => {
     responses = [jsonResponse({ ok: true, state: "state-3" })]
     await expect(auth.startSignIn({ intervalMs: 1, timeoutMs: 1000 })).rejects.toThrow(
@@ -263,6 +299,18 @@ describe("stored credential safety", () => {
 })
 
 describe("auth IPC surface", () => {
+  test("forwards the provider the renderer clicked", async () => {
+    // A rejected poll ends the flow immediately; the default poll window is
+    // five minutes, which a test must never wait for.
+    responses = [
+      jsonResponse({ ok: true, authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth", state: "s" }),
+      jsonResponse({ error: "unknown_state" }, 400),
+    ]
+    const pending = handlers.get("omnia-auth-sign-in")!({}, "google")
+    await expect(pending as Promise<unknown>).rejects.toThrow("unknown_state")
+    expect(requests[0].url).toBe(`${controlPlane}/v1/auth/google/start`)
+  })
+
   test("registers status, sign-in, and sign-out handlers", async () => {
     expect([...handlers.keys()]).toEqual(
       expect.arrayContaining(["omnia-auth-status", "omnia-auth-sign-in", "omnia-auth-sign-out"]),

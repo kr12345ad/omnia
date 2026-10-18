@@ -19,7 +19,11 @@ function harness(options: { gate?: (run: { id: string }) => Promise<{ allowed: b
       if (key === "POST /session") return Response.json({ id: "ses_fake", title: "t" })
       if (key === "POST /session/ses_fake/prompt_async") return Response.json({})
       if (key === "GET /session/status") return Response.json({ ses_fake: { type: "idle" } })
-      if (key === "GET /session/ses_fake/message") return Response.json([])
+      // A finished run leaves an assistant message behind; an empty transcript is
+      // what a prompt that has not started yet looks like.
+      if (key === "GET /session/ses_fake/message") {
+        return Response.json([{ info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] }])
+      }
       return new Response("not found", { status: 404 })
     },
   })

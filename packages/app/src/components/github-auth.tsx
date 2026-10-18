@@ -4,7 +4,7 @@ import { Icon } from "@opencode-ai/ui/icon"
 import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2"
 import { LoaderV2 } from "@opencode-ai/ui/v2/loader-v2"
 import { useLanguage } from "@/context/language"
-import { usePlatform, type GitHubAuthStatus } from "@/context/platform"
+import { usePlatform, type AuthProvider, type GitHubAuthStatus } from "@/context/platform"
 import { createErrorDetailsCopy, friendlyErrorMessage } from "@/utils/error-message"
 
 // The first-run gate and the account control both observe the same session;
@@ -15,7 +15,32 @@ export function notifyGitHubAuthChanged(): void {
   window.dispatchEvent(new Event(GITHUB_AUTH_CHANGED_EVENT))
 }
 
-export function GitHubSignInButton(props: {
+const PROVIDERS: readonly AuthProvider[] = ["github", "google"]
+
+// Copy and icon per provider. Google's labels are separate keys rather than a
+// template so translators can inflect the whole sentence.
+const COPY = {
+  github: {
+    continue: "ui.github.continue",
+    waiting: "ui.github.waiting",
+    error: "ui.github.error",
+    signedInWith: "ui.github.signedInWith",
+  },
+  google: {
+    continue: "ui.google.continue",
+    waiting: "ui.google.waiting",
+    error: "ui.google.error",
+    signedInWith: "ui.google.signedInWith",
+  },
+} as const
+
+function providerOf(status: GitHubAuthStatus | undefined): AuthProvider {
+  return status?.profile?.provider === "google" ? "google" : "github"
+}
+
+export function SignInButton(props: {
+  provider: AuthProvider
+  variant?: "contrast" | "outline"
   disabled?: boolean
   onSignedIn?: (status: GitHubAuthStatus) => void
   onError?: (error: unknown) => void
@@ -26,12 +51,13 @@ export function GitHubSignInButton(props: {
   if (auth === undefined) return null
 
   const [busy, setBusy] = createSignal(false)
+  const copy = COPY[props.provider]
 
   const signIn = async () => {
     if (busy()) return
     setBusy(true)
     try {
-      const status = await auth.signIn()
+      const status = await auth.signIn(props.provider)
       notifyGitHubAuthChanged()
       props.onSignedIn?.(status)
     } catch (error) {
@@ -43,17 +69,53 @@ export function GitHubSignInButton(props: {
 
   return (
     <ButtonV2
-      variant="contrast"
+      variant={props.variant ?? "contrast"}
       size="large"
       class="min-w-48 justify-center"
       disabled={busy() || props.disabled === true}
       onClick={() => void signIn()}
     >
       <Show when={!busy()} fallback={<LoaderV2 width={16} height={16} />}>
-        <Icon name="github" size="small" />
+        <Icon name={props.provider} size="small" />
       </Show>
-      <span>{busy() ? language.t("ui.github.waiting") : language.t("ui.github.continue")}</span>
+      <span>{busy() ? language.t(copy.waiting) : language.t(copy.continue)}</span>
     </ButtonV2>
+  )
+}
+
+export function GitHubSignInButton(props: {
+  disabled?: boolean
+  onSignedIn?: (status: GitHubAuthStatus) => void
+  onError?: (error: unknown) => void
+}) {
+  return <SignInButton provider="github" variant="contrast" {...props} />
+}
+
+export function GoogleSignInButton(props: {
+  disabled?: boolean
+  onSignedIn?: (status: GitHubAuthStatus) => void
+  onError?: (error: unknown) => void
+}) {
+  return <SignInButton provider="google" variant="outline" {...props} />
+}
+
+export function SignInOptions(props: {
+  disabled?: boolean
+  onSignedIn?: (status: GitHubAuthStatus) => void
+  onError?: (error: unknown) => void
+}) {
+  return (
+    <div class="flex flex-col items-stretch gap-2">
+      {PROVIDERS.map((provider) => (
+        <SignInButton
+          provider={provider}
+          variant={provider === "github" ? "contrast" : "outline"}
+          disabled={props.disabled}
+          onSignedIn={props.onSignedIn}
+          onError={props.onError}
+        />
+      ))}
+    </div>
   )
 }
 
@@ -83,6 +145,7 @@ export function GitHubAuthButton() {
   }
 
   const profile = () => status()?.profile
+  const provider = () => providerOf(status())
 
   return (
     <DropdownMenu open={open()} onOpenChange={setOpen} placement="bottom-end">
@@ -106,7 +169,7 @@ export function GitHubAuthButton() {
           class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full border-[0.5px] border-v2-border-border-base bg-v2-background-bg-deep"
           aria-label={language.t("ui.github.account")}
         >
-          <Show when={profile()?.avatarUrl} fallback={<Icon name="github" size="small" />}>
+          <Show when={profile()?.avatarUrl} fallback={<Icon name={provider()} size="small" />}>
             <img
               src={profile()!.avatarUrl}
               alt={profile()!.login}
@@ -130,7 +193,7 @@ export function GitHubAuthButton() {
                     {language.t("ui.github.signInDescription")}
                   </span>
                 </div>
-                <GitHubSignInButton
+                <SignInOptions
                   onSignedIn={(next) => {
                     setError(undefined)
                     mutate(next)
@@ -160,7 +223,9 @@ export function GitHubAuthButton() {
                   </Show>
                 </div>
               </div>
-              <span class="text-[13px] font-[440] text-v2-text-text-muted">{language.t("ui.github.signedInWith")}</span>
+              <span class="text-[13px] font-[440] text-v2-text-text-muted">
+                {language.t(COPY[provider()].signedInWith)}
+              </span>
               <div class="flex flex-col gap-1 border-t-[0.5px] border-v2-border-border-base pt-2">
                 <Show when={profile()?.htmlUrl}>
                   <a
@@ -186,7 +251,7 @@ export function GitHubAuthButton() {
           <Show when={error()}>
             <div class="mt-2 flex flex-col gap-1">
               <span class="text-[13px] font-[440] text-v2-state-fg-danger">
-                {friendlyErrorMessage(error(), language.t, "ui.github.error")}
+                {friendlyErrorMessage(error(), language.t, COPY[provider()].error)}
               </span>
               <button
                 type="button"

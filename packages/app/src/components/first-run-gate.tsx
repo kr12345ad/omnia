@@ -5,7 +5,7 @@ import { LoaderV2 } from "@opencode-ai/ui/v2/loader-v2"
 import { useLanguage } from "@/context/language"
 import { usePlatform, type GitHubAuthStatus } from "@/context/platform"
 import { createErrorDetailsCopy, friendlyErrorMessage } from "@/utils/error-message"
-import { GITHUB_AUTH_CHANGED_EVENT, GitHubSignInButton } from "./github-auth"
+import { GITHUB_AUTH_CHANGED_EVENT, SignInOptions } from "./github-auth"
 
 /**
  * Blocks the app until a GitHub session exists. The gate mounts at the app root
@@ -80,7 +80,7 @@ function GateScreen(props: {
       </div>
       <Show when={!props.loading} fallback={<LoaderV2 width={20} height={20} />}>
         <div class="flex flex-col items-center gap-3">
-          <GitHubSignInButton onSignedIn={props.onSignedIn} onError={props.onError} />
+          <SignInOptions onSignedIn={props.onSignedIn} onError={props.onError} />
           <Show when={props.error}>
             <ButtonV2 variant="outline" size="large" class="min-w-48 justify-center" onClick={props.onRetry}>
               {language.t("ui.github.retry")}

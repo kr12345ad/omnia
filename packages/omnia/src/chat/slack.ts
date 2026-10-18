@@ -6,7 +6,8 @@
 // Slack renders mrkdwn, not Markdown: `**bold**` arrives as literal asterisks and
 // `[a](b)` as brackets, so toSlackMarkdown rewrites what Slack does not draw.
 
-import type { ChatMessage, ChatReply, ChatTrace, ChatTransport } from "./service"
+import { fetchAttachment, mimeFromName } from "./attachments"
+import type { ChatAttachment, ChatMessage, ChatReply, ChatTrace, ChatTransport } from "./service"
 import { splitMarkdown } from "./text"
 
 const SLACK_API = "https://slack.com/api"
@@ -33,6 +34,15 @@ export interface SlackTransportOptions {
   readonly now?: () => number
 }
 
+interface SlackFile {
+  readonly name?: string
+  readonly title?: string
+  readonly mimetype?: string
+  /** Private, and only readable with the bot token that carries `files:read`. */
+  readonly url_private?: string
+  readonly url_private_download?: string
+}
+
 interface SlackEvent {
   readonly type?: string
   readonly subtype?: string
@@ -43,6 +53,7 @@ interface SlackEvent {
   readonly text?: string
   readonly ts?: string
   readonly thread_ts?: string
+  readonly files?: readonly SlackFile[]
 }
 
 interface SlackEnvelope {
@@ -58,6 +69,21 @@ export function createSlackTransport(options: SlackTransportOptions): ChatTransp
     return undefined
   }
   return new SlackTransport(options)
+}
+
+function slackAttachments(files: readonly SlackFile[] | undefined, token: string): ChatAttachment[] {
+  return (files ?? []).flatMap((file) => {
+    const url = file.url_private_download ?? file.url_private
+    if (typeof url !== "string" || url.length === 0) return []
+    const name = (file.name ?? file.title ?? "").trim() || "attachment"
+    return [
+      {
+        name,
+        mime: (file.mimetype ?? "").trim() || mimeFromName(name),
+        load: () => fetchAttachment(url, { headers: { authorization: `Bearer ${token}` } }),
+      },
+    ]
+  })
 }
 
 /**
@@ -101,10 +127,13 @@ class SlackTransport implements ChatTransport {
     if (event === undefined) return undefined
     if (event.type !== "message" && event.type !== "app_mention") return undefined
     // Edits, joins and the app's own posts are events too, and none is a prompt.
-    if (event.subtype !== undefined || event.bot_id !== undefined) return undefined
+    // A file upload, on the other hand, is one: Slack marks it `file_share`.
+    if (event.subtype !== undefined && event.subtype !== "file_share") return undefined
+    if (event.bot_id !== undefined) return undefined
     if (event.user === undefined || event.channel === undefined) return undefined
     const text = slackText(event.text ?? "")
-    if (text.length === 0) return undefined
+    const attachments = slackAttachments(event.files, this.token)
+    if (text.length === 0 && attachments.length === 0) return undefined
     const id = envelope?.event_id
     if (id !== undefined) {
       if (this.seen.has(id)) return undefined
@@ -115,9 +144,11 @@ class SlackTransport implements ChatTransport {
       channelId: event.channel,
       userId: event.user,
       text,
-      // Answer in the thread the question was asked in, or start one on the
-      // question itself so an answer never scatters down a busy channel.
-      ...(event.thread_ts !== undefined ? { threadId: event.thread_ts } : event.ts !== undefined ? { threadId: event.ts } : {}),
+      // Follow a thread the question was already asked in, but never start
+      // one: a DM has no thread, and replying into a fresh thread buries every
+      // answer one click deep in the conversation it belongs to.
+      ...(event.thread_ts !== undefined ? { threadId: event.thread_ts } : {}),
+      ...(attachments.length === 0 ? {} : { attachments }),
       receivedAt: this.now(),
     }
   }
@@ -176,7 +207,7 @@ class SlackTransport implements ChatTransport {
     return {
       update: (text) => {
         if (closed) return
-        const next = text.slice(0, TRACE_LIMIT)
+        const next = slackTrace(text).slice(0, TRACE_LIMIT)
         if (next === lastSent) return
         pending = next
         if (timer !== undefined) return
@@ -345,6 +376,19 @@ function renderTable(rows: readonly string[][]): string {
     ...body.map(line),
     "```",
   ].join("\n")
+}
+
+/**
+ * The progress trace is written as Discord subtext, where a leading `-#` drops
+ * the line to a smaller grey font. Slack has no such markup and draws the
+ * prefix as literal text, so the lines are flattened before they are posted.
+ */
+function slackTrace(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => line.replace(/^-#\s?/, ""))
+    .join("\n")
+    .trim()
 }
 
 /**

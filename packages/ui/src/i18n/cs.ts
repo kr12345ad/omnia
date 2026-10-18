@@ -186,6 +186,7 @@ export const dict: Record<string, string> = {
   "ui.message.forkMessage": "Vytvořit větev v nové relaci",
   "ui.message.revertMessage": "Vrátit zprávu",
   "ui.message.copyResponse": "Zkopírujte odpověď",
+  "ui.message.reply": "Odpovědět",
   "ui.message.copied": "Zkopírováno",
   "ui.message.duration.seconds": "{{count}} s",
   "ui.message.duration.minutesSeconds": "{{minutes}}m {{seconds}}s",

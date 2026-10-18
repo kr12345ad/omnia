@@ -16,6 +16,13 @@ import {
 import { homedir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import type { EventBus } from "../server/events"
+import {
+  GOOGLE_CALLBACK_PATH,
+  GOOGLE_OAUTH_TOKEN,
+  GOOGLE_OAUTH_USERINFO,
+  googleAuthorizeUrl,
+  googleProfileFromUserInfo,
+} from "./google"
 
 export const GITHUB_OAUTH_AUTHORIZE = "https://github.com/login/oauth/authorize"
 export const GITHUB_OAUTH_TOKEN = "https://github.com/login/oauth/access_token"
@@ -29,9 +36,21 @@ export const GITHUB_CALLBACK_PATH = "/v1/auth/github/callback"
 export const GITHUB_AUTH_TIMEOUT_MS = 300000
 export const GITHUB_CLIENT_TOKEN_BYTES = 32
 
+export type AuthProvider = "github" | "google"
+
+const PROVIDER_LABELS: Readonly<Record<AuthProvider, string>> = { github: "GitHub", google: "Google" }
+
+export function isAuthProvider(value: unknown): value is AuthProvider {
+  return value === "github" || value === "google"
+}
+
 export interface GitHubProfile {
-  readonly id: number
+  // GitHub's numeric id, or Google's `sub`, a decimal string wider than a safe
+  // integer. Both are opaque keys; only the control plane compares them.
+  readonly id: number | string
   readonly login: string
+  // Absent on sessions stored before Google sign-in existed; those are GitHub.
+  readonly provider?: AuthProvider
   readonly name?: string
   readonly avatarUrl?: string
   readonly email?: string
@@ -42,7 +61,10 @@ export interface GitHubAuthStatus {
   readonly authenticated: boolean
   readonly profile?: GitHubProfile
   readonly signedInAt?: number
+  // GitHub OAuth client presence, kept for callers written before `providers`.
   readonly oauthClientConfigured: boolean
+  // Which sign-in buttons the deployment can actually complete.
+  readonly providers?: Readonly<Record<AuthProvider, boolean>>
 }
 
 export interface GitHubStartResult {
@@ -56,6 +78,9 @@ export interface GitHubPollResult {
   readonly authenticated: boolean
   readonly profile?: GitHubProfile
   readonly clientToken?: string
+  // Set when the callback was refused after the provider answered, so the app
+  // stops waiting and shows the same reason the browser tab shows.
+  readonly failure?: string
 }
 
 export type GitHubCallbackResult =
@@ -71,12 +96,16 @@ export interface GitHubAuthOptions {
   readonly clientId?: string
   readonly clientSecret?: string
   readonly redirectUri?: string
+  readonly googleClientId?: string
+  readonly googleClientSecret?: string
+  readonly googleRedirectUri?: string
   readonly publicUrl?: string
   readonly timeoutMs?: number
   readonly randomClientToken?: () => string
 }
 
 interface PendingFlow {
+  readonly provider: AuthProvider
   readonly state: string
   readonly verifier: string
   readonly redirectUri: string
@@ -84,7 +113,19 @@ interface PendingFlow {
   readonly expiresAt: number
   profile?: GitHubProfile
   clientToken?: string
+  failure?: string
   delivered: boolean
+}
+
+// An email address belongs to exactly one provider account. The ledger keeps
+// that decision across sign-outs, so the same person cannot come back with the
+// other provider and end up on a second profile id - with none of the plan,
+// usage or runs they paid for.
+interface StoredIdentity {
+  readonly email: string
+  readonly provider: AuthProvider
+  readonly id: number | string
+  readonly login: string
 }
 
 const MAX_PENDING_FLOWS = 16
@@ -108,6 +149,7 @@ export class GitHubAuth {
   private statusValue: GitHubAuthStatus
   private readonly pending = new Map<string, PendingFlow>()
   private readonly clientTokens = new Map<string, { profile: GitHubProfile; createdAt: number; kind: ClientTokenKind }>()
+  private readonly identities = new Map<string, StoredIdentity>()
   private readonly clientsFile: string | undefined
 
   constructor(options: GitHubAuthOptions = {}) {
@@ -119,6 +161,10 @@ export class GitHubAuth {
     this.clientsFile = options.clientsFile ?? (options.file === undefined ? undefined : `${options.file}.clients.json`)
     for (const entry of readStoredClientTokens(this.clientsFile)) this.clientTokens.set(entry.token, entry)
     const stored = readStoredAuth(options.file)
+    for (const identity of readStoredIdentities(options.file)) this.identities.set(identity.email, identity)
+    // A session written before the ledger existed is the record of which
+    // provider owns its email, so seed from it on load.
+    if (stored !== undefined) this.rememberIdentity(stored.profile)
     this.storedAuth = stored
     this.storedOAuth = stored?.oauth
     this.statusValue = {
@@ -129,26 +175,34 @@ export class GitHubAuth {
   }
 
   status(): GitHubAuthStatus {
-    return { ...this.statusValue, oauthClientConfigured: this.hasOAuthClient() }
+    return { ...this.statusValue, oauthClientConfigured: this.hasOAuthClient(), providers: this.providers() }
   }
 
-  async start(method: string = "browser"): Promise<GitHubStartResult> {
+  async start(method: string = "browser", provider: AuthProvider = "github"): Promise<GitHubStartResult> {
+    const label = PROVIDER_LABELS[provider]
     if (method !== "browser") {
-      throw new Error(`GitHub sign-in method "${method}" is not supported; use the public browser callback.`)
+      throw new Error(`${label} sign-in method "${method}" is not supported; use the public browser callback.`)
     }
-    const redirectUri = this.redirectUri()
+    const redirectUri = this.redirectUri(provider)
     if (redirectUri === undefined) {
       throw new Error(
-        "GitHub sign-in requires a public callback URL; set OMNIA_GITHUB_REDIRECT_URI or OMNIA_PUBLIC_URL.",
+        `${label} sign-in requires a public callback URL; set ${
+          provider === "google" ? "OMNIA_GOOGLE_REDIRECT_URI" : "OMNIA_GITHUB_REDIRECT_URI"
+        } or OMNIA_PUBLIC_URL.`,
       )
     }
-    if (!this.hasOAuthClient()) {
-      throw new Error("GitHub OAuth is not configured; set OMNIA_GITHUB_CLIENT_ID and OMNIA_GITHUB_CLIENT_SECRET.")
+    if (!this.hasOAuthClient(provider)) {
+      throw new Error(
+        provider === "google"
+          ? "Google OAuth is not configured; set OMNIA_GOOGLE_CLIENT_ID and OMNIA_GOOGLE_CLIENT_SECRET."
+          : "GitHub OAuth is not configured; set OMNIA_GITHUB_CLIENT_ID and OMNIA_GITHUB_CLIENT_SECRET.",
+      )
     }
     const state = randomBytes(24).toString("hex")
     const verifier = base64url(randomBytes(48))
     const challenge = base64url(createHash("sha256").update(verifier).digest())
     this.trackPending({
+      provider,
       state,
       verifier,
       redirectUri,
@@ -157,7 +211,7 @@ export class GitHubAuth {
       delivered: false,
     })
     return {
-      authorizeUrl: this.authorizeUrl(redirectUri, state, challenge),
+      authorizeUrl: this.authorizeUrl(provider, redirectUri, state, challenge),
       state,
       redirectUri,
       status: this.status(),
@@ -177,18 +231,25 @@ export class GitHubAuth {
     if (flow.profile !== undefined && flow.clientToken !== undefined) {
       return { ok: true, profile: flow.profile, clientToken: flow.clientToken }
     }
-    const exchanged = await this.exchange(code, flow.verifier, flow.redirectUri)
+    const exchanged = await this.exchange(flow.provider, code, flow.verifier, flow.redirectUri)
     if ("message" in exchanged) {
       return { ok: false, status: 500, title: "Sign-in failed", message: exchanged.message }
     }
-    const profile = await this.profileFromToken(exchanged.token).catch(() => undefined)
+    const profile = await this.profileFromToken(flow.provider, exchanged.token).catch(() => undefined)
     if (profile === undefined) {
       return {
         ok: false,
         status: 500,
         title: "Sign-in failed",
-        message: "GitHub did not return a usable profile. Close this tab and try again from Omnia.",
+        message: `${PROVIDER_LABELS[flow.provider]} did not return a usable profile. Close this tab and try again from Omnia.`,
       }
+    }
+    const conflict = this.identityConflict(profile)
+    if (conflict !== undefined) {
+      // The address is already somebody's account here: refuse instead of
+      // replacing that session, and tell the app why it stopped waiting.
+      flow.failure = conflict.message
+      return { ok: false, status: 409, title: conflict.title, message: conflict.message }
     }
     this.complete(profile, exchanged.token)
     const clientToken = this.issueClientToken(profile, "desktop")
@@ -200,6 +261,7 @@ export class GitHubAuth {
   poll(state: string): GitHubPollResult | undefined {
     const flow = this.pendingFlow(state)
     if (flow === undefined) return undefined
+    if (flow.failure !== undefined) return { authenticated: false, failure: flow.failure }
     if (flow.profile === undefined || flow.clientToken === undefined) return { authenticated: false }
     const clientToken = flow.delivered ? undefined : flow.clientToken
     flow.delivered = true
@@ -247,24 +309,28 @@ export class GitHubAuth {
   }
 
   async logout(): Promise<void> {
+    const stored = this.storedAuth
     this.pending.clear()
     this.clientTokens.clear()
     this.persistClientTokens()
     this.statusValue = { authenticated: false, oauthClientConfigured: this.hasOAuthClient() }
     this.storedAuth = undefined
-    if (this.options.file !== undefined) {
-      if (this.storedOAuth === undefined) rmSync(this.options.file, { force: true })
-      else this.persist()
-    }
-    this.options.events?.emit("auth.signed_out", { data: { provider: "github" } })
+    // The email ledger outlives the session on purpose: signing out must not
+    // reopen the address to the other provider.
+    this.persist()
+    this.options.events?.emit("auth.signed_out", { data: { provider: stored?.profile.provider ?? "github" } })
   }
 
-  redirectUri(): string | undefined {
-    const configured = this.options.redirectUri ?? process.env.OMNIA_GITHUB_REDIRECT_URI
+  redirectUri(provider: AuthProvider = "github"): string | undefined {
+    const configured =
+      provider === "google"
+        ? this.options.googleRedirectUri ?? process.env.OMNIA_GOOGLE_REDIRECT_URI
+        : this.options.redirectUri ?? process.env.OMNIA_GITHUB_REDIRECT_URI
     if (configured !== undefined && configured.trim().length > 0) return configured.trim()
     const publicUrl = this.options.publicUrl ?? process.env.OMNIA_PUBLIC_URL
     if (publicUrl === undefined || publicUrl.trim().length === 0) return undefined
-    return `${publicUrl.trim().replace(/\/+$/, "")}${GITHUB_CALLBACK_PATH}`
+    const path = provider === "google" ? GOOGLE_CALLBACK_PATH : GITHUB_CALLBACK_PATH
+    return `${publicUrl.trim().replace(/\/+$/, "")}${path}`
   }
 
   saveOAuthClient(clientId: string, clientSecret?: string): GitHubAuthStatus {
@@ -279,9 +345,12 @@ export class GitHubAuth {
     return this.status()
   }
 
-  private authorizeUrl(redirectUri: string, state: string, challenge: string): string {
+  private authorizeUrl(provider: AuthProvider, redirectUri: string, state: string, challenge: string): string {
+    if (provider === "google") {
+      return googleAuthorizeUrl({ clientId: this.clientId("google"), redirectUri, state, challenge })
+    }
     const params = new URLSearchParams({
-      client_id: this.clientId(),
+      client_id: this.clientId("github"),
       redirect_uri: redirectUri,
       scope: GITHUB_SCOPES,
       state,
@@ -292,16 +361,22 @@ export class GitHubAuth {
     return `${GITHUB_OAUTH_AUTHORIZE}?${params.toString()}`
   }
 
-  private clientId(): string {
+  private clientId(provider: AuthProvider = "github"): string {
+    if (provider === "google") return this.options.googleClientId ?? process.env.OMNIA_GOOGLE_CLIENT_ID ?? ""
     return this.options.clientId ?? process.env.OMNIA_GITHUB_CLIENT_ID ?? this.storedOAuth?.clientId ?? ""
   }
 
-  private clientSecret(): string | undefined {
+  private clientSecret(provider: AuthProvider = "github"): string | undefined {
+    if (provider === "google") return this.options.googleClientSecret ?? process.env.OMNIA_GOOGLE_CLIENT_SECRET
     return this.options.clientSecret ?? process.env.OMNIA_GITHUB_CLIENT_SECRET ?? this.storedOAuth?.clientSecret
   }
 
-  private hasOAuthClient(): boolean {
-    return this.clientId().length > 0
+  private hasOAuthClient(provider: AuthProvider = "github"): boolean {
+    return this.clientId(provider).length > 0
+  }
+
+  private providers(): Record<AuthProvider, boolean> {
+    return { github: this.hasOAuthClient("github"), google: this.hasOAuthClient("google") }
   }
 
   private trackPending(flow: PendingFlow): void {
@@ -357,31 +432,53 @@ export class GitHubAuth {
   }
 
   private async exchange(
+    provider: AuthProvider,
     code: string,
     verifier: string,
     redirectUri: string,
   ): Promise<{ token: string } | { message: string }> {
-    const body = new URLSearchParams({
-      client_id: this.clientId(),
-      code,
-      redirect_uri: redirectUri,
-      code_verifier: verifier,
-    })
-    const secret = this.clientSecret()
+    const body =
+      provider === "google"
+        ? new URLSearchParams({
+            grant_type: "authorization_code",
+            client_id: this.clientId("google"),
+            code,
+            redirect_uri: redirectUri,
+            code_verifier: verifier,
+          })
+        : new URLSearchParams({
+            client_id: this.clientId("github"),
+            code,
+            redirect_uri: redirectUri,
+            code_verifier: verifier,
+          })
+    const secret = this.clientSecret(provider)
     if (secret !== undefined && secret.length > 0) body.set("client_secret", secret)
-    const response = await this.fetchImpl(GITHUB_OAUTH_TOKEN, {
+    const response = await this.fetchImpl(provider === "google" ? GOOGLE_OAUTH_TOKEN : GITHUB_OAUTH_TOKEN, {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
       body: body.toString(),
     })
     const payload = (await response.json()) as { access_token?: string; error?: string; error_description?: string }
     if (payload.access_token === undefined) {
-      return { message: payload.error_description ?? payload.error ?? "GitHub did not return an access token." }
+      return {
+        message:
+          payload.error_description ?? payload.error ?? `${PROVIDER_LABELS[provider]} did not return an access token.`,
+      }
     }
     return { token: payload.access_token }
   }
 
-  private async profileFromToken(token: string): Promise<GitHubProfile> {
+  private async profileFromToken(provider: AuthProvider, token: string): Promise<GitHubProfile> {
+    if (provider === "google") {
+      const response = await this.fetchImpl(GOOGLE_OAUTH_USERINFO, {
+        headers: { accept: "application/json", authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) throw new Error(`Google rejected the access token (HTTP ${response.status}).`)
+      const profile = googleProfileFromUserInfo(await response.json())
+      if (profile === undefined) throw new Error("Google returned an unexpected profile.")
+      return profile
+    }
     const headers = {
       accept: "application/vnd.github+json",
       authorization: `Bearer ${token}`,
@@ -405,6 +502,7 @@ export class GitHubAuth {
     return {
       id: user.id,
       login: user.login,
+      provider: "github",
       ...(user.name === undefined || user.name === null ? {} : { name: user.name }),
       ...(user.avatar_url === undefined ? {} : { avatarUrl: user.avatar_url }),
       ...(user.html_url === undefined ? {} : { htmlUrl: user.html_url }),
@@ -420,21 +518,51 @@ export class GitHubAuth {
     return primary?.email
   }
 
+  private identityConflict(profile: GitHubProfile): { title: string; message: string } | undefined {
+    const email = emailKey(profile)
+    if (email === undefined) return undefined
+    const existing = this.identities.get(email)
+    const provider = profile.provider ?? "github"
+    if (existing === undefined || existing.provider === provider) return undefined
+    const owner = PROVIDER_LABELS[existing.provider]
+    return {
+      title: "Email already in use",
+      message: `This email address is already connected to a ${owner} account on Omnia. Continue with ${owner}, or use a different ${PROVIDER_LABELS[provider]} account.`,
+    }
+  }
+
+  private rememberIdentity(profile: GitHubProfile): void {
+    const email = emailKey(profile)
+    if (email === undefined) return
+    this.identities.set(email, { email, provider: profile.provider ?? "github", id: profile.id, login: profile.login })
+  }
+
   private complete(profile: GitHubProfile, token: string): void {
     const signedInAt = this.now()
+    this.rememberIdentity(profile)
     this.statusValue = { authenticated: true, profile, signedInAt, oauthClientConfigured: this.hasOAuthClient() }
     this.persist({ profile, token, signedInAt })
-    this.options.events?.emit("auth.signed_in", { data: { provider: "github", login: profile.login, method: "oauth" } })
+    this.options.events?.emit("auth.signed_in", {
+      data: { provider: profile.provider ?? "github", login: profile.login, method: "oauth" },
+    })
   }
 
   private persist(auth?: StoredAuth): void {
     if (auth !== undefined) this.storedAuth = auth
     if (this.options.file === undefined) return
+    const identities = [...this.identities.values()]
+    // Nothing left to remember: a signed-out deployment with no ledger has no
+    // reason to keep an owner-only file of past credentials on disk.
+    if (this.storedAuth === undefined && this.storedOAuth === undefined && identities.length === 0) {
+      rmSync(this.options.file, { force: true })
+      return
+    }
     writeSecretFile(
       this.options.file,
       JSON.stringify({
         ...(this.storedAuth ?? {}),
         ...(this.storedOAuth === undefined ? {} : { oauth: this.storedOAuth }),
+        ...(identities.length === 0 ? {} : { identities }),
       }),
     )
   }
@@ -528,8 +656,8 @@ function readStoredClientTokens(
   const entries: Array<{ token: string; profile: GitHubProfile; createdAt: number; kind: ClientTokenKind }> = []
   for (const value of parsed) {
     if (!isRecord(value) || typeof value.token !== "string") continue
-    const profile = isRecord(value.profile) ? value.profile : undefined
-    if (profile === undefined || typeof profile.id !== "number" || typeof profile.login !== "string") continue
+    const profile = isRecord(value.profile) ? readProfile(value.profile) : undefined
+    if (profile === undefined) continue
     entries.push({
       token: value.token,
       // Legacy rows predate token kinds. Every one of them was minted by the
@@ -537,14 +665,7 @@ function readStoredClientTokens(
       // desktop credentials and stay that way across restarts.
       kind: value.kind === "agent" ? "agent" : "desktop",
       createdAt: typeof value.createdAt === "number" ? value.createdAt : 0,
-      profile: {
-        id: profile.id,
-        login: profile.login,
-        ...(typeof profile.name === "string" ? { name: profile.name } : {}),
-        ...(typeof profile.avatarUrl === "string" ? { avatarUrl: profile.avatarUrl } : {}),
-        ...(typeof profile.email === "string" ? { email: profile.email } : {}),
-        ...(typeof profile.htmlUrl === "string" ? { htmlUrl: profile.htmlUrl } : {}),
-      },
+      profile,
     })
   }
   return entries
@@ -562,18 +683,10 @@ function readStoredAuth(file?: string): StoredAuth | undefined {
   }
   if (typeof parsed !== "object" || parsed === null) return undefined
   const record = parsed as Record<string, unknown>
-  if (typeof record.profile !== "object" || record.profile === null) return undefined
-  const profile = record.profile as Record<string, unknown>
-  if (typeof profile.id !== "number" || typeof profile.login !== "string") return undefined
+  const profile = readProfile(record.profile)
+  if (profile === undefined) return undefined
   return {
-    profile: {
-      id: profile.id,
-      login: profile.login,
-      ...(typeof profile.name === "string" ? { name: profile.name } : {}),
-      ...(typeof profile.avatarUrl === "string" ? { avatarUrl: profile.avatarUrl } : {}),
-      ...(typeof profile.email === "string" ? { email: profile.email } : {}),
-      ...(typeof profile.htmlUrl === "string" ? { htmlUrl: profile.htmlUrl } : {}),
-    },
+    profile,
     token: typeof record.token === "string" ? record.token : "",
     signedInAt: typeof record.signedInAt === "number" ? record.signedInAt : 0,
     ...(isRecord(record.oauth) && typeof record.oauth.clientId === "string"
@@ -587,6 +700,61 @@ function readStoredAuth(file?: string): StoredAuth | undefined {
   }
 }
 
+function emailKey(profile: GitHubProfile): string | undefined {
+  const email = profile.email?.trim().toLowerCase()
+  return email === undefined || email.length === 0 ? undefined : email
+}
+
+function readStoredIdentities(file?: string): StoredIdentity[] {
+  if (file === undefined || !existsSync(file)) return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"))
+  } catch {
+    return []
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed.identities)) return []
+  const identities: StoredIdentity[] = []
+  for (const value of parsed.identities) {
+    if (!isRecord(value)) continue
+    if (typeof value.email !== "string") continue
+    const email = value.email.trim().toLowerCase()
+    const provider = readProvider(value.provider)
+    const id = readProfileId(value.id)
+    if (email.length === 0 || email.length > 320 || provider === undefined || id === undefined) continue
+    identities.push({ email, provider, id, login: typeof value.login === "string" ? value.login : "" })
+  }
+  return identities
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
+}
+
+// GitHub ids are numbers and Google subjects are decimal strings; both are
+// opaque keys, so either shape is accepted and kept verbatim.
+function readProfileId(value: unknown): number | string | undefined {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value
+  if (typeof value === "string" && value.trim().length > 0 && value.length <= 128) return value.trim()
+  return undefined
+}
+
+function readProvider(value: unknown): AuthProvider | undefined {
+  return isAuthProvider(value) ? value : undefined
+}
+
+function readProfile(value: unknown): GitHubProfile | undefined {
+  if (!isRecord(value)) return undefined
+  const id = readProfileId(value.id)
+  if (id === undefined || typeof value.login !== "string" || value.login.length === 0) return undefined
+  const provider = readProvider(value.provider)
+  return {
+    id,
+    login: value.login,
+    ...(provider === undefined ? {} : { provider }),
+    ...(typeof value.name === "string" ? { name: value.name } : {}),
+    ...(typeof value.avatarUrl === "string" ? { avatarUrl: value.avatarUrl } : {}),
+    ...(typeof value.email === "string" ? { email: value.email } : {}),
+    ...(typeof value.htmlUrl === "string" ? { htmlUrl: value.htmlUrl } : {}),
+  }
 }

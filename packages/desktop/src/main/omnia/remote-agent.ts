@@ -651,9 +651,9 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
       // Registration is not an auth call, so the stored session survives: a 401
       // here only rejects this request and the next sync tick retries it.
       if (retireSessionOnUnauthorized(path, response)) {
-        throw new Error("The control-plane session expired; sign in with GitHub again.")
+        throw new Error("The control-plane session expired; sign in again.")
       }
-      throw new Error("The control plane rejected this computer's registration. Sign in with GitHub again and retry.")
+      throw new Error("The control plane rejected this computer's registration. Sign in again and retry.")
     }
     throw new Error(
       typeof body.error === "string" ? body.error : `Registering this computer failed with HTTP ${response.status}.`,

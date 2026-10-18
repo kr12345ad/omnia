@@ -11,9 +11,20 @@ const SIGN_IN_POLL_INTERVAL_MS = 1500
 const SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000
 const REQUEST_TIMEOUT_MS = 30 * 1000
 
+export type AuthProvider = "github" | "google"
+
+function isAuthProvider(value: unknown): value is AuthProvider {
+  return value === "github" || value === "google"
+}
+
+const PROVIDER_LABELS: Readonly<Record<AuthProvider, string>> = { github: "GitHub", google: "Google" }
+
 export interface GitHubProfile {
-  id: number
+  // GitHub's numeric id, or Google's `sub`, a decimal string wider than a safe
+  // integer. Both are opaque keys to the control plane.
+  id: number | string
   login: string
+  provider?: AuthProvider
   name?: string
   avatarUrl?: string
   email?: string
@@ -43,6 +54,7 @@ export interface AuthStorageIssue {
 }
 
 export interface StartSignInOptions {
+  provider?: AuthProvider
   intervalMs?: number
   timeoutMs?: number
 }
@@ -57,7 +69,7 @@ class ControlPlaneError extends Error {
   }
 }
 
-let signInInFlight: Promise<GitHubAuthStatus> | undefined
+let signInInFlight: { provider: AuthProvider; promise: Promise<GitHubAuthStatus> } | undefined
 
 function sessionFile(): string {
   return join(app.getPath("userData"), "auth-session.json")
@@ -70,10 +82,13 @@ function controlPlaneUrl(): string {
 function readProfile(value: unknown): GitHubProfile | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
   const profile = value as Partial<GitHubProfile>
-  if (typeof profile.id !== "number" || typeof profile.login !== "string") return undefined
+  const id = readProfileId(profile.id)
+  if (id === undefined || typeof profile.login !== "string" || profile.login.length === 0) return undefined
+  const provider = isAuthProvider(profile.provider) ? profile.provider : undefined
   return {
-    id: profile.id,
+    id,
     login: profile.login,
+    ...(provider === undefined ? {} : { provider }),
     ...(typeof profile.name === "string" ? { name: profile.name } : {}),
     ...(typeof profile.avatarUrl === "string" ? { avatarUrl: profile.avatarUrl } : {}),
     ...(typeof profile.email === "string" ? { email: profile.email } : {}),
@@ -186,11 +201,18 @@ export function authStatus(): GitHubAuthStatus {
 }
 
 export function startSignIn(options: StartSignInOptions = {}): Promise<GitHubAuthStatus> {
-  if (signInInFlight !== undefined) return signInInFlight
-  signInInFlight = runSignIn(options).finally(() => {
+  const provider = isAuthProvider(options.provider) ? options.provider : "github"
+  if (signInInFlight !== undefined) {
+    // One browser flow at a time: the desktop polls a single control-plane
+    // state, so a second provider clicked mid-flow would wait on the first.
+    if (signInInFlight.provider === provider) return signInInFlight.promise
+    throw new Error(`A ${PROVIDER_LABELS[signInInFlight.provider]} sign-in is already in progress.`)
+  }
+  const promise = runSignIn({ ...options, provider }).finally(() => {
     signInInFlight = undefined
   })
-  return signInInFlight
+  signInInFlight = { provider, promise }
+  return promise
 }
 
 export function signOut(): GitHubAuthStatus {
@@ -199,22 +221,24 @@ export function signOut(): GitHubAuthStatus {
 }
 
 async function runSignIn(options: StartSignInOptions): Promise<GitHubAuthStatus> {
+  const provider = isAuthProvider(options.provider) ? options.provider : "github"
+  const label = PROVIDER_LABELS[provider]
   const url = controlPlaneUrl()
-  const start = await postJson(`${url}/v1/auth/github/start`, {})
+  const start = await postJson(`${url}/v1/auth/${provider}/start`, {})
   if (start.status >= 400) throw new ControlPlaneError(responseMessage(start.body, start.status), start.status)
   const authorizeUrl = field(start.body, "authorizeUrl")
   const state = field(start.body, "state")
   if (typeof authorizeUrl !== "string" || typeof state !== "string") {
-    throw new Error("The control plane did not return a GitHub sign-in URL.")
+    throw new Error(`The control plane did not return a ${label} sign-in URL.`)
   }
-  if (!isHttpUrl(authorizeUrl)) throw new Error("The control plane returned an invalid GitHub sign-in URL.")
+  if (!isHttpUrl(authorizeUrl)) throw new Error(`The control plane returned an invalid ${label} sign-in URL.`)
   await shell.openExternal(authorizeUrl)
 
   const interval = options.intervalMs ?? SIGN_IN_POLL_INTERVAL_MS
   const deadline = Date.now() + (options.timeoutMs ?? SIGN_IN_TIMEOUT_MS)
   while (Date.now() < deadline) {
     await sleep(interval)
-    const poll = await postJson(`${url}/v1/auth/github/poll`, { state }).catch(() => undefined)
+    const poll = await postJson(`${url}/v1/auth/${provider}/poll`, { state }).catch(() => undefined)
     if (poll === undefined) continue
     if (poll.status >= 400) {
       if (isFatalPollStatus(poll.status))
@@ -224,7 +248,7 @@ async function runSignIn(options: StartSignInOptions): Promise<GitHubAuthStatus>
     if (poll.body.authenticated !== true) continue
     return completeSignIn(url, poll.body)
   }
-  throw new Error("Timed out waiting for GitHub sign-in.")
+  throw new Error(`Timed out waiting for ${label} sign-in.`)
 }
 
 function completeSignIn(url: string, poll: Record<string, unknown>): GitHubAuthStatus {
@@ -299,6 +323,14 @@ function sleep(ms: number): Promise<void> {
 
 export function registerGitHubAuthIpcHandlers(): void {
   ipcMain.handle("omnia-auth-status", () => authStatus())
-  ipcMain.handle("omnia-auth-sign-in", () => startSignIn())
+  ipcMain.handle("omnia-auth-sign-in", (_event, provider: unknown) =>
+    startSignIn(isAuthProvider(provider) ? { provider } : {}),
+  )
   ipcMain.handle("omnia-auth-sign-out", () => signOut())
+}
+
+function readProfileId(value: unknown): number | string | undefined {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value
+  if (typeof value === "string" && value.trim().length > 0 && value.length <= 128) return value.trim()
+  return undefined
 }

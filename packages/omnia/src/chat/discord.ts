@@ -7,7 +7,8 @@
 // intent; without it the gateway closes with 4014. That is reported once and
 // not retried, because a reconnect loop would hide the real cause.
 
-import type { ChatMessage, ChatReply, ChatTrace, ChatTransport } from "./service"
+import { fetchAttachment, mimeFromName } from "./attachments"
+import type { ChatAttachment, ChatMessage, ChatQuote, ChatReply, ChatTrace, ChatTransport } from "./service"
 import { splitMarkdown } from "./text"
 
 const DISCORD_API = "https://discord.com/api/v10"
@@ -31,6 +32,9 @@ const HEARTBEAT_FALLBACK_MS = 41_250
 const TRACE_MARK = "\u200b"
 const TRACE_SWEEP_LIMIT = 25
 const TRACE_MIN_AGE_MS = 5_000
+// Enough of the answered message to know what the reply is about; the rest is
+// in the channel and the session, and a quote is not the question.
+const QUOTE_LIMIT = 1_500
 
 export interface DiscordTransportOptions {
   readonly token: string
@@ -42,6 +46,21 @@ export interface DiscordTransportOptions {
   /** True once this channel is a conversation Omnia already answers in. */
   readonly isConversation?: (channelId: string) => boolean
   readonly log?: (line: string) => void
+}
+
+function discordAttachments(files: readonly DiscordAttachment[] | undefined): ChatAttachment[] {
+  return (files ?? []).flatMap((file) => {
+    const url = file.url
+    if (typeof url !== "string" || url.length === 0) return []
+    const name = file.filename?.trim() || "attachment"
+    return [
+      {
+        name,
+        mime: (file.content_type ?? "").trim() || mimeFromName(name),
+        load: () => fetchAttachment(url),
+      },
+    ]
+  })
 }
 
 interface GatewayPayload {
@@ -57,12 +76,34 @@ interface DiscordAuthor {
   readonly bot?: boolean
 }
 
+interface DiscordAttachment {
+  readonly filename?: string
+  readonly content_type?: string
+  /** A signed CDN link: readable without the bot token, but short lived. */
+  readonly url?: string
+}
+
 interface DiscordMessage {
   readonly channel_id?: string
   readonly guild_id?: string
   readonly content?: string
   readonly author?: DiscordAuthor
-  readonly referenced_message?: { readonly author?: DiscordAuthor }
+  readonly referenced_message?: {
+    readonly author?: DiscordAuthor
+    readonly content?: string
+  }
+  readonly attachments?: readonly DiscordAttachment[]
+}
+
+/** The message this one replies to, as much of it as is worth putting in a prompt. */
+function discordQuote(referenced: DiscordMessage["referenced_message"]): ChatQuote | undefined {
+  const text = (referenced?.content ?? "").trim()
+  if (text.length === 0) return undefined
+  const author = referenced?.author?.username
+  return {
+    ...(author === undefined || author.length === 0 ? {} : { author }),
+    text: text.length > QUOTE_LIMIT ? `${text.slice(0, QUOTE_LIMIT).trimEnd()}…` : text,
+  }
 }
 
 export function createDiscordTransport(options: DiscordTransportOptions): ChatTransport {
@@ -267,7 +308,11 @@ class DiscordGateway implements ChatTransport {
       this.startHeartbeat(hello?.heartbeat_interval ?? HEARTBEAT_FALLBACK_MS)
       this.sendPayload({
         op: 2,
-        d: { token: this.token, intents: INTENTS, properties: { os: process.platform, browser: "omnia", device: "omnia" } },
+        d: {
+          token: this.token,
+          intents: INTENTS,
+          properties: { os: process.platform, browser: "omnia", device: "omnia" },
+        },
       })
       return
     }
@@ -315,14 +360,19 @@ class DiscordGateway implements ChatTransport {
     }
     const stripped = mention === undefined ? content : content.replace(new RegExp(mention.source, "g"), " ")
     const text = stripped.replace(/<@&\d+>/g, " ").trim()
-    if (text.length === 0) return
+    const attachments = discordAttachments(message.attachments)
+    // "<@bot>" with a screenshot and no words is a real prompt.
+    if (text.length === 0 && attachments.length === 0) return
     void this.request("POST", `/channels/${message.channel_id}/typing`).catch(() => {})
+    const replyTo = discordQuote(message.referenced_message)
     this.onMessage({
       platform: "discord",
       channelId: message.channel_id,
       userId: author.id,
       userName: author.username,
       text,
+      ...(replyTo === undefined ? {} : { replyTo }),
+      ...(attachments.length === 0 ? {} : { attachments }),
       receivedAt: Date.now(),
     })
   }
@@ -363,16 +413,19 @@ class DiscordGateway implements ChatTransport {
   private startHeartbeat(intervalMs: number): void {
     this.stopHeartbeat()
     this.awaitingAck = false
-    this.heartbeat = setInterval(() => {
-      // A socket can stall without ever emitting close. If the last heartbeat
-      // was never acknowledged, the connection is dead and must be replaced.
-      if (this.awaitingAck) {
-        this.drop("the heartbeat was not acknowledged")
-        return
-      }
-      this.awaitingAck = true
-      this.sendPayload({ op: 1, d: this.sequence ?? null })
-    }, Math.max(intervalMs, 1_000))
+    this.heartbeat = setInterval(
+      () => {
+        // A socket can stall without ever emitting close. If the last heartbeat
+        // was never acknowledged, the connection is dead and must be replaced.
+        if (this.awaitingAck) {
+          this.drop("the heartbeat was not acknowledged")
+          return
+        }
+        this.awaitingAck = true
+        this.sendPayload({ op: 1, d: this.sequence ?? null })
+      },
+      Math.max(intervalMs, 1_000),
+    )
   }
 
   private drop(reason: string): void {

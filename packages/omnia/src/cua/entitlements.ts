@@ -256,7 +256,11 @@ export function setDefaultEntitlementGate(gate: EntitlementGate | undefined): vo
 }
 
 /**
- * The numeric profile id from the signed-in auth file.
+ * The profile id from the signed-in auth file.
+ *
+ * GitHub ids are numeric and Google subjects are decimal strings, so both are
+ * accepted here and passed through as text; the control plane treats the id as
+ * an opaque key.
  *
  * Entitlements are resolved per profile, and the control plane ignores anything
  * that is not the id it wrote the subscription against, so an absent or
@@ -269,9 +273,9 @@ function signedInProfileId(file: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, "utf8"))
     if (!isRecord(parsed) || !isRecord(parsed.profile)) return undefined
-    return typeof parsed.profile.id === "number" && Number.isInteger(parsed.profile.id)
-      ? String(parsed.profile.id)
-      : undefined
+    const id = parsed.profile.id
+    if (typeof id === "number" && Number.isSafeInteger(id) && id > 0) return String(id)
+    return typeof id === "string" && id.trim().length > 0 ? id.trim() : undefined
   } catch {
     return undefined
   }

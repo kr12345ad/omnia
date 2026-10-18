@@ -59,7 +59,7 @@ const api: ElectronAPI = {
   },
   auth: {
     status: () => ipcRenderer.invoke("omnia-auth-status"),
-    signIn: () => ipcRenderer.invoke("omnia-auth-sign-in"),
+    signIn: (provider) => ipcRenderer.invoke("omnia-auth-sign-in", provider),
     signOut: () => ipcRenderer.invoke("omnia-auth-sign-out"),
   },
   computers: {

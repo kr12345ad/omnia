@@ -180,9 +180,14 @@ export interface MessageProps {
 
 export type SessionAction = (input: { sessionID: string; messageID: string }) => Promise<void> | void
 
+// Replying hands back the text of the message it answers: the caller quotes it
+// into the composer so the next question is asked about that message.
+export type ReplyAction = (input: { sessionID: string; messageID: string; text: string }) => Promise<void> | void
+
 export type UserActions = {
   fork?: SessionAction
   revert?: SessionAction
+  reply?: ReplyAction
   openAttachment?: (file: FilePart) => void
 }
 
@@ -208,23 +213,25 @@ export interface MessagePartProps {
   showAssistantCopyPartID?: string | null
   turnDurationMs?: number
   useV2Actions?: boolean
+  actions?: UserActions
 }
 
 function MessageActionButton(
   props: Pick<ComponentProps<"button">, "disabled" | "onMouseDown" | "onClick" | "aria-label"> & {
-    icon: "check" | "copy" | "reset"
+    icon: "check" | "copy" | "reset" | "reply"
     label: JSX.Element
     useV2?: boolean
   },
 ) {
-  const icon = () => (props.icon === "copy" ? "outline-copy" : props.icon)
+  const icon = () => (props.icon === "copy" ? "outline-copy" : props.icon === "reply" ? "message" : props.icon)
+  const iconV1 = () => (props.icon === "reply" ? "prompt" : props.icon)
   return (
     <Show
       when={props.useV2}
       fallback={
         <Tooltip value={props.label} placement="top" gutter={4}>
           <IconButton
-            icon={props.icon}
+            icon={iconV1()}
             size="normal"
             variant="ghost"
             disabled={props.disabled}
@@ -773,6 +780,7 @@ export function AssistantParts(props: {
   showReasoningSummaries?: boolean
   shellToolDefaultOpen?: boolean
   editToolDefaultOpen?: boolean
+  actions?: UserActions
 }) {
   const data = useData()
   const emptyParts: PartType[] = []
@@ -854,6 +862,7 @@ export function AssistantParts(props: {
                         showAssistantCopyPartID={props.showAssistantCopyPartID}
                         turnDurationMs={props.turnDurationMs}
                         useV2Actions={props.useV2Actions}
+                        actions={props.actions}
                         defaultOpen={partDefaultOpen(item()!, props.shellToolDefaultOpen, props.editToolDefaultOpen)}
                       />
                     </Show>
@@ -998,6 +1007,7 @@ export function Message(props: MessageProps) {
             showAssistantCopyPartID={props.showAssistantCopyPartID}
             showReasoningSummaries={props.showReasoningSummaries}
             useV2Actions={props.useV2Actions}
+            actions={props.actions}
           />
         )}
       </Match>
@@ -1011,6 +1021,7 @@ export function AssistantMessageDisplay(props: {
   showAssistantCopyPartID?: string | null
   showReasoningSummaries?: boolean
   useV2Actions?: boolean
+  actions?: UserActions
 }) {
   const emptyTools: ToolPart[] = []
   const part = createMemo(() => index(props.parts))
@@ -1071,6 +1082,7 @@ export function AssistantMessageDisplay(props: {
                       message={props.message}
                       showAssistantCopyPartID={props.showAssistantCopyPartID}
                       useV2Actions={props.useV2Actions}
+                      actions={props.actions}
                     />
                   </Show>
                 )
@@ -1491,6 +1503,7 @@ export function Part(props: MessagePartProps) {
         showAssistantCopyPartID={props.showAssistantCopyPartID}
         turnDurationMs={props.turnDurationMs}
         useV2Actions={props.useV2Actions}
+        actions={props.actions}
       />
     </Show>
   )
@@ -1779,6 +1792,23 @@ PART_MAPPING["text"] = function TextPartDisplay(props) {
         </div>
         <Show when={showCopy()}>
           <div data-slot="text-part-copy-wrapper" data-interrupted={interrupted() ? "" : undefined}>
+            <Show when={props.message.role === "assistant" && props.actions?.reply}>
+              <MessageActionButton
+                icon="reply"
+                label={i18n.t("ui.message.reply")}
+                useV2={props.useV2Actions}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  void props.actions?.reply?.({
+                    sessionID: props.message.sessionID,
+                    messageID: props.message.id,
+                    text: text(),
+                  })
+                }}
+                aria-label={i18n.t("ui.message.reply")}
+              />
+            </Show>
             <MessageActionButton
               icon={copied() ? "check" : "copy"}
               label={copied() ? i18n.t("ui.message.copied") : i18n.t("ui.message.copyResponse")}
@@ -2338,7 +2368,11 @@ ToolRegistry.register({
         icon="magnifying-glass-menu"
         trigger={{
           title: i18n.t("ui.tool.computerRead"),
-          subtitle: failed() ? i18n.t("ui.tool.computer.failed") : length() === undefined ? undefined : `${length()} chars`,
+          subtitle: failed()
+            ? i18n.t("ui.tool.computer.failed")
+            : length() === undefined
+              ? undefined
+              : `${length()} chars`,
         }}
       >
         <Show when={props.output}>
@@ -2485,7 +2519,16 @@ ToolRegistry.register({
               <Show
                 when={running()}
                 fallback={
-                  <Show when={props.status === "completed"} fallback={<Show when={newLayout()}><span data-component="task-tool-icon"><Icon name="subagent" size="small" /></span></Show>}>
+                  <Show
+                    when={props.status === "completed"}
+                    fallback={
+                      <Show when={newLayout()}>
+                        <span data-component="task-tool-icon">
+                          <Icon name="subagent" size="small" />
+                        </span>
+                      </Show>
+                    }
+                  >
                     <span data-component="task-tool-icon">
                       <ToolCheckmark />
                     </span>

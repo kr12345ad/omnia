@@ -72,6 +72,7 @@ import {
   SessionComposerRegion,
 } from "@/pages/session/composer"
 import { createOpenReviewFile, createSessionTabs, createSizing, shouldShowFileTree } from "@/pages/session/helpers"
+import { prependQuote, replyQuote } from "@/pages/session/reply-quote"
 import { MessageTimeline } from "@/pages/session/timeline/message-timeline"
 import { createTimelineModel } from "@/pages/session/timeline/model"
 import { type DiffStyle, SessionReviewTab, type SessionReviewTabProps } from "@/pages/session/review-tab"
@@ -899,6 +900,8 @@ export default function Page() {
   }
 
   let inputRef!: HTMLDivElement
+  // The newest composer decides how to put the caret where a reply leaves it.
+  let focusComposer: ((cursor?: number) => void) | undefined
   let promptDock: HTMLDivElement | undefined
   let dockHeight = 0
   let scroller: HTMLDivElement | undefined
@@ -1955,7 +1958,21 @@ export default function Page() {
     download()
   }
 
-  const actions = { revert, openAttachment }
+  // A reply is a question about one specific answer: quoting that answer into
+  // the draft is what makes "this" in the follow-up mean that message.
+  const reply = (input: { sessionID: string; messageID: string; text: string }) => {
+    if (input.sessionID !== params.id) return
+    const quote = replyQuote(input.text)
+    if (quote.length === 0) return
+    const next = prependQuote(prompt.current(), quote)
+    prompt.set(next.prompt, next.cursor)
+    requestAnimationFrame(() => {
+      if (focusComposer !== undefined) return focusComposer(next.cursor)
+      inputRef?.focus()
+    })
+  }
+
+  const actions = { revert, openAttachment, reply }
 
   createEffect(() => {
     const sessionID = params.id
@@ -2262,6 +2279,7 @@ export default function Page() {
                         setFollowup("paused", id, true)
                       },
                     })
+                    focusComposer = controller.restoreFocus
                     return <PromptInputV2Composer controller={controller} borderUnderlay />
                   }}
                 </Show>

@@ -3,10 +3,11 @@ import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { GITHUB_API_EMAILS, GITHUB_API_USER, GITHUB_OAUTH_TOKEN } from "../auth/github"
+import { GOOGLE_OAUTH_TOKEN, GOOGLE_OAUTH_USERINFO } from "../auth/google"
 import { createRemoteKeyPair, remoteAuthHeaders } from "../remote"
 import { startOmniaServer } from "./server"
 
-function fakeGitHubFetch(): typeof fetch {
+function fakeGitHubFetch(googleEmail = "octocat@gmail.com"): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
     if (url === GITHUB_OAUTH_TOKEN) {
@@ -22,6 +23,23 @@ function fakeGitHubFetch(): typeof fetch {
     if (url === GITHUB_API_EMAILS) {
       return Response.json([{ email: "octocat@github.com", primary: true, verified: true }])
     }
+    if (url === GOOGLE_OAUTH_TOKEN) {
+      const body = String(init?.body ?? "")
+      if (!body.includes("grant_type=authorization_code") || !body.includes("code_verifier=")) {
+        return Response.json({ error: "missing_pkce" })
+      }
+      if (!body.includes("client_secret=test-google-secret")) return Response.json({ error: "invalid_client" })
+      return Response.json({ access_token: "ya29.test_token" })
+    }
+    if (url === GOOGLE_OAUTH_USERINFO) {
+      return Response.json({
+        sub: "107834588031326048827",
+        email: googleEmail,
+        email_verified: true,
+        name: "The Octocat",
+        picture: "https://lh3.example/octocat",
+      })
+    }
     return fetch(input, init)
   }) as typeof fetch
 }
@@ -29,6 +47,7 @@ function fakeGitHubFetch(): typeof fetch {
 async function withServer<T>(
   fn: (server: Awaited<ReturnType<typeof startOmniaServer>>) => Promise<T>,
   now?: () => number,
+  googleEmail?: string,
 ): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), "omnia-server-auth-"))
   const server = await startOmniaServer({
@@ -36,7 +55,9 @@ async function withServer<T>(
     publicUrl: "https://control.example/omnia",
     githubClientId: "test-client-id",
     githubClientSecret: "test-client-secret",
-    githubFetch: fakeGitHubFetch(),
+    googleClientId: "test-google-client-id",
+    googleClientSecret: "test-google-secret",
+    githubFetch: fakeGitHubFetch(googleEmail),
     ...(now === undefined ? {} : { now }),
     credentialsFile: join(dir, "credentials.json"),
     authFile: join(dir, "auth.json"),
@@ -133,6 +154,96 @@ describe("github auth routes", () => {
       expect(pollBody.profile?.login).toBe("octocat")
       expect(pollBody.clientToken).toMatch(/^[0-9a-f]{64}$/)
     })
+  })
+
+  test("starts and completes a Google flow", async () => {
+    await withServer(async (server) => {
+      const response = await fetch(`${server.url}/v1/auth/google/start`, {
+        method: "POST",
+        headers: operatorAuth(server),
+        body: JSON.stringify({ method: "browser" }),
+      })
+      expect(response.status).toBe(200)
+      const started = (await response.json()) as { authorizeUrl: string; state: string; redirectUri: string }
+      expect(started.redirectUri).toBe("https://control.example/omnia/v1/auth/google/callback")
+      const authorize = new URL(started.authorizeUrl)
+      expect(authorize.origin + authorize.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth")
+      expect(authorize.searchParams.get("client_id")).toBe("test-google-client-id")
+      expect(authorize.searchParams.get("redirect_uri")).toBe(started.redirectUri)
+      expect(authorize.searchParams.get("scope")).toBe("openid email profile")
+      expect(authorize.searchParams.get("code_challenge_method")).toBe("S256")
+      expect(authorize.searchParams.get("state")).toBe(started.state)
+
+      const callback = await fetch(`${server.url}/v1/auth/google/callback?code=test-code&state=${started.state}`)
+      expect(callback.status).toBe(200)
+      expect(await callback.text()).toContain("connected to Google")
+
+      const status = await fetch(`${server.url}/v1/auth/google/status`)
+      const statusBody = (await status.json()) as {
+        status: {
+          authenticated: boolean
+          profile?: { id?: unknown; provider?: string; login?: string }
+          providers?: { github: boolean; google: boolean }
+        }
+      }
+      expect(statusBody.status.authenticated).toBe(true)
+      expect(statusBody.status.profile?.id).toBe("107834588031326048827")
+      expect(statusBody.status.profile?.provider).toBe("google")
+      expect(statusBody.status.profile?.login).toBe("octocat")
+      expect(statusBody.status.providers).toEqual({ github: true, google: true })
+
+      const poll = await fetch(`${server.url}/v1/auth/google/poll`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ state: started.state }),
+      })
+      expect(poll.status).toBe(200)
+      const pollBody = (await poll.json()) as { clientToken?: string; profile?: { provider?: string } }
+      expect(pollBody.clientToken).toMatch(/^[0-9a-f]{64}$/)
+      expect(pollBody.profile?.provider).toBe("google")
+    })
+  })
+
+  test("refuses Google when GitHub already owns the email", async () => {
+    // Both providers answer with the same address, which is exactly the case a
+    // person creates by reusing their GitHub address for Google.
+    await withServer(
+      async (server) => {
+        const github = await startFlow(server)
+        const githubCallback = await fetch(`${server.url}/v1/auth/github/callback?code=test-code&state=${github.state}`)
+        expect(githubCallback.status).toBe(200)
+
+        const started = (await fetch(`${server.url}/v1/auth/google/start`, {
+          method: "POST",
+          headers: operatorAuth(server),
+          body: JSON.stringify({ method: "browser" }),
+        }).then((response) => response.json())) as { state: string }
+        const googleCallback = await fetch(`${server.url}/v1/auth/google/callback?code=test-code&state=${started.state}`)
+        expect(googleCallback.status).toBe(409)
+        expect(await googleCallback.text()).toContain("already connected to a GitHub account")
+
+        // The GitHub account is still the one signed in.
+        const status = (await fetch(`${server.url}/v1/auth/google/status`).then((response) => response.json())) as {
+          status: { authenticated: boolean; profile?: { id?: unknown; provider?: string } }
+        }
+        expect(status.status.authenticated).toBe(true)
+        expect(status.status.profile?.provider).toBe("github")
+        expect(status.status.profile?.id).toBe(583231)
+
+        // Polling answers with the same refusal so the desktop stops waiting.
+        const poll = await fetch(`${server.url}/v1/auth/google/poll`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ state: started.state }),
+        })
+        expect(poll.status).toBe(409)
+        const body = (await poll.json()) as { ok: boolean; error: string }
+        expect(body.ok).toBe(false)
+        expect(body.error).toContain("already connected to a GitHub account")
+      },
+      undefined,
+      "octocat@github.com",
+    )
   })
 
   test("returns the client token exactly once", async () => {
@@ -285,9 +396,12 @@ describe("github auth routes", () => {
     try {
       const status = await fetch(`${server.url}/v1/auth/github/status`)
       expect(status.status).toBe(200)
-      const body = (await status.json()) as { status: { authenticated: boolean; oauthClientConfigured: boolean } }
+      const body = (await status.json()) as {
+        status: { authenticated: boolean; oauthClientConfigured: boolean; providers?: Record<string, boolean> }
+      }
       expect(body.status.authenticated).toBe(false)
       expect(body.status.oauthClientConfigured).toBe(false)
+      expect(body.status.providers).toEqual({ github: false, google: false })
     } finally {
       await server.stop()
     }

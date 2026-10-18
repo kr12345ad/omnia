@@ -183,6 +183,7 @@ export const dict: Record<string, string> = {
   "ui.message.forkMessage": "Crea una nuova sessione da qui",
   "ui.message.revertMessage": "Annulla messaggio",
   "ui.message.copyResponse": "Copia la risposta",
+  "ui.message.reply": "Rispondi",
   "ui.message.copied": "Copiato",
   "ui.message.duration.seconds": "{{count}}s",
   "ui.message.duration.minutesSeconds": "{{minutes}}m {{seconds}}s",

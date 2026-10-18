@@ -7,7 +7,7 @@
 // platform's webhook - is verified per platform and grants nothing on its own.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { createHmac } from "node:crypto"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { startOmniaServer } from "./server"
@@ -38,6 +38,12 @@ afterEach(() => {
 })
 
 async function withServer<T>(fn: (server: Server) => Promise<T>): Promise<T> {
+  // A channel answers as the account that connected it, so these routes are
+  // exercised as one signed-in operator rather than a signed-out plane.
+  writeFileSync(
+    join(dir, "auth.json"),
+    JSON.stringify({ profile: { id: 1, login: "tester", provider: "github" }, token: "", signedInAt: 1 }),
+  )
   const server = await startOmniaServer({
     token: "operator-token",
     authFile: join(dir, "auth.json"),

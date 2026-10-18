@@ -17,7 +17,7 @@ import { openCodeRunnerFromEnv } from "../agent-run/client"
 import { cuaDriverFor, type ComputerUseService } from "../computer-use/service"
 import type { CalibrationManager, CalibrationMeasurement, CalibrationProfile } from "../computer-use/calibration"
 import type { CuaAction, CuaActionResult, CuaFindQuery, CuaSnapshot, CuaWaitCondition } from "../cua/types"
-import { renderGitHubCallbackPage, type GitHubAuth } from "../auth/github"
+import { renderGitHubCallbackPage, type AuthProvider, type GitHubAuth } from "../auth/github"
 import type {
   ComputerUseContext,
   ComputerUseOperation,
@@ -237,12 +237,12 @@ export function isAuthorized(
 export function isPublicApiRoute(method: string, pathname: string): boolean {
   if (!pathname.startsWith(`${OMNIA_API_PREFIX}/`)) return false
   const route = pathname.slice(OMNIA_API_PREFIX.length)
-  // The GitHub OAuth handshake, which by definition runs before anyone holds a
-  // credential. Authorization is the signed state parameter.
-  if (method === "POST" && route === "/auth/github/start") return true
-  if (method === "GET" && route === "/auth/github/callback") return true
-  if (method === "GET" && route === "/auth/github/status") return true
-  if (method === "POST" && route === "/auth/github/poll") return true
+  // The OAuth handshakes (GitHub and Google), which by definition run before
+  // anyone holds a credential. Authorization is the signed state parameter.
+  if (method === "POST" && (route === "/auth/github/start" || route === "/auth/google/start")) return true
+  if (method === "GET" && (route === "/auth/github/callback" || route === "/auth/google/callback")) return true
+  if (method === "GET" && (route === "/auth/github/status" || route === "/auth/google/status")) return true
+  if (method === "POST" && (route === "/auth/github/poll" || route === "/auth/google/poll")) return true
   // Stripe cannot present an Omnia bearer. It authenticates with a signature
   // over the raw body, verified before anything is parsed or written. Matched on
   // path rather than method so a misconfigured Stripe dashboard gets an honest
@@ -2170,7 +2170,18 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
           })
           return true
         }
-        const channel = context.chatChannels.connect(requested, credentials)
+        let channel: ReturnType<typeof context.chatChannels.connect>
+        try {
+          channel = context.chatChannels.connect(requested, credentials)
+        } catch (error) {
+          // A channel belongs to the account that connected it, so another
+          // signed-in account cannot take it over by reconnecting it.
+          json(response, 409, {
+            ok: false,
+            error: error instanceof Error ? error.message : "This channel is bound to another account.",
+          })
+          return true
+        }
         context.chatChannels.sync()
         // Storing credentials is not the same as being reachable: ask now, so the
         // panel shows why a channel stays silent instead of a green "Connected".
@@ -2194,7 +2205,16 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       }
 
       if (platform !== undefined && parsed.method === "DELETE" && segments.length === 4) {
-        const removed = context.chatChannels.disconnect(platform)
+        let removed: boolean
+        try {
+          removed = context.chatChannels.disconnect(platform)
+        } catch (error) {
+          json(response, 409, {
+            ok: false,
+            error: error instanceof Error ? error.message : "This channel is bound to another account.",
+          })
+          return true
+        }
         context.chatChannels.sync()
         json(response, 200, { ok: true, removed })
         return true
@@ -2787,14 +2807,16 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
     }
     const token = context.auth.mintClientToken()
     if (token === undefined) {
-      json(response, 409, { ok: false, error: "Sign in to GitHub on the control plane before minting client tokens." })
+      json(response, 409, { ok: false, error: "Sign in on the control plane before minting client tokens." })
       return true
     }
     json(response, 200, { ok: true, clientToken: token, status: context.auth.status() })
     return true
   }
 
-  if (segments.length >= 3 && segments[1] === "auth" && segments[2] === "github") {
+  if (segments.length >= 3 && segments[1] === "auth" && (segments[2] === "github" || segments[2] === "google")) {
+    const provider: AuthProvider = segments[2]
+    const providerLabel = provider === "google" ? "Google" : "GitHub"
     if (parsed.method === "GET" && segments.length === 4 && segments[3] === "status") {
       json(response, 200, { ok: true, status: context.auth.status() })
       return true
@@ -2807,7 +2829,10 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         html(
           response,
           400,
-          renderGitHubCallbackPage("Sign-in cancelled", "GitHub did not authorize the sign-in. You can close this tab."),
+          renderGitHubCallbackPage(
+            "Sign-in cancelled",
+            `${providerLabel} did not authorize the sign-in. You can close this tab.`,
+          ),
         )
         return true
       }
@@ -2827,7 +2852,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         html(
           response,
           200,
-          renderGitHubCallbackPage("Signed in", "Omnia is now connected to GitHub. You can close this tab."),
+          renderGitHubCallbackPage("Signed in", `Omnia is now connected to ${providerLabel}. You can close this tab.`),
         )
         return true
       }
@@ -2846,6 +2871,12 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 400, { ok: false, error: "unknown_state" })
         return true
       }
+      if (polled.failure !== undefined) {
+        // A refused callback is final: the app must stop polling and show the
+        // reason, which a 200 with authenticated:false would never do.
+        json(response, 409, { ok: false, error: polled.failure })
+        return true
+      }
       json(response, 200, { ok: true, ...polled })
       return true
     }
@@ -2855,19 +2886,19 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       if (method !== "browser") {
         json(response, 400, {
           ok: false,
-          error: `GitHub sign-in method "${method}" is not supported; use the public browser callback.`,
+          error: `${providerLabel} sign-in method "${method}" is not supported; use the public browser callback.`,
         })
         return true
       }
       try {
-        const result = await context.auth.start("browser")
+        const result = await context.auth.start("browser", provider)
         json(response, 200, { ok: true, ...result })
       } catch (error) {
-        json(response, 400, { ok: false, error: error instanceof Error ? error.message : "GitHub sign-in failed." })
+        json(response, 400, { ok: false, error: error instanceof Error ? error.message : `${providerLabel} sign-in failed.` })
       }
       return true
     }
-    if (parsed.method === "POST" && segments.length === 4 && segments[3] === "client") {
+    if (parsed.method === "POST" && segments.length === 4 && segments[3] === "client" && provider === "github") {
       const body = (await readBoundBody(context, request)) as Record<string, unknown> | undefined
       if (!isRecord(body) || typeof body.clientId !== "string") {
         json(response, 400, { ok: false, error: "A clientId is required." })
@@ -2889,7 +2920,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       }
       return true
     }
-    if (parsed.method === "POST" && segments.length === 4 && segments[3] === "logout") {
+    if (parsed.method === "POST" && segments.length === 4 && segments[3] === "logout" && provider === "github") {
       const denied = operatorDenied(context, request)
       if (denied !== undefined) {
         json(response, denied.status, denied.payload)

@@ -27,6 +27,10 @@ function harness() {
       if (url.pathname === "/api/chat.postMessage") {
         return Response.json({ ok: true, ts: `ts-${++counter}`, channel: body?.channel })
       }
+      // Slack's private file URL, readable only with the bot token.
+      if (url.pathname === "/files/shot.png") {
+        return new Response(new Uint8Array([137, 80, 78, 71]), { headers: { "content-type": "image/png" } })
+      }
       return Response.json({ ok: true })
     },
   })
@@ -40,7 +44,7 @@ function harness() {
     onError: (error) => errors.push(error),
   })
 
-  return { transport, calls, messages, errors, close: () => api.stop(true) }
+  return { transport, calls, messages, errors, url: `http://127.0.0.1:${api.port}`, close: () => api.stop(true) }
 }
 
 async function waitFor(check: () => boolean, label: string): Promise<void> {
@@ -56,7 +60,7 @@ function event(payload: Record<string, unknown>, eventId = "Ev1"): string {
 }
 
 describe("the slack transport", () => {
-  test("reads a mention with the app mention stripped and answers in a thread", () => {
+  test("reads a mention with the app mention stripped and answers in the conversation", () => {
     const harnessed = harness()
     try {
       const message = harnessed.transport!.receive!(
@@ -73,10 +77,11 @@ describe("the slack transport", () => {
         channelId: "C1",
         userId: "U1",
         text: "deploy the site",
-        // A mention outside a thread starts one on the question, so the answer
-        // cannot scatter down a busy channel.
-        threadId: "111.222",
       })
+      // A mention outside a thread answers in the conversation itself. Threads
+      // are followed, never started: a DM has none, and a fresh thread hides
+      // the answer behind a click in the channel it was asked in.
+      expect(message?.threadId).toBeUndefined()
     } finally {
       harnessed.close()
     }
@@ -148,14 +153,16 @@ describe("the slack transport", () => {
     const harnessed = harness()
     try {
       const trace = harnessed.transport!.trace!(MESSAGE)!
-      trace.update("reading files")
+      trace.update("-# reading files")
       await waitFor(() => harnessed.calls.some((call) => call.method === "chat.postMessage"), "the trace")
-      trace.update("running tests")
+      trace.update("-# running tests · 0:05")
       await waitFor(() => harnessed.calls.some((call) => call.method === "chat.update"), "the trace edit")
       trace.remove()
       await waitFor(() => harnessed.calls.some((call) => call.method === "chat.delete"), "the trace removal")
       const update = harnessed.calls.find((call) => call.method === "chat.update")!
-      expect(update.body).toMatchObject({ channel: "C1", ts: "ts-1", text: "running tests" })
+      // Discord subtext is not Slack markup: the `-#` has to be stripped or
+      // the channel shows it as literal characters.
+      expect(update.body).toMatchObject({ channel: "C1", ts: "ts-1", text: "running tests · 0:05" })
     } finally {
       harnessed.close()
     }
@@ -193,6 +200,7 @@ describe("the slack request url handshake", () => {
     const dir = mkdtempSync(join(tmpdir(), "omnia-slack-"))
     const runtime = new ChatChannelsRuntime({ file: join(dir, "channels.json"), verify: async () => ({ ok: true }) })
     try {
+      runtime.setIdentity(() => ({ id: 1, login: "tester", provider: "github" }))
       runtime.connect("slack", { botToken: "xoxb-test", signingSecret: "secret" })
       const answered = await runtime.handleWebhook(
         "slack",
@@ -203,6 +211,34 @@ describe("the slack request url handshake", () => {
     } finally {
       runtime.stop()
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe("slack attachments", () => {
+  test("a screenshot comes through with the bot token and reads as a data url", async () => {
+    const harnessed = harness()
+    try {
+      const message = harnessed.transport!.receive!(
+        event({
+          type: "message",
+          subtype: "file_share",
+          channel: "C1",
+          user: "U1",
+          text: "",
+          files: [
+            { name: "shot.png", mimetype: "image/png", url_private_download: `${harnessed.url}/files/shot.png` },
+          ],
+        }),
+      )
+      // A file upload is a `file_share` message; without it the event is dropped.
+      expect(message?.text).toBe("")
+      const attachment = message?.attachments?.[0]
+      expect(attachment?.name).toBe("shot.png")
+      expect(await attachment?.load()).toBe("data:image/png;base64,iVBORw==")
+      expect(harnessed.calls.at(-1)?.authorization).toBe("Bearer xoxb-test")
+    } finally {
+      harnessed.close()
     }
   })
 })

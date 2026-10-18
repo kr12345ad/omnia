@@ -56,15 +56,16 @@ export function readAuthSession(): ControlPlaneAuth | undefined {
  * The signed-in profile id, which is what per-profile entitlements are keyed by.
  *
  * The control plane does not derive it from the client token, so a caller that
- * needs "whose plan is this" has to present it. Numeric only, because that is
- * all the profile ids GitHub returns and all the server accepts.
+ * needs "whose plan is this" has to present it. GitHub ids are numeric and
+ * Google subjects are decimal strings, so either accepted shape is returned as
+ * text; the server treats the id as an opaque key.
  */
 export function readSessionProfileId(): string | undefined {
   const profile = readSession()?.profile
   if (typeof profile !== "object" || profile === null || Array.isArray(profile)) return undefined
   const id = (profile as { id?: unknown }).id
-  if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) return undefined
-  return String(id)
+  if (typeof id === "number" && Number.isSafeInteger(id) && id > 0) return String(id)
+  return typeof id === "string" && id.trim().length > 0 ? id.trim() : undefined
 }
 
 function readSession(): Record<string, unknown> | undefined {

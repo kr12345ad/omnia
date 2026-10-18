@@ -12,9 +12,14 @@ import type { ComputerPlatform } from "@/computers"
 import type { ChatPlatform } from "@/chat"
 import type { ComputerUsePlatform } from "@/computer-use"
 
+export type AuthProvider = "github" | "google"
+
 export type GitHubProfile = {
-  id: number
+  // GitHub ids are numeric; Google subjects are decimal strings wider than a
+  // safe integer, so the id is text when it has to be.
+  id: number | string
   login: string
+  provider?: AuthProvider
   name?: string
   avatarUrl?: string
   email?: string
@@ -27,10 +32,11 @@ export type GitHubAuthStatus = {
   controlPlaneUrl?: string
 }
 
-/** GitHub sign-in through the hosted control plane (desktop only) */
+/** OAuth sign-in through the hosted control plane (desktop only) */
 export type GitHubAuthPlatform = {
   status(): Promise<GitHubAuthStatus>
-  signIn(): Promise<GitHubAuthStatus>
+  /** Omitted provider keeps the historical GitHub flow. */
+  signIn(provider?: AuthProvider): Promise<GitHubAuthStatus>
   signOut(): Promise<GitHubAuthStatus>
 }
 

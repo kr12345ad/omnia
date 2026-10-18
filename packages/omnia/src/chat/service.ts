@@ -1,7 +1,30 @@
-import { ChatChannelsService as Store } from "./channels"
+import { createHmac } from "node:crypto"
+import type { GitHubProfile } from "../auth/github"
+import { ChatChannelsService as Store, type ChatChannelOwner } from "./channels"
 import { CHAT_PLATFORMS, type ChatPlatformSpec } from "./platforms"
 import { slackChallenge } from "./slack"
 import { verifyGChat, verifyWebhook, type WebhookVerificationResult } from "./verify"
+
+/**
+ * A file that arrived with a chat message. The bytes are read lazily: a platform
+ * reference (Discord's CDN, Slack's private file URL) needs that platform's auth,
+ * which only the transport has, and a message that is never answered should not
+ * download anything.
+ */
+export interface ChatAttachment {
+  readonly name: string
+  readonly mime: string
+  /** A data: URL for the bytes, or undefined when they cannot be read. */
+  load(): Promise<string | undefined>
+}
+
+// The message a reply points at, when the platform sends one. A reply is often
+// a question about that message, so the agent has to see it: the channel's
+// session may be old, reset, or answer a dozen people at once.
+export interface ChatQuote {
+  readonly author?: string
+  readonly text: string
+}
 
 export interface ChatMessage {
   readonly platform: string
@@ -10,6 +33,8 @@ export interface ChatMessage {
   readonly userName?: string
   readonly text: string
   readonly threadId?: string
+  readonly replyTo?: ChatQuote
+  readonly attachments?: readonly ChatAttachment[]
   readonly receivedAt: number
 }
 
@@ -70,7 +95,16 @@ export interface ChatChannelSummary {
   readonly lastMessageAt?: number
   readonly messageCount?: number
   readonly error?: string
+  readonly owner?: { readonly provider: "github" | "google"; readonly id: string; readonly login: string }
 }
+
+// A channel answers as the account that connected it. These are the ways that
+// account can stop being the one in use, and what the channel says instead of
+// answering while it is paused.
+const PAUSED_SIGNED_OUT =
+  "Paused: no Omnia account is signed in. Sign in as the account that connected this channel to resume."
+const PAUSED_UNBOUND =
+  "Paused: this channel is not bound to an account yet. Reconnect it from Settings to bind it to the signed-in account."
 
 /**
  * Whether a platform can actually reach this Omnia: returns why it cannot, or
@@ -95,12 +129,24 @@ export class ChatChannelsRuntime {
   private transportFactory: ChatTransportFactory | undefined
   private conversationCheck: ((platform: string, channelId: string) => boolean) | undefined
   private channelCheck: ChatChannelCheck | undefined
+  private currentProfile: (() => GitHubProfile | undefined) | undefined
+  private readonly secret: string | undefined
   private readonly transports = new Map<string, ChatTransport>()
   private readonly messageLog: ChatMessage[] = []
 
-  constructor(options: { file?: string; verify?: ChatWebhookVerifier } = {}) {
+  constructor(options: { file?: string; verify?: ChatWebhookVerifier; secret?: string } = {}) {
     this.store = new Store(options.file === undefined ? {} : { file: options.file })
     this.verifier = options.verify
+    this.secret = options.secret
+  }
+
+  /**
+   * Who the control plane is signed in as right now. Channels are bound to the
+   * account that connected them, so this is what every inbound message is
+   * checked against before any agent work happens.
+   */
+  setIdentity(read: (() => GitHubProfile | undefined) | undefined): void {
+    this.currentProfile = read
   }
 
   /** The credential fields each channel has set, and none of their values. */
@@ -115,6 +161,9 @@ export class ChatChannelsRuntime {
       ...(channel.lastMessageAt === undefined ? {} : { lastMessageAt: channel.lastMessageAt }),
       ...(channel.messageCount === undefined ? {} : { messageCount: channel.messageCount }),
       ...(channel.error === undefined ? {} : { error: channel.error }),
+      ...(channel.owner === undefined
+        ? {}
+        : { owner: { provider: channel.owner.provider, id: channel.owner.id, login: channel.owner.login } }),
     }))
   }
 
@@ -204,15 +253,27 @@ export class ChatChannelsRuntime {
   }
 
   connect(platform: string, credentials: Record<string, string>): ChatChannelSummary {
-    const channel = this.store.connect(platform, credentials)
-    return this.describeOne(platform) ?? {
-      platform: channel.platform,
-      enabled: channel.enabled,
-      configured: [],
-    }
+    this.requireOwner(platform)
+    const existing = this.store.get(platform)
+    const profile = this.currentProfile?.()
+    // The first account to connect a channel owns it; reconnecting the same
+    // account keeps the original binding instead of minting a new one.
+    const owner = existing?.owner ?? (profile === undefined ? undefined : this.ownerFor(profile))
+    const binding = existing?.ownerBinding ?? (owner === undefined ? undefined : this.sign(platform, owner))
+    const channel = this.store.connect(platform, credentials, undefined, owner, binding)
+    return (
+      this.describeOne(platform) ?? {
+        platform: channel.platform,
+        enabled: channel.enabled,
+        configured: [],
+      }
+    )
   }
 
   disconnect(platform: string): boolean {
+    // Removing a channel would otherwise be the way around its binding: delete
+    // it, reconnect it as the account you signed in with.
+    this.requireOwner(platform)
     return this.store.disconnect(platform)
   }
 
@@ -315,7 +376,15 @@ export class ChatChannelsRuntime {
    * and a live transport go through here so metering, the error column and the
    * transcript read the same regardless of how the message arrived.
    */
-  async answer(message: ChatMessage, trace?: ChatTrace): Promise<{ ok: boolean; reply: string }> {
+  async answer(message: ChatMessage, trace?: ChatTrace): Promise<{ ok: boolean; reply?: string }> {
+    const paused = this.paused(message.platform)
+    if (paused !== undefined) {
+      // Refused, not answered: no agent turn and the reason recorded where the
+      // settings panel can show it. The notice is posted back to the channel so
+      // a paused bot is visibly paused instead of silently broken.
+      this.store.setError(message.platform, paused)
+      return { ok: true, reply: paused }
+    }
     this.messageLog.push(message)
     this.store.recordMessage(message.platform)
     if (this.agentRunner === undefined) {
@@ -346,7 +415,10 @@ export class ChatChannelsRuntime {
     const transport = this.transports.get(message.platform)
     if (transport === undefined) return
     void this.answer(message, this.openTrace(transport, message)).then(
-      (answered) => this.post(transport, message, answered.reply),
+      (answered) => {
+        if (answered.reply === undefined || answered.reply.length === 0) return
+        this.post(transport, message, answered.reply)
+      },
       (error) => {
         // answer() records its own failures; this is the last resort so a
         // rejected run still reaches the channel instead of going quiet.
@@ -375,6 +447,51 @@ export class ChatChannelsRuntime {
 
   recentMessages(limit = 50): readonly ChatMessage[] {
     return this.messageLog.slice(-limit)
+  }
+
+  // The refusal reason for this channel, or undefined when it may answer. The
+  // check is the gate in front of every agent turn: a webhook, a Discord
+  // gateway event and a Slack mention all reach answer(), so none of them can
+  // spend a model call while the account in use is not the bound one.
+  private paused(platform: string): string | undefined {
+    const profile = this.currentProfile?.()
+    const channel = this.store.get(platform)
+    if (channel === undefined) return undefined
+    // The binding is made when a channel is connected, never inferred from
+    // whoever happens to be running: two Omnia processes share this file, so an
+    // inferred owner could be the other process's account.
+    if (channel.owner === undefined) return PAUSED_UNBOUND
+    const owner = channel.owner
+    if (profile === undefined) return PAUSED_SIGNED_OUT
+    if (!this.isOwner(owner, profile)) {
+      return `Paused: this channel is bound to @${owner.login}. Sign in as that account to resume.`
+    }
+    if (this.secret !== undefined && channel.ownerBinding !== this.sign(platform, owner)) {
+      return "Paused: this channel's account binding was altered. Reconnect the channel from Settings to resume."
+    }
+    return undefined
+  }
+
+  private requireOwner(platform: string): void {
+    const owner = this.store.get(platform)?.owner
+    if (owner === undefined) return
+    const profile = this.currentProfile?.()
+    if (profile === undefined || !this.isOwner(owner, profile)) {
+      throw new Error(`This channel is bound to @${owner.login}. Sign back in as that account to manage it.`)
+    }
+  }
+
+  private isOwner(owner: ChatChannelOwner, profile: GitHubProfile): boolean {
+    return owner.provider === (profile.provider ?? "github") && owner.id === String(profile.id)
+  }
+
+  private ownerFor(profile: GitHubProfile): ChatChannelOwner {
+    return { provider: profile.provider ?? "github", id: String(profile.id), login: profile.login, boundAt: Date.now() }
+  }
+
+  private sign(platform: string, owner: ChatChannelOwner): string | undefined {
+    if (this.secret === undefined) return undefined
+    return createHmac("sha256", this.secret).update(`${platform}\n${owner.provider}\n${owner.id}`).digest("hex")
   }
 }
 

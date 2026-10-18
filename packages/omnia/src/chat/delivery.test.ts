@@ -22,6 +22,9 @@ async function waitFor(check: () => boolean, label: string): Promise<void> {
 
 function runtimeWith(file: string): ChatChannelsRuntime {
   const runtime = new ChatChannelsRuntime({ file, verify: async () => ({ ok: true }) })
+  // A channel answers as the account that connected it, so these delivery
+  // tests run as a signed-in one.
+  runtime.setIdentity(() => ({ id: 1, login: "tester", provider: "github" }))
   runtime.connect("gchat", { credentials: "x", audience: "y" })
   return runtime
 }

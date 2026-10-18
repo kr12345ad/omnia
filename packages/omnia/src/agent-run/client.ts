@@ -94,10 +94,20 @@ export async function createSession(config: OpenCodeRunnerConfig, title: string)
   return info
 }
 
+/** A prompt part the server accepts: text, or a file it reads (data: or file:). */
+export type PromptPart =
+  | { readonly type: "text"; readonly text: string }
+  | {
+      readonly type: "file"
+      readonly mime: string
+      readonly url: string
+      readonly filename?: string
+    }
+
 export async function promptAsync(
   config: OpenCodeRunnerConfig,
   sessionId: string,
-  parts: readonly { readonly type: "text"; readonly text: string }[],
+  parts: readonly PromptPart[],
   // Without an explicit model the server falls back to its configured default,
   // which on a hosted install can be a plan the provider refuses for headless
   // callers. A caller that needs a working provider names it here.

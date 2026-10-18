@@ -21,6 +21,10 @@ function harness(options: { isConversation?: (channelId: string) => boolean } = 
       const body = (await request.json().catch(() => undefined)) as Record<string, unknown> | undefined
       posts.push({ method: request.method, path, body, authorization: request.headers.get("authorization") })
       // The gateway reads the bot's own roles so a role mention can address it.
+      // Discord's CDN answers the signed attachment link without the bot token.
+      if (request.method === "GET" && path === "/file.png") {
+        return new Response(new Uint8Array([137, 80, 78, 71]), { headers: { "content-type": "image/png" } })
+      }
       if (request.method === "GET" && path === "/users/@me/guilds") return Response.json([{ id: "G1" }])
       if (request.method === "GET" && path === "/guilds/G1/members/bot-1") {
         return Response.json({ roles: ["1560837367546380379"] })
@@ -81,6 +85,7 @@ function harness(options: { isConversation?: (channelId: string) => boolean } = 
     messages,
     posts,
     events,
+    url: `http://127.0.0.1:${api.port}`,
     deliver(payload: unknown) {
       socket?.send(JSON.stringify(payload))
     },
@@ -193,11 +198,43 @@ describe("the discord transport", () => {
           guild_id: "G1",
           content: "what about the tests?",
           author: { id: "U1", username: "krishnaa" },
-          referenced_message: { author: { id: "bot-1", username: "omnia", bot: true } },
+          referenced_message: {
+            author: { id: "bot-1", username: "omnia", bot: true },
+            content: "The deploy broke on the migration step.",
+          },
         },
       })
       await waitFor(() => harnessed.messages.length === 1, "a reply to the bot")
       expect(harnessed.messages[0]!.text).toBe("what about the tests?")
+      // The reply is a question about the answered message, so that message
+      // travels with it: the channel's session may not hold it.
+      expect(harnessed.messages[0]!.replyTo).toEqual({
+        author: "omnia",
+        text: "The deploy broke on the migration step.",
+      })
+    } finally {
+      harnessed.close()
+    }
+  })
+
+  test("a reply with no quoted text carries no quote", async () => {
+    const harnessed = harness()
+    try {
+      harnessed.transport.start()
+      await harnessed.ready()
+      harnessed.deliver({
+        op: 0,
+        t: "MESSAGE_CREATE",
+        d: {
+          channel_id: "C9",
+          guild_id: "G1",
+          content: "what about the tests?",
+          author: { id: "U1", username: "krishnaa" },
+          referenced_message: { author: { id: "bot-1", username: "omnia", bot: true } },
+        },
+      })
+      await waitFor(() => harnessed.messages.length === 1, "a reply to the bot")
+      expect(harnessed.messages[0]!.replyTo).toBeUndefined()
     } finally {
       harnessed.close()
     }
@@ -382,5 +419,62 @@ describe("splitting a long discord reply", () => {
     expect(chunks.length).toBeGreaterThan(8)
     expect(chunks.every((chunk) => chunk.length <= 2000)).toBe(true)
     expect(chunks.at(-1)).toContain("16,384")
+  })
+})
+
+describe("discord attachments", () => {
+  test("a screenshot comes through as a data url the model can see", async () => {
+    const harnessed = harness({ isConversation: () => true })
+    try {
+      harnessed.transport.start()
+      await harnessed.ready()
+      harnessed.deliver({
+        op: 0,
+        t: "MESSAGE_CREATE",
+        d: {
+          id: "M2",
+          channel_id: "C1",
+          guild_id: "G1",
+          content: "what is wrong here?",
+          author: { id: "U1", username: "krishnaa" },
+          attachments: [
+            { filename: "shot.png", content_type: "image/png", url: `${harnessed.url}/file.png` },
+          ],
+        },
+      })
+      await waitFor(() => harnessed.messages.length === 1, "the message")
+      const attachment = harnessed.messages[0]!.attachments?.[0]
+      expect(attachment?.name).toBe("shot.png")
+      expect(attachment?.mime).toBe("image/png")
+      expect(await attachment?.load()).toBe("data:image/png;base64,iVBORw==")
+    } finally {
+      harnessed.close()
+    }
+  })
+
+  test("a file with no words is still a message", async () => {
+    const harnessed = harness({ isConversation: () => true })
+    try {
+      harnessed.transport.start()
+      await harnessed.ready()
+      harnessed.deliver({
+        op: 0,
+        t: "MESSAGE_CREATE",
+        d: {
+          id: "M3",
+          channel_id: "C1",
+          guild_id: "G1",
+          content: "",
+          author: { id: "U1", username: "krishnaa" },
+          attachments: [{ filename: "shot.png", url: `${harnessed.url}/file.png` }],
+        },
+      })
+      await waitFor(() => harnessed.messages.length === 1, "the file-only message")
+      expect(harnessed.messages[0]!.text).toBe("")
+      // Discord omits content_type for some uploads; the name still says what it is.
+      expect(harnessed.messages[0]!.attachments?.[0]?.mime).toBe("image/png")
+    } finally {
+      harnessed.close()
+    }
   })
 })

@@ -268,6 +268,7 @@ describe("the google chat webhook", () => {
     const dir = mkdtempSync(join(tmpdir(), "omnia-gchat-"))
     const runtime = new ChatChannelsRuntime({ file: join(dir, "channels.json"), verify: async () => ({ ok: true }) })
     try {
+      runtime.setIdentity(() => ({ id: 1, login: "tester", provider: "github" }))
       runtime.connect("gchat", { credentials: "{}", audience: "https://example.test/webhook" })
       let release: (() => void) | undefined
       const gate = new Promise<void>((resolve) => {
@@ -318,6 +319,7 @@ describe("the google chat webhook", () => {
     const dir = mkdtempSync(join(tmpdir(), "omnia-gchat-"))
     const runtime = new ChatChannelsRuntime({ file: join(dir, "channels.json"), verify: async () => ({ ok: true }) })
     try {
+      runtime.setIdentity(() => ({ id: 1, login: "tester", provider: "github" }))
       runtime.connect("gchat", { credentials: "not a service account", audience: "https://example.test/webhook" })
       const answered = await runtime.handleWebhook(
         "gchat",
@@ -404,6 +406,7 @@ describe("the google chat app check", () => {
     const dir = mkdtempSync(join(tmpdir(), "omnia-gchat-"))
     const runtime = new ChatChannelsRuntime({ file: join(dir, "channels.json") })
     try {
+      runtime.setIdentity(() => ({ id: 1, login: "tester", provider: "github" }))
       runtime.connect("gchat", { credentials: "{}", audience: "https://example.test/webhook" })
       expect(runtime.describeOne("gchat")?.error).toBeUndefined()
       runtime.setChannelCheck(async (platform) => (platform === "gchat" ? "configure the app" : undefined))
