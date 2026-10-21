@@ -28,6 +28,7 @@ import {
 import { useLayout } from "@/context/layout"
 import { useSDK } from "@/context/sdk"
 import { useSync } from "@/context/sync"
+import { useEnterprise } from "@/context/enterprise"
 import { useComments } from "@/context/comments"
 import { Button } from "@opencode-ai/ui/button"
 import { DockShellForm, DockTray } from "@opencode-ai/ui/dock-surface"
@@ -488,7 +489,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
       title: language.t("prompt.action.attachFile"),
       category: language.t("command.category.file"),
       keybind: "mod+u",
-      disabled: store.mode !== "normal",
+      disabled: store.mode !== "normal" || !attachmentsAllowed(),
       onSelect: pick,
     },
     {
@@ -496,7 +497,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
       title: language.t("command.prompt.mode.shell"),
       category: language.t("command.category.session"),
       keybind: shellModeKey,
-      disabled: store.mode === "shell",
+      disabled: store.mode === "shell" || enterprise.permission("bash") === "deny",
       onSelect: () => setMode("shell"),
     },
     {
@@ -1200,6 +1201,14 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     return true
   }
 
+  const enterprise = useEnterprise()
+  const attachmentsAllowed = () => enterprise.feature("fileAttachments")
+  const rejectionToast = (message: string) =>
+    showToast({
+      variant: "error",
+      title: language.t("common.requestFailed"),
+      description: message,
+    })
   const { addAttachment, addAttachments, removeAttachment, handlePaste } = createPromptAttachments({
     prompt,
     editor: () => editorRef,
@@ -1212,6 +1221,8 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     addPart,
     readClipboardImage: platform.readClipboardImage,
     getPathForFile: platform.getPathForFile,
+    validate: (file) => enterprise.attachmentCheck(file),
+    onRejected: rejectionToast,
   })
 
   const fileAttachmentInput = () => (
@@ -1645,6 +1656,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                 "pointer-events": buttonsSpring() > 0.5 ? "auto" : "none",
               }}
             >
+              <Show when={attachmentsAllowed()}>
               <TooltipKeybind
                 placement="top"
                 title={language.t("prompt.action.attachFile")}
@@ -1664,6 +1676,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                   <Icon name="plus" class="size-4.5" />
                 </Button>
               </TooltipKeybind>
+              </Show>
             </div>
           </div>
         </div>

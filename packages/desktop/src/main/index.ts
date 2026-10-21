@@ -60,6 +60,7 @@ import {
 } from "./omnia/remote-agent"
 import { registerWslIpcHandlers } from "./wsl/ipc"
 import { controlPlaneFingerprint } from "./omnia/control-plane"
+import { enterpriseProfile } from "./omnia/enterprise"
 import { watchControlPlaneSession, type ControlPlaneSessionWatch } from "./omnia/control-plane-session"
 import { spawnWslSidecar } from "./wsl/sidecar"
 import { migrate } from "./migrate"
@@ -175,7 +176,10 @@ const main = Effect.gen(function* () {
 
   process.env.OPENCODE_DISABLE_EMBEDDED_WEB_UI = "true"
 
-  const appId = app.isPackaged ? APP_IDS[CHANNEL] : "io.omnia.desktop.dev"
+  // A tenant build uses its own id so it never shares the public app's
+  // userData, and therefore never inherits its sign-in or local state.
+  const tenant = app.isPackaged ? enterpriseProfile() : undefined
+  const appId = tenant?.appId ?? (app.isPackaged ? APP_IDS[CHANNEL] : "io.omnia.desktop.dev")
   const onboardingTestRoot = ((): string | undefined => {
     if (!TEST_ONBOARDING) return
 
@@ -191,7 +195,15 @@ const main = Effect.gen(function* () {
     process.env.XDG_STATE_HOME = join(root, "state")
     return root
   })()
-  app.setName(app.isPackaged ? APP_NAMES[CHANNEL] : "Omnia Dev")
+  // A tenant build is named by its branding (the manifest's productName), while
+  // the profile's `name` stays the distribution name from the schema.
+  app.setName(
+    tenant === undefined
+      ? app.isPackaged
+        ? APP_NAMES[CHANNEL]
+        : "Omnia Dev"
+      : tenant.branding.productName?.trim() || tenant.name,
+  )
   app.setAppUserModelId(appId)
   app.setPath(
     "userData",

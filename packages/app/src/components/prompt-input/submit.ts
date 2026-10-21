@@ -16,6 +16,7 @@ import { useSDK, type DirectorySDK } from "@/context/sdk"
 import { useSync, type DirectorySync } from "@/context/sync"
 import { Identifier } from "@/utils/id"
 import { Worktree as WorktreeState } from "@/utils/worktree"
+import { replyQuote } from "@opencode-ai/session-ui/message-reply"
 import { buildRequestParts } from "./build-request-parts"
 import { setCursorPosition } from "./editor-dom"
 import { formatServerError } from "@/utils/server-errors"
@@ -40,6 +41,9 @@ export type FollowupDraft = {
   agent: string
   model: { providerID: string; modelID: string }
   variant?: string
+  // The answered message, quoted into the text this draft sends; the draft's
+  // prompt itself stays as the user wrote it.
+  reply?: string
 }
 
 type FollowupSendInput = {
@@ -58,6 +62,7 @@ const draftImages = (prompt: Prompt) => prompt.filter((part): part is ImageAttac
 
 export async function sendFollowupDraft(input: FollowupSendInput) {
   const text = draftText(input.draft.prompt)
+  const body = input.draft.reply ? replyQuote(input.draft.reply) + text : text
   const images = draftImages(input.draft.prompt)
   const setBusy = () => {
     if (!input.optimisticBusy) return
@@ -122,7 +127,7 @@ export async function sendFollowupDraft(input: FollowupSendInput) {
     prompt: input.draft.prompt,
     context: input.draft.context,
     images: encodedImages,
-    text,
+    text: body,
     sessionID: input.draft.sessionID,
     messageID,
     sessionDirectory: input.draft.sessionDirectory,
@@ -328,6 +333,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
     })
     const currentPrompt = submission.prompt
     const context = submission.context
+    const reply = target.reply.current()
     const text = currentPrompt.map((part) => ("content" in part ? part.content : "")).join("")
     const images = input.imageAttachments().slice()
     const mode = input.mode()
@@ -464,6 +470,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       agent,
       model,
       variant,
+      reply: reply?.text,
     }
 
     const clearInput = () => {
@@ -476,6 +483,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       const restored = submission.restore()
       if (!restored) return false
       restored.target.set(restored.prompt, input.promptLength(restored.prompt))
+      if (reply) restored.target.reply.set(reply)
       if (!submission.current(prompt.capture())) return true
       input.setMode(mode)
       input.setPopover(null)

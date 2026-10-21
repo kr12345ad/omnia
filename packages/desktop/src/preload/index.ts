@@ -3,6 +3,11 @@ import type { ElectronAPI, OmniaEvent, OmniaFailure, Superskill, WslServersEvent
 import type { BrowserPanelCommand } from "@opencode-ai/app/context/platform"
 import type { UpdaterState } from "@opencode-ai/app/updater"
 
+// The main process passes this for tenant installers, so the renderer knows it
+// is a managed build before any IPC round trip and never renders the public
+// GitHub/Google sign-in.
+const MANAGED_CLIENT = process.argv.includes("--omnia-managed-client")
+
 const updaterCallbacks = new Set<(state: UpdaterState) => void>()
 let updaterState: UpdaterState | undefined
 let updaterSubscription: Promise<void> | undefined
@@ -61,6 +66,15 @@ const api: ElectronAPI = {
     status: () => ipcRenderer.invoke("omnia-auth-status"),
     signIn: (provider) => ipcRenderer.invoke("omnia-auth-sign-in", provider),
     signOut: () => ipcRenderer.invoke("omnia-auth-sign-out"),
+    // Managed builds sign in with the account their own server issued.
+    enterprise: {
+      managed: MANAGED_CLIENT,
+      profile: () => ipcRenderer.invoke("omnia-enterprise-profile"),
+      manifest: () => ipcRenderer.invoke("omnia-enterprise-manifest"),
+      policy: () => ipcRenderer.invoke("omnia-enterprise-policy"),
+      signIn: (identifier, password) => ipcRenderer.invoke("omnia-enterprise-sign-in", identifier, password),
+      reportUsage: (event) => ipcRenderer.invoke("omnia-enterprise-report-usage", event),
+    },
   },
   computers: {
     list: () => ipcRenderer.invoke("computers-list"),

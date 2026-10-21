@@ -45,9 +45,14 @@ plugin({
 // substitute the narrow surfaces it reads so the blocking logic can be driven
 // like the real renderer would.
 mock.module("@opencode-ai/ui/v2/button-v2", () => ({
-  ButtonV2: (props: { children?: unknown; disabled?: boolean; onClick?: () => void }) => {
+  ButtonV2: (props: {
+    children?: unknown
+    disabled?: boolean
+    onClick?: () => void
+    type?: "button" | "submit" | "reset"
+  }) => {
     const button = document.createElement("button")
-    button.type = "button"
+    button.type = props.type ?? "button"
     button.disabled = props.disabled === true
     button.addEventListener("click", () => props.onClick?.())
     insert(button, () => props.children)
@@ -67,6 +72,11 @@ mock.module("@opencode-ai/ui/logo", () => ({
 mock.module("@opencode-ai/ui/icon", () => ({ Icon: () => null }))
 mock.module("@opencode-ai/ui/dropdown-menu", () => ({ DropdownMenu: () => null }))
 mock.module("@/context/language", () => ({ useLanguage: () => ({ t: (key: string) => key }) }))
+// Outside a managed build the enterprise policy stays undefined, so the public
+// gate is unchanged by this mock.
+mock.module("@/context/enterprise", () => ({
+  useEnterprise: () => ({ policy: () => undefined, managed: false }),
+}))
 
 type TestStatus = {
   authenticated: boolean
@@ -79,6 +89,47 @@ const state = {
   signInResult: { authenticated: true, profile: { id: 1, login: "octocat" } } as TestStatus,
   signInError: undefined as Error | undefined,
   signInProviders: [] as (string | undefined)[],
+  managed: false,
+  enterpriseSignIns: [] as { identifier: string; password: string }[],
+}
+
+const enterpriseProfile = {
+  kind: "omnia-enterprise-client",
+  schema: 1,
+  distribution: "acme-field",
+  version: "1.0.0",
+  name: "Acme Field",
+  appId: "io.omnia.enterprise.acme-field",
+  server: "http://10.0.0.4:8787",
+  manifestUrl: "http://10.0.0.4:8787/v1/enterprise/public/client/acme-field/manifest",
+  loginUrl: "http://10.0.0.4:8787/v1/enterprise/public/client/acme-field/login",
+  org: { name: "Acme", slug: "acme" },
+  branding: {
+    productName: "Acme Field",
+    shortName: "AF",
+    tagline: "Field work, on your infrastructure.",
+    primaryColor: "#0a0a0a",
+    accentColor: "#2563eb",
+    signInHeadline: "Sign in to Acme Field",
+    showOmniaBranding: false,
+  },
+  auth: { allowedEmailDomains: ["acme.test"] },
+  features: {},
+  experience: {},
+  update: {},
+  deployment: {},
+}
+
+const enterpriseAuth = {
+  managed: true,
+  profile: async () => enterpriseProfile,
+  manifest: async () => undefined,
+  policy: async () => undefined,
+  signIn: async (identifier: string, password: string) => {
+    state.enterpriseSignIns.push({ identifier, password })
+    state.status = state.signInResult
+    return state.status
+  },
 }
 
 const platform = {
@@ -97,6 +148,9 @@ const platform = {
     signOut: async () => {
       state.status = { authenticated: false }
       return state.status
+    },
+    get enterprise() {
+      return state.managed ? enterpriseAuth : undefined
     },
   },
 }
@@ -138,6 +192,8 @@ beforeEach(() => {
   state.status = { authenticated: false }
   state.signInError = undefined
   state.signInProviders = []
+  state.managed = false
+  state.enterpriseSignIns = []
 })
 
 afterAll(() => {
@@ -211,5 +267,65 @@ describe.skipIf(isServer)("first-run gate", () => {
     expect(app.container.querySelector("[data-testid=app]")).toBeNull()
     expect(app.container.querySelector("[data-component=first-run-gate]")).not.toBeNull()
     app.unmount()
+  })
+
+  test("renders the distribution's client preview with no social sign-in", async () => {
+    state.managed = true
+    const app = mountGate()
+    await settle()
+
+    const gate = app.container.querySelector("[data-component=first-run-gate]")
+    expect(gate).not.toBeNull()
+    expect(gate!.textContent).toContain("Acme Field")
+    expect(gate!.textContent).toContain("Sign in to Acme Field")
+    expect(gate!.textContent).toContain("SSO only · acme.test")
+    expect(gate!.textContent).toContain("Powered by your team")
+    expect(gate!.textContent).not.toContain("ui.github.continue")
+    expect(gate!.textContent).not.toContain("ui.google.continue")
+    expect(app.container.querySelector("[data-testid=app]")).toBeNull()
+    app.unmount()
+  })
+
+  test("signs in with the work account through the tenant server", async () => {
+    state.managed = true
+    const app = mountGate()
+    await settle()
+
+    const inputs = app.container.querySelectorAll("input")
+    expect(inputs.length).toBe(2)
+    inputs[0]!.value = "ada@acme.test"
+    inputs[0]!.dispatchEvent(new Event("input", { bubbles: true }))
+    inputs[1]!.value = "correct horse"
+    inputs[1]!.dispatchEvent(new Event("input", { bubbles: true }))
+    app.container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }))
+    await settle()
+
+    expect(state.enterpriseSignIns).toEqual([{ identifier: "ada@acme.test", password: "correct horse" }])
+    expect(app.container.querySelector("[data-testid=app]")).not.toBeNull()
+    expect(app.container.querySelector("[data-component=first-run-gate]")).toBeNull()
+    app.unmount()
+  })
+})
+
+describe.skipIf(isServer)("account label", () => {
+  test("names a tenant session a work account instead of GitHub", () => {
+    const work = { authenticated: true, method: "enterprise" as const, profile: { id: 1, login: "ada@acme.test" } }
+    expect(authModule!.accountKind(work, true)).toBe("work")
+    // Sessions written before the method existed are work accounts in a tenant build.
+    expect(
+      authModule!.accountKind({ authenticated: true, profile: { id: 1, login: "ada@acme.test" } }, true),
+    ).toBe("work")
+    expect(
+      authModule!.accountKind({ authenticated: true, method: "oauth", profile: { id: 1, login: "octocat" } }, true),
+    ).toBe("github")
+    expect(
+      authModule!.accountKind({ authenticated: true, method: "gh", profile: { id: 1, login: "octocat" } }, false),
+    ).toBe("gh")
+    expect(
+      authModule!.accountKind(
+        { authenticated: true, method: "oauth", profile: { id: "2", login: "ada", provider: "google" } },
+        false,
+      ),
+    ).toBe("google")
   })
 })

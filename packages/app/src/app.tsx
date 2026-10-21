@@ -38,6 +38,7 @@ import {
 } from "solid-js"
 import { Dynamic } from "solid-js/web"
 import { makeEventListener } from "@solid-primitives/event-listener"
+import { EnterpriseExperience, EnterpriseProvider, useEnterprise } from "@/context/enterprise"
 import { CommandProvider, useCommand, type CommandOption } from "@/context/command"
 import { CommentsProvider } from "@/context/comments"
 import { FileProvider } from "@/context/file"
@@ -439,7 +440,12 @@ export function AppBaseProviders(
               <QueryProvider>
                 <WslServersProvider>
                   <DialogProvider>
-                    <FileComponentProvider component={File}>{props.children}</FileComponentProvider>
+                    <FileComponentProvider component={File}>
+                      <EnterpriseProvider>
+                        <EnterpriseExperience />
+                        {props.children}
+                      </EnterpriseProvider>
+                    </FileComponentProvider>
                   </DialogProvider>
                 </WslServersProvider>
               </QueryProvider>
@@ -605,7 +611,9 @@ export function AppInterface(props: {
 
   return (
     <FirstRunGate>
-      <OnboardingWizard />
+      <Show when={useEnterprise().experience()?.showTips !== false}>
+        <OnboardingWizard />
+      </Show>
       <ServerProvider
         defaultServer={props.defaultServer}
         canonicalLocalServer={props.canonicalLocalServer}

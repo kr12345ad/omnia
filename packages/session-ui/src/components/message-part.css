@@ -161,6 +161,42 @@
     max-width: 100%;
   }
 
+  /* A reply reads as the answered message plus this one: the card shrinks to
+     the quote it carries, capped at the bubble width below it, so a one-line
+     answer stays a small card instead of a banner across the row. */
+  [data-slot="user-message-reply"] {
+    max-width: 100%;
+    min-width: 0;
+    margin-bottom: 6px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    border: 0.5px solid var(--v2-border-border-base);
+    background: var(--v2-background-bg-layer-01);
+  }
+
+  [data-slot="user-message-reply-label"] {
+    display: block;
+    font-size: var(--font-size-small);
+    line-height: var(--line-height-large);
+    color: var(--v2-text-text-muted);
+  }
+
+  [data-slot="user-message-reply-quote"] {
+    max-width: 100%;
+    padding-top: 2px;
+    font-size: var(--font-size-small);
+    line-height: var(--line-height-large);
+    color: var(--v2-text-text-faint);
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
+    white-space: pre-wrap;
+    word-break: break-word;
+    unicode-bidi: plaintext;
+  }
+
   [data-slot="user-message-copy-wrapper"] {
     min-height: 24px;
     margin-top: 4px;
@@ -715,6 +751,7 @@
 }
 
 [data-component="user-message"] [data-slot="user-message-text"],
+[data-component="user-message"] [data-slot="user-message-reply-quote"],
 [data-component="text-part"],
 [data-component="reasoning-part"],
 [data-component="tool-output"],
@@ -1433,6 +1470,20 @@ body:not([data-new-layout]) {
       border-radius: 6px;
     }
 
+    [data-slot="user-message-reply"] {
+      background: var(--surface-base);
+      border: 1px solid var(--border-weak-base);
+      border-radius: 6px;
+    }
+
+    [data-slot="user-message-reply-label"] {
+      color: var(--text-weak);
+    }
+
+    [data-slot="user-message-reply-quote"] {
+      color: var(--text-base);
+    }
+
     .text-text-strong {
       color: var(--text-strong);
     }
@@ -1592,5 +1643,26 @@ body:not([data-new-layout]) {
 
   [data-component="tool-loaded-file"] {
     color: var(--text-weak);
+  }
+}
+
+/* The reply/revert and copy buttons are one tight pair, not two loose ones. A
+   24px button box insets its 14px glyph by 5px, so the pair carries a matching
+   negative margin: its first glyph starts on the message text edge and its last
+   ends there, in both the left-aligned answer row and the right-aligned user
+   row. */
+[data-slot="message-actions"] {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: -5px;
+  margin-right: -5px;
+
+  [data-component="tooltip-trigger"],
+  [data-component="tooltip-v2-trigger"] {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
   }
 }

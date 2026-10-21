@@ -3,6 +3,7 @@ import { computeAim } from "@opencode-ai/omnia/computer-use/aim"
 import { controlPlaneCall } from "./control-plane"
 import { createAgentTargetHighlight, type AgentTargetHighlight, type AgentTargetHighlightInput } from "./overlay"
 import { getOmniaDriver } from "./registry"
+import { enterpriseGuard } from "./enterprise"
 
 function modelPath(id: string): string {
   return `/v1/computer-use/models/${encodeURIComponent(id)}`
@@ -125,60 +126,64 @@ function previewRequest(input: unknown): AgentTargetHighlightInput | undefined {
 
 export function registerComputerUseIpcHandlers(): void {
   const highlight: AgentTargetHighlight = createAgentTargetHighlight()
+  // The distribution's computer-use switch is enforced here, not only by
+  // hiding the settings tab.
+  const guarded = (channel: string, listener: Parameters<typeof ipcMain.handle>[1]) =>
+    ipcMain.handle(channel, enterpriseGuard("computerUse", "Computer use", listener))
 
-  ipcMain.handle("computer-use-models", async () => (await controlPlaneCall("/v1/computer-use/models", "GET")).models ?? [])
-  ipcMain.handle("computer-use-status", async () => (await controlPlaneCall("/v1/computer-use/status", "GET")).status)
-  ipcMain.handle("computer-use-settings", async () => (await controlPlaneCall("/v1/computer-use/settings", "GET")).settings)
-  ipcMain.handle("computer-use-settings-update", async (_event, patch: unknown) => {
+  guarded("computer-use-models", async () => (await controlPlaneCall("/v1/computer-use/models", "GET")).models ?? [])
+  guarded("computer-use-status", async () => (await controlPlaneCall("/v1/computer-use/status", "GET")).status)
+  guarded("computer-use-settings", async () => (await controlPlaneCall("/v1/computer-use/settings", "GET")).settings)
+  guarded("computer-use-settings-update", async (_event, patch: unknown) => {
     const json = await controlPlaneCall("/v1/computer-use/settings", "POST", patch)
     return json.settings
   })
-  ipcMain.handle("computer-use-model-download", async (_event, id: string) => {
+  guarded("computer-use-model-download", async (_event, id: string) => {
     const json = await controlPlaneCall(`${modelPath(id)}/download`, "POST", {})
     return json.started === true
   })
-  ipcMain.handle("computer-use-model-load", async (_event, id: string) => {
+  guarded("computer-use-model-load", async (_event, id: string) => {
     const json = await controlPlaneCall(`${modelPath(id)}/load`, "POST", {})
     return json.model
   })
-  ipcMain.handle("computer-use-model-unload", async (_event, id: string) => {
+  guarded("computer-use-model-unload", async (_event, id: string) => {
     const json = await controlPlaneCall(`${modelPath(id)}/unload`, "POST", {})
     return json.unloaded === true
   })
-  ipcMain.handle("computer-use-model-remove", async (_event, id: string) => {
+  guarded("computer-use-model-remove", async (_event, id: string) => {
     const json = await controlPlaneCall(modelPath(id), "DELETE")
     return json.removed === true
   })
-  ipcMain.handle("computer-use-runtimes", async () => (await controlPlaneCall("/v1/computer-use/runtimes", "GET")).runtimes ?? [])
-  ipcMain.handle("computer-use-runtime-download", async (_event, id: string) => {
+  guarded("computer-use-runtimes", async () => (await controlPlaneCall("/v1/computer-use/runtimes", "GET")).runtimes ?? [])
+  guarded("computer-use-runtime-download", async (_event, id: string) => {
     const json = await controlPlaneCall(`/v1/computer-use/runtimes/${encodeURIComponent(id)}/download`, "POST", {})
     return json.started === true
   })
-  ipcMain.handle("computer-use-runtime-remove", async (_event, id: string) => {
+  guarded("computer-use-runtime-remove", async (_event, id: string) => {
     const json = await controlPlaneCall(`/v1/computer-use/runtimes/${encodeURIComponent(id)}`, "DELETE")
     return json.removed === true
   })
-  ipcMain.handle("computer-use-calibration", async () => (await controlPlaneCall("/v1/computer-use/calibration", "GET")).calibration)
-  ipcMain.handle("computer-use-calibration-start", async () => {
+  guarded("computer-use-calibration", async () => (await controlPlaneCall("/v1/computer-use/calibration", "GET")).calibration)
+  guarded("computer-use-calibration-start", async () => {
     const json = await controlPlaneCall("/v1/computer-use/calibration/start", "POST", {})
     return { screen: json.screen, points: json.points }
   })
-  ipcMain.handle("computer-use-calibration-measure", async (_event, pointId: string) => {
+  guarded("computer-use-calibration-measure", async (_event, pointId: string) => {
     const json = await controlPlaneCall("/v1/computer-use/calibration/measure", "POST", { pointId })
     return json.measurement
   })
-  ipcMain.handle("computer-use-calibration-save", async (_event, measurements: unknown) => {
+  guarded("computer-use-calibration-save", async (_event, measurements: unknown) => {
     const json = await controlPlaneCall("/v1/computer-use/calibration/save", "POST", { measurements })
     return json.profile
   })
-  ipcMain.handle("computer-use-calibration-reset", async () => {
+  guarded("computer-use-calibration-reset", async () => {
     await controlPlaneCall("/v1/computer-use/calibration", "DELETE")
     return true
   })
 
   // Read back the control a pending permission resolved to. A refusal is an
   // absent target, never a guess: the dock then reports the ref it was handed.
-  ipcMain.handle("computer-use-resolve-target", async (_event, input: unknown) => {
+  guarded("computer-use-resolve-target", async (_event, input: unknown) => {
     if (!isRecord(input)) return undefined
     const ref = text(input.ref)
     if (ref === undefined) return undefined
@@ -193,12 +198,12 @@ export function registerComputerUseIpcHandlers(): void {
   })
   // The highlight is drawn only while a hovered or focused computer-use
   // permission asks for it, and it is click-through and app-owned throughout.
-  ipcMain.handle("computer-use-preview", async (_event, input: unknown) => {
+  guarded("computer-use-preview", async (_event, input: unknown) => {
     const request = previewRequest(input)
     if (request === undefined) return
     highlight.show(request)
   })
-  ipcMain.handle("computer-use-preview-clear", async () => {
+  guarded("computer-use-preview-clear", async () => {
     highlight.hide()
   })
 }

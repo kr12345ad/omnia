@@ -68,6 +68,7 @@ import { patchFiles } from "./apply-patch-file"
 import { partDefaultOpen } from "./part-default-open"
 import { animate } from "motion"
 import { attached, inline, kind, typeLabel } from "./message-file"
+import { splitReplyQuote } from "./message-reply"
 import { readPartText } from "./message-part-text"
 import { discussionParticipantLabel, readDiscussionSpecialists } from "./message-part-discussion"
 import { SessionProgressIndicatorV2 } from "../v2/components/session-progress-indicator-v2"
@@ -1256,6 +1257,11 @@ export function UserMessageDisplay(props: {
 
   const text = createMemo(() => textPart()?.text || "")
 
+  // A reply sends the answered message as a Markdown quote. The model reads
+  // that quote; the timeline shows it as a card with the reply below it.
+  const reply = createMemo(() => splitReplyQuote(text()))
+  const body = createMemo(() => reply()?.body ?? text())
+
   const files = createMemo(() => (props.parts?.filter((p) => p.type === "file") as FilePart[]) ?? [])
 
   const attachments = createMemo(() => files().filter(attached))
@@ -1294,7 +1300,7 @@ export function UserMessageDisplay(props: {
   }
 
   const handleCopy = async () => {
-    const content = text()
+    const content = body()
     if (!content) return
     if (await writeClipboard(content)) {
       setState("copied", true)
@@ -1371,7 +1377,7 @@ export function UserMessageDisplay(props: {
     <div data-component="user-message" data-timeline-part-id={textPart()?.id}>
       <Show when={!props.useV2Actions}>{renderAttachments()}</Show>
       <Show
-        when={text()}
+        when={body() || reply()}
         fallback={
           <Show when={messageComments().length > 0}>
             <UserMessageComments comments={messageComments()} bounded={false} />
@@ -1379,20 +1385,35 @@ export function UserMessageDisplay(props: {
         }
       >
         <div data-slot="user-message-body">
-          <div
-            data-slot="user-message-text"
-            dir="auto"
-            data-comments={messageComments().length > 0 ? "true" : undefined}
-          >
-            <HighlightedText text={text()} references={inlineFiles()} agents={agents()} />
-            <Show when={messageComments().length > 0}>
-              <UserMessageComments comments={messageComments()} bounded />
-            </Show>
-          </div>
+          <Show when={reply()}>
+            {(reply) => (
+              <div data-slot="user-message-reply">
+                <span data-slot="user-message-reply-label">{i18n.t("ui.message.reply")}</span>
+                <div data-slot="user-message-reply-quote" dir="auto">
+                  {reply().quote}
+                </div>
+              </div>
+            )}
+          </Show>
+          <Show when={body()}>
+            <div
+              data-slot="user-message-text"
+              dir="auto"
+              data-comments={messageComments().length > 0 ? "true" : undefined}
+            >
+              <HighlightedText text={body()} references={inlineFiles()} agents={agents()} />
+              <Show when={messageComments().length > 0}>
+                <UserMessageComments comments={messageComments()} bounded />
+              </Show>
+            </div>
+          </Show>
+          <Show when={!body() && messageComments().length > 0}>
+            <UserMessageComments comments={messageComments()} bounded />
+          </Show>
         </div>
       </Show>
       <Show when={props.useV2Actions}>{renderAttachments()}</Show>
-      <Show when={text() || (props.useV2Actions && messageComments().length > 0)}>
+      <Show when={body() || (props.useV2Actions && messageComments().length > 0)}>
         <div data-slot="user-message-copy-wrapper">
           <Show when={metaHead() || metaTail()}>
             <span data-slot="user-message-meta-wrap">
@@ -1413,33 +1434,35 @@ export function UserMessageDisplay(props: {
               </Show>
             </span>
           </Show>
-          <Show when={props.actions?.revert}>
-            <MessageActionButton
-              icon="reset"
-              label={i18n.t("ui.message.revertMessage")}
-              useV2={props.useV2Actions}
-              disabled={!!busy()}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={(event) => {
-                event.stopPropagation()
-                revert()
-              }}
-              aria-label={i18n.t("ui.message.revertMessage")}
-            />
-          </Show>
-          <Show when={text()}>
-            <MessageActionButton
-              icon={copied() ? "check" : "copy"}
-              label={copied() ? i18n.t("ui.message.copied") : i18n.t("ui.message.copyMessage")}
-              useV2={props.useV2Actions}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={(event) => {
-                event.stopPropagation()
-                void handleCopy()
-              }}
-              aria-label={copied() ? i18n.t("ui.message.copied") : i18n.t("ui.message.copyMessage")}
-            />
-          </Show>
+          <div data-slot="message-actions">
+            <Show when={props.actions?.revert}>
+              <MessageActionButton
+                icon="reset"
+                label={i18n.t("ui.message.revertMessage")}
+                useV2={props.useV2Actions}
+                disabled={!!busy()}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  revert()
+                }}
+                aria-label={i18n.t("ui.message.revertMessage")}
+              />
+            </Show>
+            <Show when={body()}>
+              <MessageActionButton
+                icon={copied() ? "check" : "copy"}
+                label={copied() ? i18n.t("ui.message.copied") : i18n.t("ui.message.copyMessage")}
+                useV2={props.useV2Actions}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  void handleCopy()
+                }}
+                aria-label={copied() ? i18n.t("ui.message.copied") : i18n.t("ui.message.copyMessage")}
+              />
+            </Show>
+          </div>
         </div>
       </Show>
     </div>
@@ -1792,31 +1815,33 @@ PART_MAPPING["text"] = function TextPartDisplay(props) {
         </div>
         <Show when={showCopy()}>
           <div data-slot="text-part-copy-wrapper" data-interrupted={interrupted() ? "" : undefined}>
-            <Show when={props.message.role === "assistant" && props.actions?.reply}>
+            <div data-slot="message-actions">
+              <Show when={props.message.role === "assistant" && props.actions?.reply}>
+                <MessageActionButton
+                  icon="reply"
+                  label={i18n.t("ui.message.reply")}
+                  useV2={props.useV2Actions}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    void props.actions?.reply?.({
+                      sessionID: props.message.sessionID,
+                      messageID: props.message.id,
+                      text: text(),
+                    })
+                  }}
+                  aria-label={i18n.t("ui.message.reply")}
+                />
+              </Show>
               <MessageActionButton
-                icon="reply"
-                label={i18n.t("ui.message.reply")}
+                icon={copied() ? "check" : "copy"}
+                label={copied() ? i18n.t("ui.message.copied") : i18n.t("ui.message.copyResponse")}
                 useV2={props.useV2Actions}
                 onMouseDown={(event) => event.preventDefault()}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  void props.actions?.reply?.({
-                    sessionID: props.message.sessionID,
-                    messageID: props.message.id,
-                    text: text(),
-                  })
-                }}
-                aria-label={i18n.t("ui.message.reply")}
+                onClick={handleCopy}
+                aria-label={copied() ? i18n.t("ui.message.copied") : i18n.t("ui.message.copyResponse")}
               />
-            </Show>
-            <MessageActionButton
-              icon={copied() ? "check" : "copy"}
-              label={copied() ? i18n.t("ui.message.copied") : i18n.t("ui.message.copyResponse")}
-              useV2={props.useV2Actions}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={handleCopy}
-              aria-label={copied() ? i18n.t("ui.message.copied") : i18n.t("ui.message.copyResponse")}
-            />
+            </div>
             <Show when={meta()}>
               <span data-slot="text-part-meta" class="text-12-regular text-text-weak cursor-default">
                 {meta()}

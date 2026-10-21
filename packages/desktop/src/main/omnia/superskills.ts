@@ -1,5 +1,6 @@
 import { ipcMain } from "electron"
 import { CONTROL_PLANE_SIGNED_OUT_MESSAGE, controlPlaneAuth, controlPlaneCall } from "./control-plane"
+import { enterpriseGuard } from "./enterprise"
 
 async function serverCall(path: string, method: "GET" | "POST" | "DELETE", body?: unknown): Promise<Record<string, unknown>> {
   // Superskills are served by the control plane the app is paired with, which is
@@ -27,20 +28,22 @@ async function serverCall(path: string, method: "GET" | "POST" | "DELETE", body?
 }
 
 export function registerSuperskillIpcHandlers(): void {
-  ipcMain.handle("superskills-list", async () => (await serverCall("/v1/superskills", "GET")).superskills ?? [])
-  ipcMain.handle("superskills-get", async (_event, id: string) => {
+  const guarded = (channel: string, listener: Parameters<typeof ipcMain.handle>[1]) =>
+    ipcMain.handle(channel, enterpriseGuard("superskills", "Superskills", listener))
+  guarded("superskills-list", async () => (await serverCall("/v1/superskills", "GET")).superskills ?? [])
+  guarded("superskills-get", async (_event, id: string) => {
     const json = await serverCall(`/v1/superskills/${encodeURIComponent(id)}`, "GET")
     return json.superskill
   })
-  ipcMain.handle("superskills-save", async (_event, skill: unknown) => {
+  guarded("superskills-save", async (_event, skill: unknown) => {
     const json = await serverCall("/v1/superskills", "POST", skill)
     return json.superskill
   })
-  ipcMain.handle("superskills-remove", async (_event, id: string) => {
+  guarded("superskills-remove", async (_event, id: string) => {
     const json = await serverCall(`/v1/superskills/${encodeURIComponent(id)}`, "DELETE")
     return json.removed === true
   })
-  ipcMain.handle("superskills-call", async (_event, id: string, method: string, params: unknown) => {
+  guarded("superskills-call", async (_event, id: string, method: string, params: unknown) => {
     const json = await serverCall(`/v1/superskills/${encodeURIComponent(id)}/call`, "POST", {
       method,
       params,

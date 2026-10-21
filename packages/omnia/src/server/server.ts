@@ -37,6 +37,7 @@ import { ChatSessionStore } from "../chat/sessions"
 import { ComputerManager, type BrowserController, type ExecuteOutcome, type ServerActionRequest, type ServerComputerDriver } from "./computers"
 import { PermissionManager, requiredScopesForAction, type ApprovalPolicy, type OmniaScope, type PermissionState } from "./permissions"
 import { ApprovalRegistry } from "../security/approval"
+import { EnterpriseRuntime, type EnterpriseRuntimeOptions } from "../enterprise/runtime"
 import {
   SecurityJournal,
   appendComputerUseRecord,
@@ -107,6 +108,17 @@ export interface OmniaServerOptions {
   readonly version?: string
   readonly approvalPolicy?: ApprovalPolicy
   readonly permissions?: Partial<Record<OmniaScope, PermissionState>>
+  /** Self-hosted enterprise control plane, mounted at /admin and /v1/enterprise. */
+  readonly enterprise?: EnterpriseServerOptions
+}
+
+export interface EnterpriseServerOptions extends Omit<EnterpriseRuntimeOptions, "version"> {
+  /**
+   * Binding beyond loopback is only legal for the enterprise control plane,
+   * which has its own login. The ordinary computer-control server must stay on
+   * loopback: its bearer is a root credential.
+   */
+  readonly allowRemote?: boolean
 }
 
 export interface OmniaServerHandle {
@@ -124,6 +136,7 @@ export interface OmniaServerHandle {
   readonly chatChannels: ChatChannelsRuntime
   readonly computerUse: ComputerUseService
   readonly auth: GitHubAuth
+  readonly enterprise?: EnterpriseRuntime
   register: (driver: ServerComputerDriver) => () => void
   setCatalog: (catalog: Partial<ServerCatalog>) => void
   health: () => ServerHealth
@@ -198,17 +211,40 @@ function journalComputerUseActions(
 }
 
 export async function startOmniaServer(options: OmniaServerOptions = {}): Promise<OmniaServerHandle> {
-  if (!["127.0.0.1", "localhost", "::1"].includes(options.host ?? "127.0.0.1")) {
+  if (
+    !["127.0.0.1", "localhost", "::1"].includes(options.host ?? "127.0.0.1") &&
+    options.enterprise?.allowRemote !== true
+  ) {
     throw new Error("Omnia Server must bind to loopback. Use an authenticated HTTPS proxy or tunnel for remote access.")
+  }
+  if (
+    options.enterprise !== undefined &&
+    options.enterprise.publicUrl.trim().length === 0 &&
+    options.enterprise.mode !== "lan"
+  ) {
+    throw new Error(
+      "Enterprise mode requires a public URL, or mode \"lan\" to answer from the address each request arrived on.",
+    )
   }
   const now = options.now ?? Date.now
   const serverId = createServerId()
   const startedAt = now()
   const token = options.token ?? randomBytes(32).toString("hex")
   if (token.trim().length === 0) throw new Error("Omnia Server requires a non-empty bearer token.")
-  const publicOrigin = options.publicUrl === undefined ? undefined : new URL(options.publicUrl).origin
-  const corsOrigins = new Set(options.corsOrigins ?? ["oc://renderer", ...(publicOrigin === undefined ? [] : [publicOrigin])])
+  const publicOrigin =
+    options.publicUrl === undefined || options.publicUrl.trim().length === 0 ? undefined : new URL(options.publicUrl).origin
+  const corsOrigins = new Set([
+    ...(options.corsOrigins ?? ["oc://renderer", ...(publicOrigin === undefined ? [] : [publicOrigin])]),
+    ...(options.enterprise?.devOrigins ?? []),
+  ])
   if (corsOrigins.has("*") || corsOrigins.has("null")) throw new Error("CORS origins must be explicit origins.")
+  const enterprise =
+    options.enterprise === undefined
+      ? undefined
+      : new EnterpriseRuntime({
+          ...options.enterprise,
+          version: options.version ?? OMNIA_SERVER_VERSION,
+        })
   const events = new EventBus({ serverId, now })
   const auditFile = options.auditFile ?? process.env.OMNIA_AUDIT_FILE ??
     join(dirname(options.authFile ?? defaultGitHubAuthFile()), "audit", `${serverId}.jsonl`)
@@ -775,6 +811,20 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
         json(response, 503, { ok: false, error: "Security audit storage is unavailable." })
         return
       }
+      // The enterprise control plane owns its own credentials, audit trail and
+      // static console. It is matched before the bearer gate because a console
+      // session is a cookie, not the server token, and a login page must be
+      // reachable before anyone is signed in.
+      if (
+        enterprise !== undefined &&
+        (route === "/admin" ||
+          route.startsWith("/admin/") ||
+          route === `${OMNIA_API_PREFIX}/enterprise` ||
+          route.startsWith(`${OMNIA_API_PREFIX}/enterprise/`))
+      ) {
+        await enterprise.handle(request, response)
+        return
+      }
       // Browsers preflight without credentials. Only explicit origins may
       // preflight; the subsequent real request still takes the bearer path.
       const origin = request.headers.origin
@@ -786,6 +836,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
           return
         }
         response.setHeader("access-control-allow-origin", origin)
+        if (enterprise !== undefined) response.setHeader("access-control-allow-credentials", "true")
         if (request.method === "OPTIONS") {
           response.setHeader("access-control-allow-headers", "authorization, content-type, x-omnia-origin, x-omnia-session, x-omnia-session-proof, x-omnia-key-id, x-omnia-timestamp, x-omnia-signature")
           response.setHeader("access-control-allow-methods", "GET, POST, PATCH, DELETE, OPTIONS")
@@ -795,7 +846,13 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
         }
       }
       const address = request.socket.remoteAddress ?? "unknown"
-      let authenticated = isAuthorized(request, token, (a, b) => timingSafeEqual(a, b), auth)
+      let authenticated = isAuthorized(
+        request,
+        token,
+        (a, b) => timingSafeEqual(a, b),
+        auth,
+        (presented) => enterprise?.isClientToken(presented) === true,
+      )
       const authorization = ((): "ok" | "unauthorized" | "bad_request" => {
         if (authenticated) return "ok"
         const url = new URL(request.url ?? "/", "http://127.0.0.1")
@@ -1002,6 +1059,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     chatChannels,
     computerUse: computerUseService,
     auth,
+    ...(enterprise === undefined ? {} : { enterprise }),
     register: (driver) => registerComputer(driver),
     setCatalog: (next) => {
       catalog = { ...catalog, ...next }

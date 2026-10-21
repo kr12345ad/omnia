@@ -1,0 +1,103 @@
+/* Organization surfaces: Settings, Account, Deployment and Integrations.
+   Shared shell and form styles live in src/index.css. */
+
+.org-rail {
+  position: sticky;
+  top: calc(var(--ent-topbar-height) + 16px);
+  align-self: start;
+}
+
+.org-code-block {
+  margin: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--ent-border);
+  border-radius: var(--ent-radius-sm);
+  background: var(--ent-panel-soft);
+  color: var(--ent-muted);
+  font-family: var(--ent-mono);
+  font-size: 10.5px;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.org-inline-code {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--ent-border);
+  border-radius: var(--ent-radius-sm);
+  background: var(--ent-panel-soft);
+  color: var(--ent-muted);
+  font-family: var(--ent-mono);
+  font-size: 10.5px;
+  line-height: 1.7;
+  overflow-x: auto;
+}
+
+.org-inline-code code {
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.org-sticky-save {
+  position: sticky;
+  bottom: 16px;
+  z-index: 20;
+}
+
+.org-sticky-save .ent-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  box-shadow: var(--ent-shadow-lg);
+}
+
+.org-identity-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.org-identity-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.org-identity-name {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.org-section-gap {
+  margin-top: 14px;
+}
+
+.org-deployment-meta {
+  gap: 10px 16px;
+}
+
+.org-deployment-meta .org-break {
+  overflow-wrap: anywhere;
+}
+
+.org-code-label {
+  margin-bottom: 5px;
+}
+
+.org-endpoint-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+@media (max-width: 1100px) {
+  .org-rail {
+    position: static;
+    top: auto;
+  }
+}

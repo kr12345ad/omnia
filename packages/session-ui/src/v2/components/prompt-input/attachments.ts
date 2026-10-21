@@ -76,6 +76,8 @@ export type PromptInputV2AttachmentConfig = {
   warn: () => void
   duplicate: () => void
   onError: (error: unknown) => void
+  /** Reject a file before it is read, returning the message to show. */
+  validate?: (file: File) => string | undefined
   readClipboardImage?: () => Promise<File | null>
   getPathForFile?: (file: File) => string
   store?: (file: File) => Promise<{ id: string; url: string }>
@@ -98,6 +100,11 @@ export function createPromptInputV2Attachments(
   }
   const add = async (file: File, toast = true, target = capture(), clipboard = false) => {
     if (!target) return false
+    const rejection = input.validate?.(file)
+    if (rejection !== undefined) {
+      if (toast) input.onError(new Error(rejection))
+      return false
+    }
     const mime = await attachmentMime(file)
     if (!mime) {
       if (toast) input.warn()

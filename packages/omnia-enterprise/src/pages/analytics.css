@@ -1,0 +1,85 @@
+/* Overview and Usage share these layout helpers. Keep selectors namespaced so
+   the page-local file cannot drift into the global console styles. */
+
+.analytics-section {
+  margin-bottom: 14px;
+}
+
+.analytics-range {
+  border-bottom: 0;
+  gap: 1px;
+}
+
+.analytics-overview {
+  grid-template-columns: minmax(0, 1.45fr) minmax(310px, 0.95fr);
+  align-items: start;
+}
+
+.analytics-overview > .ent-stack,
+.analytics-usage-body > .ent-stack {
+  min-width: 0;
+}
+
+.analytics-overview .ent-stat-foot {
+  min-height: 17px;
+}
+
+.analytics-filters {
+  padding: 0 0 14px;
+  border-bottom: 0;
+  flex-wrap: wrap;
+}
+
+.analytics-filter {
+  width: 220px;
+  min-width: 0;
+}
+
+.analytics-filter-model {
+  width: 200px;
+}
+
+.analytics-usage-body {
+  align-items: start;
+}
+
+.analytics-usage-rail {
+  position: sticky;
+  top: calc(var(--ent-topbar-height) + 16px);
+}
+
+.analytics-empty {
+  padding: 6px 0 14px;
+}
+
+.analytics-empty .ent-empty {
+  padding: 34px 24px;
+  border: 1px dashed var(--ent-border-strong);
+  border-radius: var(--ent-radius);
+  background: var(--ent-panel-soft);
+}
+
+@media (max-width: 1100px) {
+  .analytics-overview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .analytics-usage-rail {
+    position: static;
+  }
+}
+
+@media (max-width: 860px) {
+  .analytics-filter,
+  .analytics-filter-model {
+    width: 100%;
+  }
+
+  .analytics-filters .ent-label {
+    width: 100%;
+  }
+
+  .analytics-empty .ent-empty {
+    padding: 28px 18px;
+  }
+}

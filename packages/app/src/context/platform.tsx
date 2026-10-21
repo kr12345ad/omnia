@@ -29,7 +29,256 @@ export type GitHubProfile = {
 export type GitHubAuthStatus = {
   authenticated: boolean
   profile?: GitHubProfile
+  /** How the credential was minted; absent on sessions written before it was recorded. */
+  method?: "oauth" | "gh" | "enterprise"
   controlPlaneUrl?: string
+  /** This build is bound to an organization's control plane. */
+  enterprise?: boolean
+}
+
+/** The organization the tenant profile belongs to. */
+export type EnterpriseOrg = {
+  name: string
+  slug: string
+}
+
+export type EnterpriseBranding = {
+  productName?: string
+  shortName?: string
+  tagline?: string
+  primaryColor?: string
+  accentColor?: string
+  signInHeadline?: string
+  signInSubheadline?: string
+  logoUrl?: string
+  iconUrl?: string
+  supportUrl?: string
+  docsUrl?: string
+  footerText?: string
+  showOmniaBranding?: boolean
+}
+
+export type EnterpriseAuthPolicy = {
+  mode?: string
+  methods?: string[]
+  sessionHours?: number
+  requireMfa?: boolean
+  allowedEmailDomains?: string[]
+  allowSocialLogin?: boolean
+}
+
+export type EnterpriseExperience = {
+  theme?: string
+  density?: string
+  locale?: string
+  homeSurface?: string
+  defaultMode?: string
+  instructions?: string
+  showTips?: boolean
+  showUsageMeter?: boolean
+}
+
+export type EnterpriseUpdate = {
+  channel?: string
+  pinnedVersion?: string
+  autoUpdate?: boolean
+  allowDowngrade?: boolean
+  minimumVersion?: string
+}
+
+export type EnterpriseDeployment = {
+  platforms?: string[]
+  mode?: string
+  offlineBundle?: boolean
+  installerBaseUrl?: string
+  proxyUrl?: string
+}
+
+export type PermissionMode = "allow" | "ask" | "deny"
+
+/** Tool-level rules resolved for this client. */
+export type EnterprisePermissions = {
+  read: PermissionMode
+  edit: PermissionMode
+  bash: PermissionMode
+  task: PermissionMode
+  network: PermissionMode
+  externalDirectory: PermissionMode
+  skill: PermissionMode
+  computer: PermissionMode
+}
+
+/**
+ * The tenant profile baked into an enterprise installer. It mirrors the manifest
+ * schema field for field, plus the build identity the installer itself needs.
+ */
+export type EnterpriseProfile = {
+  kind: "omnia-enterprise-client"
+  schema: 1
+  distribution: string
+  version: string
+  publishedAt?: number
+  name: string
+  appId: string
+  server: string
+  manifestUrl: string
+  loginUrl: string
+  org: EnterpriseOrg
+  branding: EnterpriseBranding
+  auth: EnterpriseAuthPolicy
+  features: Record<string, boolean>
+  permissions?: Partial<EnterprisePermissions>
+  experience: EnterpriseExperience
+  limits: Record<string, number>
+  models: {
+    defaultModel?: string
+    allowed?: string[]
+    blocked?: string[]
+    allowCustomProviders?: boolean
+    allowByok?: boolean
+  }
+  telemetry: {
+    enabled?: boolean
+    includePrompts?: boolean
+    includeFilePaths?: boolean
+    retentionDays?: number
+  }
+  update: EnterpriseUpdate
+  deployment: EnterpriseDeployment
+}
+
+/** The live rules the tenant server publishes for this build. */
+export type EnterpriseManifest = {
+  schema?: 1
+  distribution?: string
+  name?: string
+  version?: string
+  publishedAt?: number
+  org?: EnterpriseOrg
+  branding?: EnterpriseBranding
+  auth?: EnterpriseAuthPolicy
+  features?: Record<string, boolean>
+  permissions?: Partial<EnterprisePermissions>
+  experience?: EnterpriseExperience
+  limits?: Record<string, number>
+  models?: EnterpriseProfile["models"]
+  telemetry?: EnterpriseProfile["telemetry"]
+  update?: EnterpriseUpdate
+  deployment?: EnterpriseDeployment
+}
+
+/**
+ * Everything the admin configured, resolved for the client: the baked profile
+ * underneath, the live manifest over it. The main process builds this so the
+ * renderer has one read for branding, sign-in policy, feature switches,
+ * experience defaults, limits, model access, telemetry and update policy.
+ */
+export type EnterprisePolicy = {
+  /** Organization name and client name, for footers and titles. */
+  org: string
+  name: string
+  branding: {
+    productName: string
+    shortName: string
+    tagline: string
+    primaryColor: string
+    accentColor: string
+    signInHeadline: string
+    signInSubheadline: string
+    logoUrl?: string
+    iconUrl?: string
+    supportUrl?: string
+    docsUrl?: string
+    footerText?: string
+    showOmniaBranding: boolean
+  }
+  auth: {
+    mode: string
+    methods: string[]
+    sessionHours: number
+    requireMfa: boolean
+    allowedEmailDomains: string[]
+    allowSocialLogin: boolean
+  }
+  features: Record<string, boolean>
+  permissions: EnterprisePermissions
+  experience: {
+    theme: string
+    density: string
+    locale: string
+    homeSurface: string
+    defaultMode: string
+    instructions: string
+    showTips: boolean
+    showUsageMeter: boolean
+  }
+  limits: {
+    monthlyTokensPerUser: number
+    monthlySpendPerUserUsd: number
+    maxComputersPerUser: number
+    maxConcurrentSessions: number
+    contextWindowTokens: number
+    dailyScheduledRuns: number
+    storageGb: number
+    maxFileUploadMb: number
+  }
+  models: {
+    defaultModel: string
+    allowed: string[]
+    blocked: string[]
+    allowCustomProviders: boolean
+    allowByok: boolean
+  }
+  telemetry: {
+    enabled: boolean
+    includePrompts: boolean
+    includeFilePaths: boolean
+    retentionDays: number
+  }
+  update: {
+    channel: string
+    pinnedVersion?: string
+    autoUpdate: boolean
+    allowDowngrade: boolean
+    minimumVersion?: string
+  }
+}
+
+/** Work-account sign-in and policy reads for a managed build (desktop only). */
+export type EnterpriseClientPlatform = {
+  /**
+   * True when this installer was produced for an organization. Known before any
+   * round trip, so a managed client can never fall back to the public
+   * GitHub/Google sign-in while its profile is still loading or unavailable.
+   */
+  managed: boolean
+  profile(): Promise<EnterpriseProfile | undefined>
+  manifest(): Promise<EnterpriseManifest | undefined>
+  /** The merged admin policy. Undefined outside a managed build. */
+  policy(): Promise<EnterprisePolicy | undefined>
+  signIn(identifier: string, password: string): Promise<GitHubAuthStatus>
+  /**
+   * Queues one finished turn for the organization's usage report.
+   *
+   * The main process owns the outbox, the dedupe by message id and the retry,
+   * so a call is safe to repeat: it is the cheapest way to make reporting
+   * survive a replayed event or a reload.
+   */
+  reportUsage(event: EnterpriseUsageEvent): Promise<unknown>
+}
+
+/** The numbers one assistant turn contributes to the organization's usage. */
+export type EnterpriseUsageEvent = {
+  /** Stable per-turn key, normally the assistant message id. */
+  key: string
+  model: string
+  provider?: string
+  inputTokens?: number
+  outputTokens?: number
+  costUsd?: number
+  durationMs?: number
+  sessionId?: string
+  tool?: string
 }
 
 /** OAuth sign-in through the hosted control plane (desktop only) */
@@ -38,6 +287,8 @@ export type GitHubAuthPlatform = {
   /** Omitted provider keeps the historical GitHub flow. */
   signIn(provider?: AuthProvider): Promise<GitHubAuthStatus>
   signOut(): Promise<GitHubAuthStatus>
+  /** Present only when the installed build carries an organization profile. */
+  enterprise?: EnterpriseClientPlatform
 }
 
 export type BrowserPanelTab = {

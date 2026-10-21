@@ -5,6 +5,7 @@ import { Tag } from "@opencode-ai/ui/tag"
 import { showToast } from "@/utils/toast"
 import { popularProviders, useProviders } from "@/hooks/use-providers"
 import { createMemo, type Component, For, Show } from "solid-js"
+import { useEnterprise } from "@/context/enterprise"
 import { useLanguage } from "@/context/language"
 import { useServerProtocol, useServerSDK } from "@/context/server-sdk"
 import { useServerSync } from "@/context/server-sync"
@@ -38,6 +39,7 @@ export const SettingsProviders: Component<{ onBack?: () => void }> = (props) => 
 const SettingsProvidersContent: Component<{ onBack?: () => void }> = (props) => {
   const dialog = useDialog()
   const language = useLanguage()
+  const enterprise = useEnterprise()
   const serverSDK = useServerSDK()
   const protocol = useServerProtocol()
   const serverSync = useServerSync()
@@ -221,7 +223,7 @@ const SettingsProvidersContent: Component<{ onBack?: () => void }> = (props) => 
               )}
             </For>
 
-            <Show when={protocol() === "v1"}>
+            <Show when={protocol() === "v1" && enterprise.models()?.allowCustomProviders !== false}>
               <div
                 class="flex items-center justify-between gap-4 min-h-16 border-b border-border-weak-base last:border-none flex-wrap py-3"
                 data-component="custom-provider-section"

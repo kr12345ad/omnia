@@ -72,7 +72,6 @@ import {
   SessionComposerRegion,
 } from "@/pages/session/composer"
 import { createOpenReviewFile, createSessionTabs, createSizing, shouldShowFileTree } from "@/pages/session/helpers"
-import { prependQuote, replyQuote } from "@/pages/session/reply-quote"
 import { MessageTimeline } from "@/pages/session/timeline/message-timeline"
 import { createTimelineModel } from "@/pages/session/timeline/model"
 import { type DiffStyle, SessionReviewTab, type SessionReviewTabProps } from "@/pages/session/review-tab"
@@ -1958,18 +1957,31 @@ export default function Page() {
     download()
   }
 
-  // A reply is a question about one specific answer: quoting that answer into
-  // the draft is what makes "this" in the follow-up mean that message.
+  // The reply action cancels its own mousedown, so the editor still owns the
+  // caret when it runs. Restoring the composer there would move the caret in a
+  // later frame -- right as the next keystroke lands -- so only take focus back
+  // when the click actually left the composer.
+  const focusComposerIfNeeded = () => {
+    const active = document.activeElement
+    if (active instanceof HTMLElement && active.closest('[data-component="prompt-input"]')) return
+    if (focusComposer !== undefined) return focusComposer()
+    requestAnimationFrame(() => inputRef?.focus())
+  }
+
+  // A reply is a question about one specific answer. The answered text rides
+  // with the submitted prompt instead of being typed into the draft, so the
+  // composer shows only the card and what the user writes.
   const reply = (input: { sessionID: string; messageID: string; text: string }) => {
     if (input.sessionID !== params.id) return
-    const quote = replyQuote(input.text)
-    if (quote.length === 0) return
-    const next = prependQuote(prompt.current(), quote)
-    prompt.set(next.prompt, next.cursor)
-    requestAnimationFrame(() => {
-      if (focusComposer !== undefined) return focusComposer(next.cursor)
-      inputRef?.focus()
-    })
+    if (input.text.trim().length === 0) return
+    prompt.reply.set({ messageID: input.messageID, text: input.text })
+    focusComposerIfNeeded()
+  }
+
+  const dismissReply = () => {
+    if (!prompt.reply.current()) return
+    prompt.reply.clear()
+    focusComposerIfNeeded()
   }
 
   const actions = { revert, openAttachment, reply }
@@ -2195,6 +2207,11 @@ export default function Page() {
                     onEdit: editFollowup,
                   }
                 : undefined,
+            reply: () => {
+              const current = prompt.reply.current()
+              if (!current) return undefined
+              return { text: current.text, onDismiss: dismissReply }
+            },
             revert: () =>
               rolled().length > 0
                 ? {

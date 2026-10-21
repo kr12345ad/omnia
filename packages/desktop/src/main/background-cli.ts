@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
 import { app } from "electron"
 import { migrateOmniaStorage } from "./omnia-storage"
+import { enterprisePermissionEnv, enterprisePermissions } from "./omnia/enterprise"
 
 const execFileAsync = promisify(execFile)
 const root = dirname(fileURLToPath(import.meta.url))
@@ -48,6 +49,14 @@ export async function startBackgroundCli(logger: Logger, _shellStateHome?: strin
     detected: Boolean(found),
     ...endpoint(found?.url),
   })
+
+  // The v2 CLI service inherits this environment when it starts. A tenant build
+  // must hand over its tool rules here too, not only through the v1 sidecar.
+  const permissions = enterprisePermissionEnv()
+  if (permissions !== undefined) {
+    process.env.OPENCODE_PERMISSION = permissions
+    process.env.OMNIA_COMPUTER_TOOLS = enterprisePermissions().computer === "deny" ? "0" : "1"
+  }
 
   const daemonStateHome = found?.stateHome ?? stateHome
   const url = await run(binary, ["service", "start"], logger, { stateHome: daemonStateHome })

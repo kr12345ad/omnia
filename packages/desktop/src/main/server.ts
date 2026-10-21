@@ -5,6 +5,7 @@ import type { Details } from "electron"
 import { getLogger } from "./logging"
 import { readSessionProfileId } from "./omnia/auth-session"
 import { controlPlaneAuth } from "./omnia/control-plane"
+import { enterprisePermissionEnv, enterprisePermissions } from "./omnia/enterprise"
 import { getUserShell, loadShellEnv } from "./shell-env"
 import { getStore } from "./store"
 import { DEFAULT_SERVER_URL_KEY } from "./store-keys"
@@ -246,6 +247,13 @@ function createSidecarEnv(): Record<string, string> {
     // allowances were never incremented, so they could not be exhausted either.
     const profileId = readSessionProfileId()
     if (profileId !== undefined) env.OMNIA_PROFILE_ID = profileId
+  }
+  // A tenant build carries tool-level rules. Handing them to the engine is what
+  // makes a denied tool uncallable instead of merely hidden in the settings UI.
+  const permissions = enterprisePermissionEnv()
+  if (permissions !== undefined) {
+    env.OPENCODE_PERMISSION = permissions
+    env.OMNIA_COMPUTER_TOOLS = enterprisePermissions().computer === "deny" ? "0" : "1"
   }
   return env
 }

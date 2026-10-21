@@ -3,6 +3,7 @@ import { base64Encode } from "@opencode-ai/core/util/encode"
 import { useParams } from "@solidjs/router"
 import { batch, createEffect, createMemo, startTransition } from "solid-js"
 import { createStore } from "solid-js/store"
+import { useEnterprise } from "@/context/enterprise"
 import { useModels } from "@/context/models"
 import { useSettings } from "@/context/settings"
 import { useProviders } from "@/hooks/use-providers"
@@ -66,6 +67,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const providers = useProviders(() => sdk().directory)
     const models = useModels()
     const settings = useSettings()
+    const enterprise = useEnterprise()
 
     const id = createMemo(() => params.id || undefined)
     const list = createMemo(() => sync().data.agent.filter((item) => item.mode !== "subagent" && !item.hidden))
@@ -161,7 +163,21 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       }
     }
 
+    // The distribution's pinned model leads for new sessions: it is the one
+    // the organization pays for and supports. A person's explicit choice
+    // (server default, recent pick) still wins through the fallback chain.
+    const enterpriseDefault = () => {
+      const pinned = enterprise.models()?.defaultModel
+      if (!enterprise.managed || !pinned) return
+      const slash = pinned.indexOf("/")
+      if (slash <= 0) return
+      const model = { providerID: pinned.slice(0, slash), modelID: pinned.slice(slash + 1) }
+      if (enterprise.modelPermitted(model.providerID, model.modelID) && validModel(model)) return model
+    }
+
     const defaultModel = () => {
+      const pinned = enterpriseDefault()
+      if (pinned) return pinned
       const defaults = providers.default()
       for (const provider of providers.connected()) {
         const configured = defaults[provider.id]

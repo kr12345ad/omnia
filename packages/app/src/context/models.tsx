@@ -3,6 +3,7 @@ import { createStore } from "solid-js/store"
 import { DateTime } from "luxon"
 import { filter, firstBy, flat, groupBy, mapValues, pipe, uniqueBy, values } from "remeda"
 import { createSimpleContext } from "@opencode-ai/ui/context"
+import { useEnterprise } from "@/context/enterprise"
 import { useProviders } from "@/hooks/use-providers"
 import { Persist, persisted } from "@/utils/persist"
 
@@ -27,6 +28,7 @@ export const { use: useModels, provider: ModelsProvider } = createSimpleContext(
   gate: false,
   init: (props: { directory?: Accessor<string | undefined> } = {}) => {
     const providers = useProviders(() => props.directory?.())
+    const enterprise = useEnterprise()
 
     const [store, setStore, _, ready] = persisted(
       Persist.global("model", ["model.v1"]),
@@ -113,6 +115,9 @@ export const { use: useModels, provider: ModelsProvider } = createSimpleContext(
     }
 
     const visible = (model: ModelKey) => {
+      // A managed build only offers the models its distribution allows. The
+      // blocklist wins over everything, including the person's own favorites.
+      if (!enterprise.modelPermitted(model.providerID, model.modelID)) return false
       const key = modelKey(model)
       const state = visibility().get(key)
       if (state === "hide") return false

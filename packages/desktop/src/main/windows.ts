@@ -16,6 +16,7 @@ import { nativeT } from "./native-translations"
 import { createWindowRegistry } from "./window-registry"
 import { safeWindowURL } from "./window-state"
 import { resolveExternalURL, resolveLocalFilePath } from "./external-url"
+import { isEnterpriseBuild } from "./omnia/enterprise"
 
 const root = dirname(fileURLToPath(import.meta.url))
 const rendererRoot = join(root, "../renderer")
@@ -210,6 +211,10 @@ export function createMainWindow(id: string = randomUUID()) {
       : {}),
     webPreferences: {
       preload: join(root, "../preload/index.js"),
+      // The preload can tell a managed build synchronously, so the renderer
+      // never has to fall back to the public GitHub/Google sign-in while a
+      // profile read is in flight (or if that read ever fails).
+      ...(isEnterpriseBuild() ? { additionalArguments: ["--omnia-managed-client"] } : {}),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,

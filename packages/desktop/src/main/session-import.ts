@@ -4,6 +4,13 @@ import { homedir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 import type { DatabaseSync, SQLInputValue } from "node:sqlite"
 
+// Brings session history from another install into this one. Two sources are
+// read, never written: an OpenCode database (`opencode*.db`) and Codex CLI
+// rollout transcripts (`~/.codex/sessions/**/rollout-*.jsonl`). Everything is
+// inserted into the Omnia database with `INSERT OR IGNORE`, so importing twice
+// adds only what is missing and an interrupted import resumes on the next run.
+// See docs/session-import.md for the user-facing description.
+
 export interface OpencodeSource {
   readonly kind: "opencode"
   readonly path: string
@@ -355,50 +362,51 @@ function writeLedger(userDataPath: string, ledger: ImportLedger): void {
   writeFileSync(ledgerPath(userDataPath), JSON.stringify(ledger, null, 2), { mode: 0o600 })
 }
 
-interface DestColumns {
-  readonly session: Set<string>
-  readonly message: Set<string>
-  readonly part: Set<string>
-  readonly project: Set<string>
+const SESSION_CHUNK = 50
+const PAGE_ROWS = 2000
+// Session history this installer knows how to carry over. `message` and `part`
+// feed the timeline, `session_message` is the durable V2 history a continued
+// session is resumed from, and `todo`/`session_share` carry state the session
+// view reads back. Any other table with a `session_id` column is copied too, so
+// a newer source schema does not silently lose a table this file predates.
+const IMPORTED_SESSION_TABLES = ["message", "session_message", "todo", "part", "session_share"]
+// `session_input` holds prompts an installation has admitted but not run yet.
+// Importing another installation's pending prompts would re-run its unfinished
+// work here, so it is deliberately not history.
+
+function tableNames(db: DatabaseSync): Set<string> {
+  return new Set(
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+      .all()
+      .map((row) => String((row as { name: unknown }).name)),
+  )
 }
 
-function destColumns(db: DatabaseSync): DestColumns {
-  const columns = (table: string): Set<string> => {
-    try {
-      return new Set(
-        db
-          .prepare(`PRAGMA table_info("${table.replaceAll('"', '""')}")`)
-          .all()
-          .map((row) => String((row as { name: unknown }).name)),
-      )
-    } catch {
-      return new Set()
-    }
-  }
-  return { session: columns("session"), message: columns("message"), part: columns("part"), project: columns("project") }
-}
-
-function existingIds(db: DatabaseSync, table: string): Set<string> {
+function columnNames(db: DatabaseSync, table: string): string[] {
   try {
-    return new Set(
-      db
-        .prepare(`SELECT id FROM "${table}"`)
-        .all()
-        .map((row) => String((row as { id: unknown }).id)),
-    )
+    return db
+      .prepare(`PRAGMA table_info("${table.replaceAll('"', '""')}")`)
+      .all()
+      .map((row) => String((row as { name: unknown }).name))
   } catch {
-    return new Set()
+    return []
   }
 }
 
+// Copies an OpenCode database into the Omnia database. Every insert is
+// `INSERT OR IGNORE` on a primary key, so a rerun only adds what is missing and
+// an interrupted import can be started again without duplicating history.
+// Source rows are read through column intersection and copied verbatim; the
+// source database is opened read-only and never modified.
 export async function importOpencodeDb(
   destDbPath: string,
   sourcePath: string,
   userDataPath: string,
 ): Promise<ImportReport> {
-  const errors: string[] = []
   const { DatabaseSync } = await import("node:sqlite")
   if (!existsSync(destDbPath)) throw new Error(`Omnia database not found: ${destDbPath}`)
+  if (resolve(destDbPath) === resolve(sourcePath)) throw new Error("Source and destination are the same database")
   const dest = new DatabaseSync(destDbPath)
   const source = new DatabaseSync(sourcePath, { readOnly: true })
   let importedSessions = 0
@@ -406,111 +414,65 @@ export async function importOpencodeDb(
   let importedParts = 0
   let skippedSessions = 0
   try {
-    const columns = destColumns(dest)
-    const haveSessions = existingIds(dest, "session")
-    const haveMessages = existingIds(dest, "message")
-    const haveParts = existingIds(dest, "part")
-    const haveProjects = existingIds(dest, "project")
-    const sessions = source.prepare("SELECT * FROM session").all() as Record<string, unknown>[]
-    // Prepared statements are hoisted out of the loops: preparing per row was
-    // the dominant cost on large histories. Shapes are cached by column list
-    // in case a row is missing columns.
-    const inserts = new Map<string, { run: (...params: SQLInputValue[]) => unknown }>()
-    const insertInto = (table: "session" | "message" | "part" | "project", names: string[]) => {
+    // The app keeps its own connection to this database while an import runs,
+    // so wait for its writer instead of failing the whole import with SQLITE_BUSY.
+    dest.exec("PRAGMA busy_timeout = 5000")
+    const destinationTables = tableNames(dest)
+    const sourceTables = tableNames(source)
+    const sourceColumns = new Map<string, Set<string>>()
+    const columnsIn = (table: string) => {
+      const cached = sourceColumns.get(table)
+      if (cached !== undefined) return cached
+      const columns = new Set(columnNames(source, table))
+      sourceColumns.set(table, columns)
+      return columns
+    }
+    // Shapes are cached by column list, so every row of a table reuses one
+    // prepared statement: preparing per row was the dominant cost on large histories.
+    const statements = new Map<string, { run: (...params: SQLInputValue[]) => { changes: number | bigint } }>()
+    const insertRow = (table: string, names: string[], values: Record<string, unknown>) => {
       const key = `${table}:${names.join(",")}`
-      let statement = inserts.get(key)
+      let statement = statements.get(key)
       if (statement === undefined) {
         statement = dest.prepare(
-          `INSERT OR IGNORE INTO ${table} (${names.map((n) => `"${n}"`).join(", ")}) VALUES (${names.map(() => "?").join(", ")})`,
+          `INSERT OR IGNORE INTO "${table}" (${names.map((name) => `"${name}"`).join(", ")}) VALUES (${names.map(() => "?").join(", ")})`,
         )
-        inserts.set(key, statement)
+        statements.set(key, statement)
       }
-      return statement
+      return Number(statement.run(...names.map((name) => toSql(values[name]))).changes) > 0
     }
-    const sessionNames = [...columns.session].filter((c) => c !== "rowid")
-    const sessionInsert = columns.session.has("id") ? insertInto("session", sessionNames) : undefined
-    const placeholders = (count: number): string => new Array(count).fill("?").join(", ")
+    const sharedColumns = (table: string) => {
+      if (!sourceTables.has(table) || !destinationTables.has(table)) return []
+      const sourceNames = columnsIn(table)
+      return columnNames(dest, table).filter((name) => sourceNames.has(name) && name !== "rowid")
+    }
+    const sessions = (source.prepare("SELECT * FROM session").all() as Record<string, unknown>[]).filter(
+      (row): row is Record<string, unknown> & { id: string } => typeof row.id === "string",
+    )
+
+    // Projects and their directories come first: sessions reference them, and a
+    // session whose source project row is gone still needs a row to stay reachable.
     dest.exec("BEGIN IMMEDIATE")
     try {
-      const projects = new Map<string, Record<string, unknown>>()
-      const projectIds = new Set<string>()
-      for (const session of sessions) {
-        if (typeof session.project_id === "string") projectIds.add(session.project_id)
-      }
-      for (const projectId of projectIds) {
-        if (haveProjects.has(projectId)) continue
-        try {
-          const row = source.prepare("SELECT * FROM project WHERE id = ?").get(projectId) as Record<string, unknown> | undefined
-          if (row !== undefined) projects.set(projectId, row)
-        } catch (error) {
-          errors.push(`project ${projectId}: ${error instanceof Error ? error.message : String(error)}`)
-        }
-      }
-      for (const [projectId, row] of projects) {
-        const names = [...columns.project].filter((name) => name in row)
-        if (names.length === 0) continue
-        insertInto("project", names).run(...names.map((name) => toSql(row[name])))
-        haveProjects.add(projectId)
-      }
-      // New sessions only; chunks bound memory and keep each bulk read small.
-      // Sessions already held still get their messages re-checked: opencode
-      // appends to sessions over time, so a rerun must pick up new messages
-      // in old sessions rather than assuming a held session is complete.
-      const fresh = sessions.filter(
-        (session): session is Record<string, unknown> & { id: string } =>
-          typeof session.id === "string" && !haveSessions.has(session.id),
+      const projectIds = new Set(
+        sessions.flatMap((session) => (typeof session.project_id === "string" ? [session.project_id] : [])),
       )
-      skippedSessions = sessions.length - fresh.length - sessions.filter((s) => typeof s.id !== "string").length
-      const CHUNK = 200
-      const freshIds = new Set(fresh.map((session) => session.id))
-      for (let start = 0; start < sessions.length; start += CHUNK) {
-        const chunk = sessions
-          .filter((session): session is Record<string, unknown> & { id: string } => typeof session.id === "string")
-          .slice(start, start + CHUNK)
-        const ids = chunk.map((session) => session.id as string)
-        for (const session of chunk) {
-          if (!freshIds.has(session.id as string)) continue
-          sessionInsert?.run(...sessionNames.map((name) => toSql(name in session ? session[name] : null)))
-          haveSessions.add(session.id as string)
-          importedSessions += 1
+      const projectColumns = sharedColumns("project")
+      const directoryColumns = sharedColumns("project_directory")
+      for (const projectId of projectIds) {
+        if (projectColumns.length > 0) {
+          const row = sourceTables.has("project")
+            ? (source.prepare("SELECT * FROM project WHERE id = ?").get(projectId) as
+                | Record<string, unknown>
+                | undefined)
+            : undefined
+          insertRow("project", projectColumns, row ?? placeholderProject(projectId, sessions))
         }
-        const messages = source
-          .prepare(`SELECT * FROM message WHERE session_id IN (${placeholders(ids.length)})`)
-          .all(...ids) as Record<string, unknown>[]
-        const bySession = new Map<string, Record<string, unknown>[]>()
-        for (const message of messages) {
-          if (typeof message.session_id !== "string") continue
-          const list = bySession.get(message.session_id) ?? []
-          list.push(message)
-          bySession.set(message.session_id, list)
-        }
-        const freshMessageIds: string[] = []
-        for (const session of chunk) {
-          for (const message of bySession.get(session.id) ?? []) {
-            const messageId = message.id
-            if (typeof messageId !== "string" || haveMessages.has(messageId)) continue
-            const names = [...columns.message].filter((name) => name in message)
-            if (names.length === 0) continue
-            insertInto("message", names).run(...names.map((name) => toSql(message[name])))
-            haveMessages.add(messageId)
-            freshMessageIds.push(messageId)
-            importedMessages += 1
-          }
-        }
-        for (let offset = 0; offset < freshMessageIds.length; offset += 500) {
-          const batch = freshMessageIds.slice(offset, offset + 500)
-          const parts = source
-            .prepare(`SELECT * FROM part WHERE message_id IN (${placeholders(batch.length)})`)
-            .all(...batch) as Record<string, unknown>[]
-          for (const part of parts) {
-            const partId = part.id
-            if (typeof partId !== "string" || haveParts.has(partId)) continue
-            const partNames = [...columns.part].filter((name) => name in part)
-            if (partNames.length === 0) continue
-            insertInto("part", partNames).run(...partNames.map((name) => toSql(part[name])))
-            haveParts.add(partId)
-            importedParts += 1
-          }
+        if (directoryColumns.length === 0) continue
+        for (const row of source
+          .prepare("SELECT * FROM project_directory WHERE project_id = ?")
+          .all(projectId) as Record<string, unknown>[]) {
+          insertRow("project_directory", directoryColumns, row)
         }
       }
       dest.exec("COMMIT")
@@ -521,6 +483,127 @@ export async function importOpencodeDb(
         // Already rolled back or never began; the error below carries the cause.
       }
       throw error
+    }
+
+    // Databases created before the `session_v2` → `session` rename can keep a
+    // foreign key from `session_message` to the old `session_v2` table. Mirror
+    // each imported session there when the constraint still points at it, so a
+    // session's durable history can be inserted instead of failing every row.
+    const messageParent = (() => {
+      try {
+        const link = dest
+          .prepare("PRAGMA foreign_key_list(session_message)")
+          .all()
+          .find((entry) => String((entry as { from: unknown }).from) === "session_id")
+        return link === undefined ? "session" : String((link as { table: unknown }).table)
+      } catch {
+        return "session"
+      }
+    })()
+    const mirrorColumns =
+      messageParent !== "session" && destinationTables.has(messageParent)
+        ? columnNames(dest, messageParent).filter((name) => name !== "rowid")
+        : []
+
+    // History tables beyond the three this file names explicitly, so a newer
+    // source schema loses nothing just because a table was added there first.
+    const historyTables = [
+      ...IMPORTED_SESSION_TABLES,
+      ...[...destinationTables]
+        .filter(
+          (table) =>
+            table !== "session_input" &&
+            !IMPORTED_SESSION_TABLES.includes(table) &&
+            ["session", "project", "project_directory"].indexOf(table) === -1 &&
+            columnNames(dest, table).includes("session_id") &&
+            columnsIn(table).has("session_id"),
+        )
+        .sort(),
+    ].filter((table) => sharedColumns(table).length > 0)
+
+    // Sessions commit in bounded chunks: a two-gigabyte source would otherwise
+    // hold one enormous write transaction (and its WAL) open for minutes, and a
+    // failure partway through would throw away every chunk that had succeeded.
+    for (let start = 0; start < sessions.length; start += SESSION_CHUNK) {
+      const chunk = sessions.slice(start, start + SESSION_CHUNK)
+      const ids = chunk.map((session) => session.id)
+      dest.exec("BEGIN IMMEDIATE")
+      try {
+        const sessionColumns = sharedColumns("session")
+        const heldSession = dest.prepare("SELECT 1 AS present FROM session WHERE id = ?")
+        for (const session of chunk) {
+          if (insertRow("session", sessionColumns, session)) {
+            importedSessions += 1
+            continue
+          }
+          // `INSERT OR IGNORE` also swallows a NOT NULL violation, which would
+          // otherwise surface much later as a foreign key error on a child row.
+          if (heldSession.get(session.id) === undefined) {
+            throw new Error(`session ${session.id} has no value for a required column`)
+          }
+        }
+        if (mirrorColumns.length > 0) {
+          for (const session of chunk) {
+            const names = mirrorColumns.filter((name) => name in session)
+            if (names.length > 0) insertRow(messageParent, names, session)
+          }
+        }
+        const placeholders = new Array(ids.length).fill("?").join(", ")
+        for (const table of historyTables) {
+          const names = sharedColumns(table)
+          // Pages are read by rowid rather than in one result: a chunk of
+          // sessions can own a gigabyte of tool output, and materializing all of
+          // it at once peaked the import over a gigabyte of memory.
+          const page = source.prepare(
+            `SELECT rowid AS import_rowid, ${names.map((name) => `"${name}"`).join(", ")} FROM "${table}" WHERE session_id IN (${placeholders}) AND rowid > ? ORDER BY rowid LIMIT ${PAGE_ROWS}`,
+          )
+          // A table naming its own failure is the difference between "the
+          // import failed" and "the import failed on session_message".
+          try {
+            let cursor = 0
+            while (true) {
+              const rows = page.all(...ids, cursor) as Record<string, unknown>[]
+              if (rows.length === 0) break
+              for (const row of rows) {
+                cursor = Number(row.import_rowid)
+                try {
+                  if (!insertRow(table, names, row)) continue
+                } catch (error) {
+                  throw new Error(
+                    `${table} row ${String(row.id ?? row.message_id ?? row.session_id ?? "?")}: ${error instanceof Error ? error.message : String(error)}`,
+                  )
+                }
+                if (table === "message") importedMessages += 1
+                else if (table === "part") importedParts += 1
+              }
+              if (rows.length < PAGE_ROWS) break
+            }
+          } catch (error) {
+            throw new Error(
+              `${error instanceof Error ? error.message : String(error)} (${table}, sessions ${start}-${start + chunk.length})`,
+            )
+          }
+        }
+        dest.exec("COMMIT")
+      } catch (error) {
+        try {
+          dest.exec("ROLLBACK")
+        } catch {
+          // Already rolled back or never began; the error below carries the cause.
+        }
+        // Rows committed by earlier chunks stay: they are valid history and a
+        // rerun continues from the first missing row.
+        throw error
+      }
+    }
+    skippedSessions = sessions.length - importedSessions
+    // A large import writes everything through the WAL; fold it back so the next
+    // launch does not begin behind a multi-hundred-megabyte journal. A reader
+    // holding the database (the app itself) only makes this a no-op.
+    try {
+      dest.exec("PRAGMA wal_checkpoint(TRUNCATE)")
+    } catch {
+      // Not fatal: the next checkpoint finishes the same work.
     }
   } finally {
     source.close()
@@ -539,7 +622,39 @@ export async function importOpencodeDb(
       },
     },
   })
-  return { source: sourcePath, kind: "opencode", importedSessions, importedMessages, importedParts, skippedSessions, errors }
+  return { source: sourcePath, kind: "opencode", importedSessions, importedMessages, importedParts, skippedSessions, errors: [] }
+}
+
+// A project row built from the session that points at it, used when the source
+// database no longer holds the project record itself.
+function placeholderProject(id: string, sessions: (Record<string, unknown> & { id: string })[]) {
+  const directory = sessions.find(
+    (session) => session.project_id === id && typeof session.directory === "string",
+  )?.directory
+  const now = Date.now()
+  return {
+    id,
+    worktree: typeof directory === "string" && directory.length > 0 ? directory : homedir(),
+    vcs: null,
+    name: null,
+    sandboxes: "[]",
+    time_created: now,
+    time_updated: now,
+  }
+}
+
+// Codex stores tool arguments as a JSON string. Decode them when possible and
+// fall back to keeping the raw text under one key, so the part still renders.
+function toolInput(args: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(args)
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>
+    }
+    return { arguments: parsed }
+  } catch {
+    return { arguments: args }
+  }
 }
 
 function titleOf(firstUserText: string | undefined, fallback: string): string {
@@ -580,7 +695,10 @@ export async function importCodexFile(
   let importedMessages = 0
   let importedParts = 0
   try {
-    const columns = destColumns(dest)
+    dest.exec("PRAGMA busy_timeout = 5000")
+    const sessionColumns = columnNames(dest, "session")
+    const messageColumns = columnNames(dest, "message")
+    const partColumns = columnNames(dest, "part")
     const cwd = parsed.cwd ?? dirname(filePath)
     let resolvedProject = projectId
     if (resolvedProject === undefined) {
@@ -594,16 +712,25 @@ export async function importCodexFile(
     const now = Date.now()
     if (resolvedProject === undefined) {
       resolvedProject = mintId("prj")
-      if (columns.project.has("id")) {
-        const names = ["id", "worktree", "time_created", "time_updated", "sandboxes"].filter((name) => columns.project.has(name))
+      if (sessionColumns.includes("project_id")) {
+        const names = ["id", "worktree", "time_created", "time_updated", "sandboxes"].filter((name) =>
+          columnNames(dest, "project").includes(name),
+        )
         dest
           .prepare(`INSERT OR IGNORE INTO project (${names.map((n) => `"${n}"`).join(", ")}) VALUES (${names.map(() => "?").join(", ")})`)
-          .run(...names.map((name) => toSql(name === "id" ? resolvedProject : name === "worktree" ? cwd : name === "sandboxes" ? "[]" : now)))
+          .run(
+            ...names.map((name) =>
+              toSql(name === "id" ? resolvedProject : name === "worktree" ? cwd : name === "sandboxes" ? "[]" : now),
+            ),
+          )
       }
     }
     const firstUser = parsed.messages.find((message) => message.role === "user" && message.text.length > 0)?.text
     const created = parsed.messages[0]?.time ?? now
     const updated = parsed.messages[parsed.messages.length - 1]?.time ?? created
+    // `session.model` is a JSON column holding the selected model, not a plain
+    // model id: writing a bare string there makes the session list undecodable.
+    const model = { id: parsed.model ?? "codex", providerID: "codex" }
     const sessionRow: Record<string, unknown> = {
       id: sessionId,
       project_id: resolvedProject,
@@ -611,7 +738,7 @@ export async function importCodexFile(
       directory: cwd,
       title: titleOf(firstUser, `Codex session ${new Date(created).toLocaleDateString()}`),
       version: "1",
-      metadata: JSON.stringify({ mode: "code", importedFrom: "codex", sourceFile: filePath, codexId: parsed.id ?? null }),
+      metadata: { mode: "code", importedFrom: "codex", sourceFile: filePath, codexId: parsed.id ?? null },
       cost: 0,
       tokens_input: 0,
       tokens_output: 0,
@@ -619,16 +746,19 @@ export async function importCodexFile(
       tokens_cache_read: 0,
       tokens_cache_write: 0,
       agent: "build",
-      model: parsed.model ?? null,
+      model,
       time_created: created,
       time_updated: updated,
     }
-    const sessionNames = [...columns.session].filter((name) => name in sessionRow)
+    const sessionNames = sessionColumns.filter((name) => name in sessionRow)
     dest.exec("BEGIN IMMEDIATE")
     try {
       dest
         .prepare(`INSERT OR IGNORE INTO session (${sessionNames.map((n) => `"${n}"`).join(", ")}) VALUES (${sessionNames.map(() => "?").join(", ")})`)
         .run(...sessionNames.map((name) => toSql(sessionRow[name])))
+      // Message rows must decode as `SessionV1.Info`: a user message needs an
+      // agent and model, an assistant message needs its parent, model, mode,
+      // path, cost and tokens. Rows missing those fields render as broken turns.
       let parentId: string | undefined
       let clock = created
       for (const message of parsed.messages) {
@@ -640,14 +770,24 @@ export async function importCodexFile(
           session_id: sessionId,
           time_created: clock,
           time_updated: clock,
-          data: JSON.stringify({
+          data: {
             role: message.role,
-            ...(parentId === undefined ? {} : { parentID: parentId }),
-            ...(isUser ? {} : { agent: "build", ...(parsed.model === undefined ? {} : { modelID: parsed.model }) }),
-            time: { created: clock },
-          }),
+            ...(isUser
+              ? { agent: "build", model: { providerID: model.providerID, modelID: model.id } }
+              : {
+                  parentID: parentId ?? messageId,
+                  mode: "code",
+                  agent: "build",
+                  modelID: model.id,
+                  providerID: model.providerID,
+                  path: { cwd, root: cwd },
+                  cost: 0,
+                  tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                }),
+            time: { created: clock, ...(isUser ? {} : { completed: clock }) },
+          },
         }
-        const messageNames = [...columns.message].filter((name) => name in messageRow)
+        const messageNames = messageColumns.filter((name) => name in messageRow)
         dest
           .prepare(`INSERT OR IGNORE INTO message (${messageNames.map((n) => `"${n}"`).join(", ")}) VALUES (${messageNames.map(() => "?").join(", ")})`)
           .run(...messageNames.map((name) => toSql(messageRow[name])))
@@ -665,13 +805,22 @@ export async function importCodexFile(
             type: "tool",
             tool: call.name,
             callID: mintId("prt").replace("prt_", "call_"),
-            state: { status: "completed", input: call.args, output: call.result },
+            // A completed tool part carries a record input, a title, metadata
+            // and a start/end time; a bare argument string fails to decode.
+            state: {
+              status: "completed",
+              input: toolInput(call.args),
+              output: call.result,
+              title: call.name,
+              metadata: {},
+              time: { start: clock, end: clock },
+            },
           })
         }
         for (const part of parts) {
           const partId = mintId("prt")
           const partNames = ["id", "message_id", "session_id", "time_created", "time_updated", "data"].filter((name) =>
-            columns.part.has(name),
+            partColumns.includes(name),
           )
           const values: Record<string, unknown> = {
             id: partId,
@@ -679,7 +828,7 @@ export async function importCodexFile(
             session_id: sessionId,
             time_created: clock,
             time_updated: clock,
-            data: JSON.stringify(part),
+            data: part,
           }
           dest
             .prepare(`INSERT OR IGNORE INTO part (${partNames.map((n) => `"${n}"`).join(", ")}) VALUES (${partNames.map(() => "?").join(", ")})`)

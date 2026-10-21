@@ -45,6 +45,7 @@ let permissionServer = "server-a"
 let createSessionGate: Promise<void> | undefined
 
 let promptValue: Prompt = [{ type: "text", content: "ls", start: 0, end: 2 }]
+let replyValue: { messageID: string; text: string } | undefined
 const [promptStore, setPromptStore] = createStore<PromptStore>({
   prompt: promptValue,
   cursor: 0,
@@ -59,6 +60,15 @@ const prompt = {
   model: {
     current: () => undefined,
     set: () => undefined,
+  },
+  reply: {
+    current: () => replyValue,
+    set: (value: { messageID: string; text: string }) => {
+      replyValue = value
+    },
+    clear: () => {
+      replyValue = undefined
+    },
   },
   reset: () => undefined,
   set: () => undefined,
@@ -313,6 +323,7 @@ beforeEach(() => {
   sentCommands.length = 0
   commands.length = 0
   promptValue = [{ type: "text", content: "ls", start: 0, end: 2 }]
+  replyValue = undefined
   params = {}
   search = {}
   sentShell.length = 0
@@ -549,6 +560,41 @@ describe("prompt submit worktree selection", () => {
     expect((promptInputs[0] as { legacyParts?: { id: string; type: string; text?: string }[] }).legacyParts).toEqual([
       { id: expect.stringMatching(/^prt_/), type: "text", text: "ls" },
     ])
+  })
+
+  test("sends the replied-to message as quoted context without touching the draft", async () => {
+    params = { id: "session-1" }
+    replyValue = { messageID: "message-9", text: "the answer" }
+    promptValue = [{ type: "text", content: "does this still apply?", start: 0, end: 23 }]
+
+    const submit = createPromptSubmit({
+      prompt,
+      info: () => ({ id: "session-1" }),
+      imageAttachments: () => [],
+      commentCount: () => 0,
+      autoAccept: () => false,
+      mode: () => "normal",
+      working: () => false,
+      editor: () => undefined,
+      queueScroll: () => undefined,
+      promptLength: (value) => value.reduce((sum, part) => sum + ("content" in part ? part.content.length : 0), 0),
+      addToHistory: () => undefined,
+      resetHistoryNavigation: () => undefined,
+      setMode: () => undefined,
+      setPopover: () => undefined,
+      onSubmit: () => undefined,
+    })
+
+    await submit.handleSubmit({ preventDefault: () => undefined } as unknown as Event)
+    await Bun.sleep(0)
+
+    const sent = promptInputs[0] as { text?: string; legacyParts?: { type: string; text?: string }[] }
+    expect(sent.text).toContain("> Replying to this message:")
+    expect(sent.text).toContain("> the answer")
+    expect(sent.text).toContain("does this still apply?")
+    expect(sent.legacyParts?.[0]?.text).toContain("> the answer")
+    // The quote is context for the send, never text the user has to delete.
+    expect(promptValue).toEqual([{ type: "text", content: "does this still apply?", start: 0, end: 23 }])
   })
 
   test("submits slash commands through the current session API", async () => {

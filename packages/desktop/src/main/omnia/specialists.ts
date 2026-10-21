@@ -1,6 +1,7 @@
 import { ipcMain } from "electron"
 import type { Specialist, SpecialistRoster } from "@opencode-ai/omnia/specialists/types"
 import { serverCall } from "./server-call"
+import { enterpriseGuard } from "./enterprise"
 
 function roster(json: Record<string, unknown>): SpecialistRoster {
   return {
@@ -13,9 +14,11 @@ function roster(json: Record<string, unknown>): SpecialistRoster {
 }
 
 export function registerSpecialistIpcHandlers(): void {
-  ipcMain.handle("specialists-get", async () => roster(await serverCall("/v1/specialists", "GET")))
-  ipcMain.handle("specialists-save", async (_event, specialists: Specialist[]) =>
+  const guarded = (channel: string, listener: Parameters<typeof ipcMain.handle>[1]) =>
+    ipcMain.handle(channel, enterpriseGuard("subagents", "Specialists", listener))
+  guarded("specialists-get", async () => roster(await serverCall("/v1/specialists", "GET")))
+  guarded("specialists-save", async (_event, specialists: Specialist[]) =>
     roster(await serverCall("/v1/specialists", "PUT", { specialists })),
   )
-  ipcMain.handle("specialists-reset", async () => roster(await serverCall("/v1/specialists", "PUT", { reset: true })))
+  guarded("specialists-reset", async () => roster(await serverCall("/v1/specialists", "PUT", { reset: true })))
 }

@@ -14,6 +14,11 @@ export type SessionComposerFollowupDock = {
   onEdit: (id: string) => void
 }
 
+export type SessionComposerReplyDock = {
+  text: string
+  onDismiss: () => void
+}
+
 export type SessionComposerRevertDock = {
   items: { id: string; text: string }[]
   restoring?: string
@@ -33,6 +38,7 @@ export function createSessionComposerRegionController(input: {
     onToggle: () => void
   }
   followup: Accessor<SessionComposerFollowupDock | undefined>
+  reply: Accessor<SessionComposerReplyDock | undefined>
   revert: Accessor<SessionComposerRevertDock | undefined>
   onResponseSubmit: () => void
   openParent: () => void
@@ -124,6 +130,7 @@ export function createSessionComposerRegionController(input: {
     centered: input.centered,
     todo: input.todo,
     followup: input.followup,
+    reply: input.reply,
     revert: input.revert,
     onResponseSubmit: input.onResponseSubmit,
     openParent: input.openParent,
@@ -137,6 +144,9 @@ export function createSessionComposerRegionController(input: {
     dock: () => (store.ready && input.state.dock()) || value() > 0.001,
     dockProgress: value,
     dockHeight: () => Math.max(78, store.height),
+    // The 36px lift tucks the composer's first block into the todo dock's own
+    // bottom padding, so a reply card stacks flush under the todo card rather
+    // than floating a gap below it.
     lift: () => (input.revert()?.items.length ? 18 : 36 * value()),
     setDockBodyRef: (el: HTMLDivElement) => setStore("body", el),
   }

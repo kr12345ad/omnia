@@ -27,3 +27,27 @@ describe("prompt state initialization", () => {
     })
   })
 })
+
+describe("prompt reply", () => {
+  test("rides with the draft and is dropped when the draft is reset", () => {
+    createRoot((dispose) => {
+      const prompt = createPromptState()
+      prompt.reply.set({ messageID: "message-1", text: "the answer" })
+      expect(prompt.reply.current()).toEqual({ messageID: "message-1", text: "the answer" })
+
+      prompt.reset()
+      expect(prompt.reply.current()).toBeUndefined()
+      dispose()
+    })
+  })
+
+  test("is per draft, so a new prompt starts without one", () => {
+    createRoot((dispose) => {
+      const first = createPromptState()
+      first.reply.set({ messageID: "message-1", text: "the answer" })
+      const second = createPromptState()
+      expect(second.reply.current()).toBeUndefined()
+      dispose()
+    })
+  })
+})

@@ -19,4 +19,5 @@ export * as Superskills from "./superskills/index.js"
 export * as Memory from "./memory/index.js"
 
 export * as Auth from "./auth/index.js"
+export * as Enterprise from "./enterprise/index.js"
 export * as Cua from "./cua/index.js"

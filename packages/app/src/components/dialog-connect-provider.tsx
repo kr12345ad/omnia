@@ -10,6 +10,7 @@ import { Spinner } from "@opencode-ai/ui/spinner"
 import { Tag } from "@opencode-ai/ui/tag"
 import { TextField } from "@opencode-ai/ui/text-field"
 import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2"
+import { useEnterprise } from "@/context/enterprise"
 import { DialogBody, DialogHeader, DialogTitle, DialogV2 } from "@opencode-ai/ui/v2/dialog-v2"
 import { TextInputV2 } from "@opencode-ai/ui/v2/text-input-v2"
 import { showToast } from "@/utils/toast"
@@ -429,11 +430,17 @@ function ProviderConnection(props: {
         .then((result) => result.data),
   )
   const loading = createMemo(() => integration.loading)
+  const enterprise = useEnterprise()
   const methods = createMemo<ConnectMethod[]>(() => {
+    // Without bring-your-own-key the organization pays, so a personal key is
+    // never offered. OAuth stays: it signs in, it does not bill the person.
+    const personalKey = enterprise.models()?.allowByok !== false
     const values = integration.latest?.methods.filter(
-      (method): method is ConnectMethod => method.type === "key" || method.type === "oauth",
+      (method): method is ConnectMethod =>
+        method.type === "oauth" || (method.type === "key" && personalKey),
     )
-    return values?.length ? values : fallback()
+    if (values?.length) return values
+    return personalKey ? fallback() : []
   })
   const [store, setStore] = createStore({
     methodIndex: undefined as undefined | number,

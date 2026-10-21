@@ -3,6 +3,14 @@ import { join } from "node:path"
 import { app, ipcMain, shell } from "electron"
 import { osEncryptionAvailable, encryptString, readSecret, writeSecretFile } from "./secret-storage"
 import { readControlPlaneUrl } from "./remote-agent"
+import {
+  enterpriseManifest,
+  enterprisePolicy,
+  enterpriseProfile,
+  enterpriseServerUrl,
+  isEnterpriseSessionUrl,
+  type EnterpriseProfile,
+} from "./enterprise"
 
 // The hosted control plane this deployment signs in against when neither
 // remote-agent-control-plane.json nor OMNIA_CONTROL_PLANE_URL provides one.
@@ -31,16 +39,23 @@ export interface GitHubProfile {
   htmlUrl?: string
 }
 
+/** How the credential was minted, so the account menu can name it honestly. */
+export type AuthMethod = "oauth" | "gh" | "enterprise"
+
 export interface GitHubAuthSession {
   url: string
   clientToken: string
+  method?: AuthMethod
   profile?: GitHubProfile
 }
 
 export interface GitHubAuthStatus {
   authenticated: boolean
   profile?: GitHubProfile
+  method?: AuthMethod
   controlPlaneUrl?: string
+  /** True when this build is bound to an organization's control plane. */
+  enterprise?: boolean
   // Set when the stored credential could not be read or was stored in the clear,
   // so the UI can tell "signed out" apart from "signed in but unreadable".
   issue?: AuthStorageIssue
@@ -76,6 +91,8 @@ function sessionFile(): string {
 }
 
 function controlPlaneUrl(): string {
+  const tenant = enterpriseServerUrl()
+  if (tenant !== undefined) return tenant
   return readControlPlaneUrl() ?? DEFAULT_CONTROL_PLANE_URL
 }
 
@@ -100,12 +117,19 @@ function readSession(value: unknown): GitHubAuthSession | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
   const session = value as Partial<GitHubAuthSession>
   if (typeof session.url !== "string" || typeof session.clientToken !== "string") return undefined
+  // Sign-ins from another control plane are not this client's credentials.
+  if (!isEnterpriseSessionUrl(session.url)) return undefined
   const profile = readProfile(session.profile)
   return {
     url: session.url,
     clientToken: session.clientToken,
+    ...(isAuthMethod(session.method) ? { method: session.method } : {}),
     ...(profile === undefined ? {} : { profile }),
   }
+}
+
+function isAuthMethod(value: unknown): value is AuthMethod {
+  return value === "oauth" || value === "gh" || value === "enterprise"
 }
 
 export function loadAuthSession(): GitHubAuthSession | undefined {
@@ -189,18 +213,26 @@ export function authStatus(): GitHubAuthStatus {
     return {
       authenticated: false,
       controlPlaneUrl: controlPlaneUrl(),
+      ...(enterpriseProfile() === undefined ? {} : { enterprise: true }),
       ...(stored.issue === undefined ? {} : { issue: stored.issue }),
     }
   }
   return {
     authenticated: true,
     ...(session.profile === undefined ? {} : { profile: session.profile }),
+    // Sessions written before the method was recorded are work-account sessions
+    // in a tenant build and OAuth sessions everywhere else.
+    method: session.method ?? (enterpriseProfile() === undefined ? "oauth" : "enterprise"),
     controlPlaneUrl: session.url,
+    ...(enterpriseProfile() === undefined ? {} : { enterprise: true }),
     ...(stored.issue === undefined ? {} : { issue: stored.issue }),
   }
 }
 
 export function startSignIn(options: StartSignInOptions = {}): Promise<GitHubAuthStatus> {
+  if (enterpriseProfile() !== undefined) {
+    return Promise.reject(new Error("This client signs in with your work account, not GitHub or Google."))
+  }
   const provider = isAuthProvider(options.provider) ? options.provider : "github"
   if (signInInFlight !== undefined) {
     // One browser flow at a time: the desktop polls a single control-plane
@@ -257,11 +289,17 @@ function completeSignIn(url: string, poll: Record<string, unknown>): GitHubAuthS
     throw new Error("The control plane completed the sign-in without a client token.")
   }
   const profile = readProfile(field(poll, "profile"))
-  const session: GitHubAuthSession = { url, clientToken, ...(profile === undefined ? {} : { profile }) }
+  const session: GitHubAuthSession = {
+    url,
+    clientToken,
+    method: "oauth",
+    ...(profile === undefined ? {} : { profile }),
+  }
   persistAuthSession(session)
   return {
     authenticated: true,
     ...(profile === undefined ? {} : { profile }),
+    method: "oauth",
     controlPlaneUrl: url,
   }
 }
@@ -321,12 +359,64 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+/**
+ * Sign in with the work account the tenant server issued. The password never
+ * touches the renderer's storage: only the client token returned here is kept.
+ */
+export async function enterpriseSignIn(identifier: string, password: string): Promise<GitHubAuthStatus> {
+  const profile = requireEnterpriseProfile()
+  if (profile.loginUrl.length === 0) {
+    throw new Error("This installer is not bound to a server address. Install it from the enrollment file your administrator sent.")
+  }
+  if (identifier.trim().length === 0 || password.length === 0) {
+    throw new Error("Enter your work email address or employee ID and your password.")
+  }
+  const response = await postJson(profile.loginUrl, { identifier: identifier.trim(), password })
+  if (response.status >= 400 || response.body.ok !== true) {
+    throw new ControlPlaneError(responseMessage(response.body, response.status), response.status)
+  }
+  const token = field(response.body, "token")
+  if (typeof token !== "string" || token.length === 0) {
+    throw new Error("The server completed the sign-in without a client token.")
+  }
+  const user = field(response.body, "user")
+  const record = typeof user === "object" && user !== null && !Array.isArray(user) ? (user as Record<string, unknown>) : {}
+  const email = typeof record.email === "string" ? record.email : identifier.trim()
+  const profileId = readProfileId(record.id) ?? email
+  const name = typeof record.name === "string" && record.name.length > 0 ? record.name : email
+  persistAuthSession({
+    url: profile.server,
+    clientToken: token,
+    method: "enterprise",
+    profile: { id: profileId, login: email, name, email },
+  })
+  // Pull the live rules now that this device is enrolled; the baked profile is
+  // the fallback when the server is unreachable.
+  void enterpriseManifest()
+  return authStatus()
+}
+
+function requireEnterpriseProfile(): EnterpriseProfile {
+  const profile = enterpriseProfile()
+  if (profile === undefined) throw new Error("This build is not bound to an organization.")
+  return profile
+}
+
 export function registerGitHubAuthIpcHandlers(): void {
   ipcMain.handle("omnia-auth-status", () => authStatus())
   ipcMain.handle("omnia-auth-sign-in", (_event, provider: unknown) =>
     startSignIn(isAuthProvider(provider) ? { provider } : {}),
   )
   ipcMain.handle("omnia-auth-sign-out", () => signOut())
+  ipcMain.handle("omnia-enterprise-profile", () => enterpriseProfile())
+  ipcMain.handle("omnia-enterprise-manifest", () => enterpriseManifest())
+  ipcMain.handle("omnia-enterprise-policy", () => enterprisePolicy())
+  ipcMain.handle("omnia-enterprise-sign-in", (_event, identifier: unknown, password: unknown) => {
+    if (typeof identifier !== "string" || typeof password !== "string") {
+      throw new Error("An email address or employee ID and a password are required.")
+    }
+    return enterpriseSignIn(identifier, password)
+  })
 }
 
 function readProfileId(value: unknown): number | string | undefined {

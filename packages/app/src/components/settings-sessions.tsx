@@ -1,4 +1,5 @@
 import { createResource, createSignal, For, Show } from "solid-js"
+import { useQueryClient } from "@tanstack/solid-query"
 import { Button } from "@opencode-ai/ui/button"
 import { useLanguage } from "@/context/language"
 
@@ -35,6 +36,7 @@ const bridgeAvailable = () =>
  */
 export const SettingsSessions = () => {
   const language = useLanguage()
+  const queryClient = useQueryClient()
   const [selected, setSelected] = createSignal<Set<string>>(new Set())
   const [running, setRunning] = createSignal(false)
   const [reports, setReports] = createSignal<ImportReport[]>([])
@@ -66,6 +68,9 @@ export const SettingsSessions = () => {
         done.push(await window.api!.importSessionsRun!({ kind: source.kind, path: source.path }))
       }
       setReports(done)
+      // The import writes straight to the database the server reads, so cached
+      // session and project lists have to be re-read before the user looks.
+      if (done.some((report) => report.importedSessions > 0)) void queryClient.invalidateQueries()
       void refetch()
     } catch (error) {
       setFailed(error instanceof Error ? error.message : String(error))

@@ -53,6 +53,9 @@ function harness(options: { now?: () => number } = {}) {
         return Response.json({ name: `spaces/S1/messages/M${++counter}` })
       }
       if (request.method === "PATCH") return Response.json({ name: url.pathname.replace("/v1/", "") })
+      if (url.pathname.startsWith("/v1/media/")) {
+        return new Response(new Uint8Array([137, 80, 78, 71]), { headers: { "content-type": "image/png" } })
+      }
       return new Response(null, { status: 204 })
     },
   })
@@ -160,6 +163,60 @@ describe("the google chat transport", () => {
       expect(transport.receive!(human)).toBeDefined()
       // Google retries a delivery it could not answer; the turn must run once.
       expect(transport.receive!(human)).toBeUndefined()
+    } finally {
+      harnessed.close()
+    }
+  })
+
+  test("reads a file attached to a message and downloads it with the bot token", async () => {
+    const harnessed = harness()
+    try {
+      const message = harnessed.transport!.receive!(
+        JSON.stringify({
+          type: "MESSAGE",
+          space: { name: "spaces/S1" },
+          message: {
+            name: "spaces/S1/messages/M4",
+            text: "what is wrong with this screenshot?",
+            sender: { name: "users/U1", type: "HUMAN" },
+            attachment: [
+              {
+                contentName: "shot.png",
+                contentType: "image/png",
+                attachmentDataRef: { resourceName: "spaces/S1/messages/M4/attachments/A1" },
+              },
+            ],
+          },
+        }),
+      )
+      const attachment = message?.attachments?.[0]
+      expect(attachment?.name).toBe("shot.png")
+      expect(attachment?.mime).toBe("image/png")
+      const url = await attachment!.load()
+      expect(url?.startsWith("data:image/png;base64,")).toBe(true)
+      const media = harnessed.calls.find((call) => call.path.startsWith("/v1/media/spaces/S1/messages/M4/attachments/A1"))
+      expect(media?.authorization).toMatch(/^Bearer token-/)
+    } finally {
+      harnessed.close()
+    }
+  })
+
+  test("answers a message that is only an attachment", async () => {
+    const harnessed = harness()
+    try {
+      const message = harnessed.transport!.receive!(
+        JSON.stringify({
+          type: "MESSAGE",
+          space: { name: "spaces/S1" },
+          message: {
+            name: "spaces/S1/messages/M5",
+            sender: { name: "users/U1", type: "HUMAN" },
+            attachment: [{ contentName: "notes.txt", contentType: "text/plain", downloadUri: "https://chat.example/file" }],
+          },
+        }),
+      )
+      expect(message?.text).toBe("")
+      expect(message?.attachments).toHaveLength(1)
     } finally {
       harnessed.close()
     }

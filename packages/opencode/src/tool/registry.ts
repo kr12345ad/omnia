@@ -363,7 +363,10 @@ const layer = Layer.effect(
     })
 
     const tools: Interface["tools"] = Effect.fn("ToolRegistry.tools")(function* (input) {
+      // A managed build can turn desktop control off even while it stays signed
+      // in to the control plane, so the runtime flag is separate from the token.
       const computerRuntime =
+        process.env.OMNIA_COMPUTER_TOOLS !== "0" &&
         (process.env.OMNIA_SERVER_URL?.trim().length ?? 0) > 0 &&
         (process.env.OMNIA_SERVER_TOKEN?.trim().length ?? 0) > 0
       const filtered = (yield* all()).filter((tool) => {

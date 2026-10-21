@@ -3,6 +3,7 @@ import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test"
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { forgetEnterpriseProfile } from "./enterprise"
 
 // auth.ts imports Electron main-process modules that only exist inside a
 // running app. Substitute the narrow surface it touches (app paths, safe
@@ -138,6 +139,7 @@ describe("sign-in flow", () => {
     expect(auth.loadAuthSession()).toEqual({
       url: controlPlane,
       clientToken: "client-token-1",
+      method: "oauth",
       profile: {
         id: 7,
         login: "octocat",
@@ -208,6 +210,52 @@ describe("sign-in flow", () => {
     expect(status.profile?.id).toBe("107834588031326048827")
     expect(auth.loadAuthSession()?.profile?.provider).toBe("google")
     expect(auth.authStatus().profile?.id).toBe("107834588031326048827")
+  })
+
+  test("records a tenant sign-in as a work account rather than GitHub", async () => {
+    const root = mkdtempSync(join(tmpdir(), "omnia-auth-work-"))
+    const file = join(root, "enterprise.json")
+    writeFileSync(
+      file,
+      JSON.stringify({
+        kind: "omnia-enterprise-client",
+        schema: 1,
+        distribution: "acme-field",
+        name: "Acme Field",
+        appId: "io.omnia.enterprise.acme-field",
+        server: controlPlane,
+        manifestUrl: "",
+        loginUrl: `${controlPlane}/v1/enterprise/public/client/acme-field/login`,
+        org: { name: "Acme", slug: "acme" },
+        branding: {},
+        auth: {},
+        features: {},
+        experience: {},
+        limits: {},
+        models: {},
+        telemetry: {},
+        update: {},
+        deployment: {},
+      }),
+    )
+    process.env.OMNIA_ENTERPRISE_PROFILE = file
+    forgetEnterpriseProfile()
+    try {
+      responses = [
+        jsonResponse({ ok: true, token: "work-token", user: { id: "u1", email: "ada@acme.test", name: "Ada" } }),
+      ]
+      const status = await auth.enterpriseSignIn("ada@acme.test", "secret")
+      expect(status.authenticated).toBe(true)
+      // The account menu names the session from this field. A work credential
+      // must never read as a GitHub one.
+      expect(status.method).toBe("enterprise")
+      expect(auth.authStatus().method).toBe("enterprise")
+      expect(auth.loadAuthSession()?.method).toBe("enterprise")
+    } finally {
+      delete process.env.OMNIA_ENTERPRISE_PROFILE
+      forgetEnterpriseProfile()
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test("rejects a start response without an authorize URL", async () => {

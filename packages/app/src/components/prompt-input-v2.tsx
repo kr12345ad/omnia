@@ -14,6 +14,7 @@ import { normalizePromptHistoryEntry, promptLength, type PromptHistoryComment } 
 import { createPersistedPromptInputHistory } from "@/components/prompt-input/history-store"
 import { promptDesignPlaceholder, promptPlaceholder } from "@/components/prompt-input/placeholder"
 import { createPromptSubmit } from "@/components/prompt-input/submit"
+import { useEnterprise } from "@/context/enterprise"
 import { useEntitlement, useEntitlementDecision } from "@/context/entitlement"
 import { selectionFromLines, type SelectedLineRange, useFile } from "@/context/file"
 import { useComments } from "@/context/comments"
@@ -55,6 +56,7 @@ export function PromptInputV2Composer(props: PromptInputV2ComposerProps) {
   const dialog = useDialog()
   const command = useCommand()
   const language = useLanguage()
+  const enterprise = useEnterprise()
   const entitlement = useEntitlement()
   const vision = useEntitlementDecision("cloud_vision")
   const shellMode = () => props.controller.state.mode === "shell"
@@ -89,6 +91,8 @@ export function PromptInputV2Composer(props: PromptInputV2ComposerProps) {
         borderUnderlay={props.borderUnderlay}
         class={props.class}
         paywalls={paywalls}
+        attachHidden={!enterprise.feature("fileAttachments")}
+        shellHidden={enterprise.permission("bash") === "deny"}
         variantControlVisible={!props.controller.model.loading}
         attachKeybind={command.keybindParts("file.attach")}
         attachShortcut={command.keybind("file.attach")}
@@ -123,6 +127,7 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
   const permission = usePermission()
   const language = useLanguage()
   const platform = usePlatform()
+  const enterprise = useEnterprise()
   const settings = useSettings()
   const prompt = props.state ?? usePrompt()
   let editor: HTMLDivElement | undefined
@@ -405,10 +410,12 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
       if (!selected || selected.type === "custom") return
       return () => command.trigger(selected.id, "slash")
     },
+    shellDisabled: enterprise.permission("bash") === "deny",
     attachments: {
       picker: platform.openAttachmentPickerDialog,
       directory: () => sdk().directory,
       isDialogActive: () => !!dialog.active,
+      validate: (file) => enterprise.attachmentCheck(file),
       warn: () =>
         showToast({
           title: language.t("prompt.toast.pasteUnsupported.title"),
@@ -459,7 +466,7 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
       title: language.t("prompt.action.attachFile"),
       category: language.t("command.category.file"),
       keybind: "mod+u",
-      disabled: controller.state.mode !== "normal",
+      disabled: controller.state.mode !== "normal" || !enterprise.feature("fileAttachments"),
       onSelect: () => controller.attach(),
     },
     {
@@ -467,7 +474,7 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
       title: language.t("command.prompt.mode.shell"),
       category: language.t("command.category.session"),
       keybind: "mod+shift+x",
-      disabled: controller.state.mode === "shell",
+      disabled: controller.state.mode === "shell" || enterprise.permission("bash") === "deny",
       onSelect: () => controller.dispatch({ type: "mode.shell" }),
     },
     {

@@ -1,6 +1,7 @@
 import { ipcMain } from "electron"
 import type { ScheduledRun } from "@opencode-ai/omnia/agent-run/store"
 import { serverCall } from "./server-call"
+import { enterpriseGuard } from "./enterprise"
 
 export type HeadlessRun = Pick<
   ScheduledRun,
@@ -12,20 +13,22 @@ function runs(json: Record<string, unknown>): HeadlessRun[] {
 }
 
 export function registerRunIpcHandlers(): void {
-  ipcMain.handle("runs-list", async () => runs(await serverCall("/v1/runs", "GET")))
-  ipcMain.handle("runs-create", async (_event, input: { name: string; prompt: string; intervalMinutes: number }) =>
+  const guarded = (channel: string, listener: Parameters<typeof ipcMain.handle>[1]) =>
+    ipcMain.handle(channel, enterpriseGuard("scheduledRuns", "Scheduled runs", listener))
+  guarded("runs-list", async () => runs(await serverCall("/v1/runs", "GET")))
+  guarded("runs-create", async (_event, input: { name: string; prompt: string; intervalMinutes: number }) =>
     (await serverCall("/v1/runs", "POST", input)).run as HeadlessRun,
   )
-  ipcMain.handle(
+  guarded(
     "runs-update",
     async (_event, id: string, patch: Partial<Pick<HeadlessRun, "name" | "prompt" | "intervalMinutes" | "enabled">>) =>
       (await serverCall(`/v1/runs/${encodeURIComponent(id)}`, "PATCH", patch)).run as HeadlessRun,
   )
-  ipcMain.handle(
+  guarded(
     "runs-remove",
     async (_event, id: string) => (await serverCall(`/v1/runs/${encodeURIComponent(id)}`, "DELETE")).removed === id,
   )
-  ipcMain.handle("runs-once", async (_event, input: { prompt: string; title?: string; timeoutMs?: number }) =>
+  guarded("runs-once", async (_event, input: { prompt: string; title?: string; timeoutMs?: number }) =>
     serverCall("/v1/runs/once", "POST", input),
   )
 }

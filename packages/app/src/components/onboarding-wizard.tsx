@@ -1,4 +1,5 @@
 import { createResource, createSignal, For, Match, Show, Switch } from "solid-js"
+import { useQueryClient } from "@tanstack/solid-query"
 import { Logo } from "@opencode-ai/ui/logo"
 import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2"
 import { LoaderV2 } from "@opencode-ai/ui/v2/loader-v2"
@@ -93,6 +94,7 @@ function WizardBody(props: { onDone: () => void }) {
 
 function ImportStep(props: { onBack: () => void; onNext: () => void }) {
   const language = useLanguage()
+  const queryClient = useQueryClient()
   const [selected, setSelected] = createSignal<Set<string>>(new Set())
   const [running, setRunning] = createSignal(false)
   const [reports, setReports] = createSignal<ImportReport[]>([])
@@ -123,6 +125,9 @@ function ImportStep(props: { onBack: () => void; onNext: () => void }) {
         done.push(await window.api!.importSessionsRun!({ kind: source.kind, path: source.path }))
       }
       setReports(done)
+      // Anything already mounted behind the wizard is reading a cached session
+      // list; re-read it so imported history is visible when the wizard closes.
+      if (done.some((report) => report.importedSessions > 0)) void queryClient.invalidateQueries()
     } catch (error) {
       setFailed(error instanceof Error ? error.message : String(error))
     } finally {

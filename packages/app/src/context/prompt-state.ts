@@ -51,6 +51,14 @@ export type PromptModel = {
   variant?: string | null
 }
 
+// What the draft is answering. The quote itself lives in the prompt text so it
+// stays editable; this only remembers which message it came from, so the card
+// above the composer can name it and be dismissed.
+export type PromptReply = {
+  messageID: string
+  text: string
+}
+
 export type FileContextItem = {
   type: "file"
   path: string
@@ -70,6 +78,7 @@ export type PromptStore = {
   prompt: Prompt
   cursor?: number
   model?: PromptModel
+  reply?: PromptReply
   context: {
     items: (ContextItem & { key: string })[]
   }
@@ -164,6 +173,7 @@ function createPromptActions(setStore: SetStoreFunction<PromptStore>) {
       batch(() => {
         setStore("prompt", clonePrompt(DEFAULT_PROMPT))
         setStore("cursor", 0)
+        setStore("reply", undefined)
       })
     },
   }
@@ -198,6 +208,11 @@ function createPromptStateValue(store: PromptStore, setStore: SetStoreFunction<P
     model: {
       current: () => store.model,
       set: (model: PromptModel | undefined) => setStore("model", model),
+    },
+    reply: {
+      current: () => store.reply,
+      set: (reply: PromptReply) => setStore("reply", { ...reply }),
+      clear: () => setStore("reply", undefined),
     },
     context: {
       items: createMemo(() => store.context.items),

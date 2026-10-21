@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "@opencode-ai/omnia",
-  "version": "0.0.0",
+  "version": "1.0.3",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -9,13 +9,20 @@
     ".": "./src/index.ts",
     "./protocol": "./src/protocol/index.ts",
     "./protocol/*": "./src/protocol/*.ts",
+    "./enterprise": "./src/enterprise/index.ts",
     "./*": "./src/*.ts"
+  },
+  "bin": {
+    "omnia-server": "./src/server/cli.ts"
   },
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "test": "bun test",
     "test:computer-use": "bun test src/computer-use/live-harness/ src/computer-use/",
-    "standalone": "bun ./src/server/standalone.ts"
+    "standalone": "bun ./src/server/standalone.ts",
+    "enterprise": "bun ./src/server/cli.ts",
+    "build:server": "bun build ./src/server/cli.ts --compile --outfile ./dist/omnia-server",
+    "license": "bun ./script/license.ts"
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",

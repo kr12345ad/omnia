@@ -1,4 +1,4 @@
-import { Component, createMemo, createSignal, startTransition } from "solid-js"
+import { Component, createMemo, createSignal, Show, startTransition } from "solid-js"
 import { Dialog } from "@opencode-ai/ui/v2/dialog-v2"
 import { TabsV2 } from "@opencode-ai/ui/v2/tabs-v2"
 import { Icon } from "@opencode-ai/ui/icon"
@@ -21,6 +21,7 @@ import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { useLayout } from "@/context/layout"
 import { useTabs } from "@/context/tabs"
 import { useServerSync } from "@/context/server-sync"
+import { useEnterprise } from "@/context/enterprise"
 
 export const DialogSettings: Component<{
   sessionID?: string
@@ -33,6 +34,20 @@ export const DialogSettings: Component<{
   const tabs = useTabs()
   const serverSync = useServerSync()
   const [tab, setTab] = createSignal(props.defaultValue ?? "general")
+  // A managed client only offers the surfaces its distribution enables.
+  const enterprise = useEnterprise()
+  const visible = (value: string) => {
+    if (value === "chat-channels") return enterprise.feature("chatChannels")
+    if (value === "superskills") return enterprise.feature("superskills")
+    if (value === "marketplace") return enterprise.feature("mcpMarketplace")
+    if (value === "memory") return enterprise.feature("memory")
+    if (value === "computer-use" || value === "computers")
+      return enterprise.feature("computerUse") && enterprise.permission("computer") !== "deny"
+    return true
+  }
+  const activeTab = () => (visible(tab()) ? tab() : "general")
+  const appName = () =>
+    enterprise.branding()?.productName ?? language.t("app.name.desktop")
   const directory = createMemo(() => {
     const route = layout.route()
     if (route.type === "dir-new-sesssion") return route.dir
@@ -53,7 +68,7 @@ export const DialogSettings: Component<{
       <TabsV2
         orientation="vertical"
         variant="settings"
-        value={tab()}
+        value={activeTab()}
         onChange={(value) => void startTransition(() => setTab(value))}
         class="settings-v2"
       >
@@ -72,10 +87,12 @@ export const DialogSettings: Component<{
                       <Icon name="shield" />
                       {language.t("desktop.menu.account")}
                     </TabsV2.Trigger>
-                    <TabsV2.Trigger value="chat-channels">
-                      <Icon name="comment" />
-                      {language.t("settings.chatChannels.title")}
-                    </TabsV2.Trigger>
+                    <Show when={visible("chat-channels")}>
+                      <TabsV2.Trigger value="chat-channels">
+                        <Icon name="comment" />
+                        {language.t("settings.chatChannels.title")}
+                      </TabsV2.Trigger>
+                    </Show>
                     <TabsV2.Trigger value="shortcuts">
                       <Icon name="keyboard" />
                       {language.t("settings.tab.shortcuts")}
@@ -86,26 +103,36 @@ export const DialogSettings: Component<{
                 <div class="flex flex-col gap-1.5">
                   <TabsV2.SectionTitle>{language.t("settings.section.computer")}</TabsV2.SectionTitle>
                   <div class="flex flex-col gap-1.5 w-full">
-                    <TabsV2.Trigger value="superskills">
-                      <Icon name="mcp" />
-                      {language.t("settings.superskills.title")}
-                    </TabsV2.Trigger>
-                    <TabsV2.Trigger value="marketplace">
-                      <Icon name="mcp" />
-                      {language.t("settings.mcpMarketplace.title")}
-                    </TabsV2.Trigger>
-                    <TabsV2.Trigger value="memory">
-                      <Icon name="brain" />
-                      {language.t("settings.memory.title")}
-                    </TabsV2.Trigger>
-                    <TabsV2.Trigger value="computer-use">
-                      <Icon name="glasses" />
-                      {language.t("settings.computerUse.title")}
-                    </TabsV2.Trigger>
-                    <TabsV2.Trigger value="computers">
-                      <Icon name="window-cursor" />
-                      {language.t("settings.computers.title")}
-                    </TabsV2.Trigger>
+                    <Show when={visible("superskills")}>
+                      <TabsV2.Trigger value="superskills">
+                        <Icon name="mcp" />
+                        {language.t("settings.superskills.title")}
+                      </TabsV2.Trigger>
+                    </Show>
+                    <Show when={visible("marketplace")}>
+                      <TabsV2.Trigger value="marketplace">
+                        <Icon name="mcp" />
+                        {language.t("settings.mcpMarketplace.title")}
+                      </TabsV2.Trigger>
+                    </Show>
+                    <Show when={visible("memory")}>
+                      <TabsV2.Trigger value="memory">
+                        <Icon name="brain" />
+                        {language.t("settings.memory.title")}
+                      </TabsV2.Trigger>
+                    </Show>
+                    <Show when={visible("computer-use")}>
+                      <TabsV2.Trigger value="computer-use">
+                        <Icon name="glasses" />
+                        {language.t("settings.computerUse.title")}
+                      </TabsV2.Trigger>
+                    </Show>
+                    <Show when={visible("computers")}>
+                      <TabsV2.Trigger value="computers">
+                        <Icon name="window-cursor" />
+                        {language.t("settings.computers.title")}
+                      </TabsV2.Trigger>
+                    </Show>
                   </div>
                 </div>
 
@@ -129,7 +156,7 @@ export const DialogSettings: Component<{
               </div>
             </div>
             <div class="settings-v2-nav-footer">
-              <span>{language.t("app.name.desktop")}</span>
+              <span>{appName()}</span>
               <span>v{platform.version?.replace(/\.0(?=-|$)/, "")}</span>
             </div>
           </div>

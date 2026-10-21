@@ -34,6 +34,7 @@ import { registerComputerIpcHandlers } from "./omnia/computers"
 import { registerChatIpcHandlers } from "./omnia/chat"
 import { registerComputerUseIpcHandlers } from "./omnia/computer-use"
 import { registerRemoteAgentIpcHandlers } from "./omnia/remote-agent"
+import { registerUsageReportIpcHandlers } from "./omnia/usage-report"
 
 const pickerFilters = (ext?: string[]) => {
   if (!ext || ext.length === 0) return undefined
@@ -85,6 +86,7 @@ export function registerIpcHandlers(deps: Deps) {
   registerChatIpcHandlers()
   registerComputerUseIpcHandlers()
   registerRemoteAgentIpcHandlers()
+  registerUsageReportIpcHandlers()
   const drafts = createDesktopDraftStore(join(app.getPath("userData"), "drafts.sqlite"))
   const updaterSubscriptions = createUpdaterSubscriptions()
   app.once("will-quit", updaterSubscriptions.clear)

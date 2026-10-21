@@ -213,10 +213,13 @@ export function isAuthorized(
   token: string,
   timingSafeEqual: (a: Buffer, b: Buffer) => boolean,
   clientTokens?: { isClientToken: (token: string) => boolean },
+  /** Enterprise enrollment tokens are per-user credentials with their own store. */
+  extraTokens?: (token: string) => boolean,
 ): boolean {
   const presented = bearerToken(request)
   if (presented === undefined) return false
   if (clientTokens?.isClientToken(presented) === true) return true
+  if (extraTokens?.(presented) === true) return true
   if (token.length === 0) return false
   const expected = Buffer.from(token)
   const actual = Buffer.from(presented)

@@ -38,6 +38,20 @@ function providerOf(status: GitHubAuthStatus | undefined): AuthProvider {
   return status?.profile?.provider === "google" ? "google" : "github"
 }
 
+/**
+ * What the account menu should call this session. A managed build never mints
+ * an OAuth credential, so a session written before the method existed is still
+ * a work account there.
+ */
+export function accountKind(
+  status: GitHubAuthStatus | undefined,
+  managed: boolean,
+): "work" | "gh" | "github" | "google" {
+  if (status?.method === "enterprise" || (status?.method === undefined && managed)) return "work"
+  if (status?.method === "gh") return "gh"
+  return providerOf(status) === "google" ? "google" : "github"
+}
+
 export function SignInButton(props: {
   provider: AuthProvider
   variant?: "contrast" | "outline"
@@ -146,8 +160,16 @@ export function GitHubAuthButton() {
 
   const profile = () => status()?.profile
   const provider = () => providerOf(status())
+  const kind = () => accountKind(status(), auth.enterprise?.managed === true)
+  const workAccount = () => kind() === "work"
+  const signedInLabel = () => {
+    if (workAccount()) return "Signed in with your work account"
+    if (kind() === "gh") return language.t("ui.github.signedInWithCli")
+    return language.t(COPY[provider()].signedInWith)
+  }
 
   return (
+    <Show when={auth.enterprise?.managed !== true || status()?.authenticated === true}>
     <DropdownMenu open={open()} onOpenChange={setOpen} placement="bottom-end">
       <Show
         when={status()?.authenticated === true}
@@ -167,9 +189,9 @@ export function GitHubAuthButton() {
           as="button"
           type="button"
           class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full border-[0.5px] border-v2-border-border-base bg-v2-background-bg-deep"
-          aria-label={language.t("ui.github.account")}
+          aria-label={workAccount() ? "Your work account" : language.t("ui.github.account")}
         >
-          <Show when={profile()?.avatarUrl} fallback={<Icon name={provider()} size="small" />}>
+          <Show when={profile()?.avatarUrl} fallback={<Icon name={workAccount() ? "users" : provider()} size="small" />}>
             <img
               src={profile()!.avatarUrl}
               alt={profile()!.login}
@@ -218,16 +240,18 @@ export function GitHubAuthButton() {
                   <span class="truncate text-[13px] font-[530] text-v2-text-text-base">
                     {profile()?.name ?? profile()?.login ?? language.t("ui.github.account")}
                   </span>
-                  <Show when={profile()?.login}>
-                    <span class="truncate text-[13px] font-[440] text-v2-text-text-muted">@{profile()!.login}</span>
+                  {/* A work account often has no display name, so its name and
+                      login are both the email; show it once rather than twice. */}
+                  <Show when={profile()?.login && profile()!.login !== profile()?.name}>
+                    <span class="truncate text-[13px] font-[440] text-v2-text-text-muted">
+                      {workAccount() ? profile()!.login : `@${profile()!.login}`}
+                    </span>
                   </Show>
                 </div>
               </div>
-              <span class="text-[13px] font-[440] text-v2-text-text-muted">
-                {language.t(COPY[provider()].signedInWith)}
-              </span>
+              <span class="text-[13px] font-[440] text-v2-text-text-muted">{signedInLabel()}</span>
               <div class="flex flex-col gap-1 border-t-[0.5px] border-v2-border-border-base pt-2">
-                <Show when={profile()?.htmlUrl}>
+                <Show when={!workAccount() && profile()?.htmlUrl}>
                   <a
                     href={profile()!.htmlUrl}
                     target="_blank"
@@ -265,5 +289,6 @@ export function GitHubAuthButton() {
         </DropdownMenu.Content>
       </DropdownMenu.Portal>
     </DropdownMenu>
+    </Show>
   )
 }

@@ -6,6 +6,7 @@ import { promisify } from "node:util"
 
 import type { Configuration } from "electron-builder"
 
+import { readEnterpriseProfileFile } from "./src/main/omnia/enterprise"
 import { parseChannel } from "./electron.vite.config"
 
 const execFileAsync = promisify(execFile)
@@ -101,6 +102,48 @@ const archKey = targetArch === "arm64" ? "arm64" : "x64"
 
 const channel = requireChannel()
 
+// Tenant builds carry their own application identity. Without it they would
+// install as the public Omnia app, reuse its userData (and its sign-in), and
+// ignore the distribution's profile.
+const tenantAppId = process.env.OMNIA_APP_ID?.trim()
+const tenantProductName = process.env.OMNIA_PRODUCT_NAME?.trim()
+const tenantPackageName = process.env.OMNIA_PACKAGE_NAME?.trim()
+const artifactPrefix = process.env.OMNIA_ARTIFACT_PREFIX?.trim() || "omnia-desktop"
+const enterpriseProfilePath = process.env.OMNIA_ENTERPRISE_PROFILE?.trim()
+// The baked profile must follow the served manifest schema. A build that asks
+// for a tenant profile but cannot read one is a public Omnia binary wearing a
+// tenant's name, so packaging fails instead of silently omitting the resource.
+const enterpriseProfile =
+  enterpriseProfilePath === undefined || enterpriseProfilePath.length === 0
+    ? undefined
+    : readEnterpriseProfileFile(enterpriseProfilePath)
+
+if (tenantAppId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9.-]*$/.test(tenantAppId)) {
+  throw new Error(`OMNIA_APP_ID '${tenantAppId}' is not a valid application id`)
+}
+if (tenantAppId !== undefined && !tenantProductName) {
+  throw new Error("OMNIA_APP_ID requires OMNIA_PRODUCT_NAME so the tenant build is named")
+}
+if (enterpriseProfilePath !== undefined && enterpriseProfilePath.length > 0 && enterpriseProfile === undefined) {
+  throw new Error(
+    `OMNIA_ENTERPRISE_PROFILE '${enterpriseProfilePath}' is missing or does not match the enterprise profile schema (kind, schema 1, appId, server, org.name)`,
+  )
+}
+if (enterpriseProfile !== undefined) {
+  if (tenantAppId === undefined) {
+    throw new Error("OMNIA_ENTERPRISE_PROFILE requires OMNIA_APP_ID so the client installs as its own application")
+  }
+  if (tenantAppId !== enterpriseProfile.appId) {
+    throw new Error(`OMNIA_APP_ID '${tenantAppId}' does not match the profile appId '${enterpriseProfile.appId}'`)
+  }
+  const profileProductName = enterpriseProfile.branding.productName?.trim() || enterpriseProfile.name
+  if (tenantProductName !== profileProductName) {
+    throw new Error(
+      `OMNIA_PRODUCT_NAME '${tenantProductName ?? ""}' does not match the profile product name '${profileProductName}'`,
+    )
+  }
+}
+
 function testUpdateFeed() {
   const value = process.env.OMNIA_UPDATE_URL?.trim()
   if (!value) throw new Error("OMNIA_UPDATE_URL is required for beta update builds")
@@ -118,7 +161,8 @@ const APP_IDS = {
 } as const
 
 const getBase = (appId: string): Configuration => ({
-  artifactName: "omnia-desktop-${os}-${arch}.${ext}",
+  // `${os}` and `${arch}` are electron-builder macros, not JavaScript.
+  artifactName: artifactPrefix + "-${os}-${arch}.${ext}",
   directories: {
     output: "dist",
     buildResources: "resources",
@@ -170,6 +214,10 @@ const getBase = (appId: string): Configuration => ({
             filter: ["index.js", "index.d.ts", "build/Release/mac_window.node", "swift-build/**"],
           },
         ]
+      : []),
+    // The tenant profile the main process reads from process.resourcesPath.
+    ...(enterpriseProfilePath !== undefined && enterpriseProfilePath.length > 0 && enterpriseProfile !== undefined
+      ? [{ from: enterpriseProfilePath, to: "enterprise.json" }]
       : []),
   ],
   mac: {
@@ -233,8 +281,20 @@ const getBase = (appId: string): Configuration => ({
 })
 
 function getConfig() {
-  const appId = APP_IDS[channel]
+  const appId = tenantAppId ?? APP_IDS[channel]
   const base = getBase(appId)
+
+  if (tenantAppId !== undefined && tenantProductName !== undefined) {
+    const packageName = tenantPackageName ? `omnia-${tenantPackageName}` : "omnia-enterprise"
+    return {
+      ...base,
+      appId: tenantAppId,
+      productName: tenantProductName,
+      protocols: { name: tenantProductName, schemes: ["omnia"] },
+      deb: { fpm: [metainfoFpm(tenantAppId)] },
+      rpm: { packageName, fpm: [metainfoFpm(tenantAppId)] },
+    } satisfies Configuration
+  }
 
   switch (channel) {
     case "dev": {

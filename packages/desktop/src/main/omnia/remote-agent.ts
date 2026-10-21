@@ -6,6 +6,7 @@ import { decryptString, encryptString, writeSecretFile } from "./secret-storage"
 import { Browser, Daemon, Pairing, Remote } from "@opencode-ai/omnia"
 import { controlPlaneAuth, controlPlaneFingerprint, fetchControlPlane } from "./control-plane"
 import { readAuthSession } from "./auth-session"
+import { enterpriseFeature, enterpriseGuard, enterpriseProfile, enterpriseServerUrl } from "./enterprise"
 import { createControlPlaneDriver } from "./control-plane-driver"
 import type { AgentActivityEvent } from "./agent-state"
 import { registerOmniaDriver, omniaDriverRegistry } from "./registry"
@@ -194,6 +195,10 @@ function isLocalAddress(host: string): boolean {
 }
 
 export function readControlPlaneUrl(): string | undefined {
+  // A tenant build is bound to the server that produced it; neither a stale
+  // file nor the user's environment may point it somewhere else.
+  const tenant = enterpriseProfile()
+  if (tenant !== undefined) return enterpriseServerUrl()
   const file = controlPlaneFile()
   if (existsSync(file)) {
     try {
@@ -219,6 +224,9 @@ export function resolvedControlPlaneUrl(): string | undefined {
 }
 
 export function writeControlPlaneUrl(url: string | undefined): void {
+  if (enterpriseProfile() !== undefined) {
+    throw new Error("This client is managed by your organization, so its server address cannot be changed.")
+  }
   const file = controlPlaneFile()
   if (url === undefined) {
     rmSync(file, { force: true })
@@ -677,6 +685,7 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
 }
 
 export async function syncControlPlaneRegistration(): Promise<void> {
+  if (!enterpriseFeature("computerUse")) return
   if (config !== undefined) return
   const fingerprint = controlPlaneFingerprint()
   if (fingerprint === undefined || fingerprint === suppressedFingerprint) {
@@ -700,6 +709,8 @@ export async function syncControlPlaneRegistration(): Promise<void> {
 }
 
 export function registerRemoteAgentIpcHandlers(): void {
+  const guarded = (channel: string, listener: Parameters<typeof ipcMain.handle>[1]) =>
+    ipcMain.handle(channel, enterpriseGuard("computerUse", "Computer control", listener))
   config = loadRemoteAgentConfig()
   if (config !== undefined) {
     // Re-persist on load so plaintext tokens from older versions are encrypted.
@@ -712,11 +723,11 @@ export function registerRemoteAgentIpcHandlers(): void {
     app.once("will-quit", () => clearInterval(timer))
   }
 
-  ipcMain.handle("computers-control-plane-get", () => {
+  guarded("computers-control-plane-get", () => {
     return { url: resolvedControlPlaneUrl() ?? null }
   })
 
-  ipcMain.handle("computers-control-plane-set", (_event, value: unknown) => {
+  guarded("computers-control-plane-set", (_event, value: unknown) => {
     const raw = typeof value === "string" ? value.trim() : ""
     if (raw.length === 0) {
       writeControlPlaneUrl(undefined)
@@ -729,7 +740,7 @@ export function registerRemoteAgentIpcHandlers(): void {
     return { url }
   })
 
-  ipcMain.handle("computers-pair-join", async (_event, pairingCode: unknown) => {
+  guarded("computers-pair-join", async (_event, pairingCode: unknown) => {
     const request = resolveJoinServer(typeof pairingCode === "string" ? pairingCode : "", resolvedControlPlaneUrl())
     const serverUrl = request.serverUrl ?? (await Pairing.discoverPairingHost(request.code))
     if (serverUrl === undefined) {
@@ -783,7 +794,7 @@ export function registerRemoteAgentIpcHandlers(): void {
     return { computerId: config.computerId, serverUrl: config.serverUrl, name: hostname() }
   })
 
-  ipcMain.handle("computers-pair-leave", async () => {
+  guarded("computers-pair-leave", async () => {
     const current = config
     suppressedFingerprint = controlPlaneFingerprint()
     agent?.stop()
@@ -812,7 +823,7 @@ export function registerRemoteAgentIpcHandlers(): void {
     return true
   })
 
-  ipcMain.handle("computers-pair-status", () => {
+  guarded("computers-pair-status", () => {
     if (config !== undefined) {
       return {
         paired: true,

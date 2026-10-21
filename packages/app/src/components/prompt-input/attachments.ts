@@ -19,6 +19,9 @@ type PromptAttachmentsCoreInput = {
   focusEditor?: () => void
   addPart?: (part: ContentPart) => boolean
   warn?: () => void
+  /** Reject a file before it is read, returning the message to show. */
+  validate?: (file: File) => string | undefined
+  onRejected?: (message: string) => void
   readClipboardImage?: () => Promise<File | null>
   getPathForFile?: (file: File) => string
   draftStore?: DraftStore
@@ -33,6 +36,9 @@ export type PromptAttachmentsInput = {
   addPart: (part: ContentPart) => boolean
   readClipboardImage?: () => Promise<File | null>
   getPathForFile?: (file: File) => string
+  /** Reject a file before it is read, returning the message to show. */
+  validate?: (file: File) => string | undefined
+  onRejected?: (message: string) => void
 }
 
 export function createPromptAttachmentsCore(input: PromptAttachmentsCoreInput) {
@@ -45,6 +51,11 @@ export function createPromptAttachmentsCore(input: PromptAttachmentsCoreInput) {
 
   const add = async (file: File, toast = true, target = capture()) => {
     if (!target) return false
+    const rejection = input.validate?.(file)
+    if (rejection !== undefined) {
+      if (toast) input.onRejected?.(rejection)
+      return false
+    }
     const mime = await attachmentMime(file)
     if (!mime) {
       if (toast) input.warn?.()

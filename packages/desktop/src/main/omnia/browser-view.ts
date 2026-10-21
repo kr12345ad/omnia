@@ -12,6 +12,7 @@ import { app, BrowserWindow, ipcMain, session, webContents } from "electron"
 import type { IpcMainInvokeEvent, WebContents } from "electron"
 import { imageDownloadsDir, writeImageFile } from "@opencode-ai/omnia/browser/image-file"
 import { isNavigableBrowserUrl } from "@opencode-ai/omnia/browser/url-policy"
+import { requireEnterpriseFeature } from "./enterprise"
 import { startWebSocketBridge } from "./ws-bridge"
 import type { WebSocketBridge, WebSocketBridgeClient } from "./ws-bridge"
 
@@ -1601,6 +1602,9 @@ export function registerBrowserViewIpc(): void {
   manager.watch()
   ipcMain.handle("browser-panel-register", (event, value: unknown) => {
     if (!isTrustedSender(event)) return undefined
+    // The embedded panel is the desktop's browser automation surface. With the
+    // capability off there is no page for the agent to drive.
+    requireEnterpriseFeature("browserAutomation", "Browser automation")
     const input = parseRegisterInput(value)
     if (input === undefined) return undefined
     return manager.register(event.sender, input)

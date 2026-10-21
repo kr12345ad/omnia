@@ -16,6 +16,7 @@ import { trimSessions } from "./session-trim"
 import { dropSessionCaches } from "./session-cache"
 import { diffs as list, message as clean } from "@/utils/diffs"
 import { messageKey } from "@/utils/session-message"
+import { reportAssistantUsage } from "@/utils/enterprise-usage"
 
 const SKIP_PARTS = new Set(["patch", "step-start", "step-finish"])
 const SESSION_CONTENT_EVENTS = new Set([
@@ -271,6 +272,9 @@ export function applyDirectoryEvent(input: {
     }
     case "message.updated": {
       const info = clean((event.properties as { info: Message }).info)
+      // A managed build reports the finished turn; the main process ignores a
+      // message id it has already sent, so repeats are free.
+      reportAssistantUsage(info)
       const messages = input.store.message[info.sessionID]
       if (!messages) {
         input.setStore("message", info.sessionID, [info])

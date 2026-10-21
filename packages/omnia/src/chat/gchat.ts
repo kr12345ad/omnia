@@ -10,7 +10,8 @@
 // Markdown mode still does not draw (headings, tables, task lists).
 
 import { createSign } from "node:crypto"
-import type { ChatMessage, ChatReply, ChatTrace, ChatTransport } from "./service"
+import { fetchAttachment, mimeFromName } from "./attachments"
+import type { ChatAttachment, ChatMessage, ChatReply, ChatTrace, ChatTransport } from "./service"
 import { splitMarkdown } from "./text"
 
 const CHAT_API = "https://chat.googleapis.com/v1"
@@ -45,12 +46,23 @@ interface ServiceAccount {
   readonly private_key: string
 }
 
+interface ChatAttachmentRef {
+  /** The attachment resource, `spaces/…/messages/…/attachments/…`. */
+  readonly name?: string
+  readonly contentName?: string
+  readonly contentType?: string
+  /** Uploaded files only: Google's signed download URL, readable with the bot's token. */
+  readonly downloadUri?: string
+  readonly attachmentDataRef?: { readonly resourceName?: string }
+}
+
 interface ChatEventMessage {
   readonly name?: string
   readonly text?: string
   readonly argumentText?: string
   readonly sender?: { readonly name?: string; readonly displayName?: string; readonly type?: string }
   readonly thread?: { readonly name?: string }
+  readonly attachment?: readonly ChatAttachmentRef[]
 }
 
 interface ChatEvent {
@@ -159,7 +171,10 @@ class GChatTransport implements ChatTransport {
       this.remember(message.name)
     }
     const text = requireText(message)
-    if (text.length === 0) return undefined
+    // A photo dropped into the space with no caption is still a question; the
+    // attachment is the whole message.
+    const attachments = gchatAttachments(message.attachment, (ref) => this.downloadAttachment(ref))
+    if (text.length === 0 && attachments.length === 0) return undefined
     const displayName = user?.displayName ?? message.sender?.displayName
     return {
       platform: "gchat",
@@ -168,8 +183,28 @@ class GChatTransport implements ChatTransport {
       ...(displayName === undefined ? {} : { userName: displayName }),
       text,
       ...(message.thread?.name === undefined ? {} : { threadId: message.thread.name }),
+      ...(attachments.length === 0 ? {} : { attachments }),
       receivedAt: this.now(),
     }
+  }
+
+  /**
+   * Google hands over either a signed download URL or a media resource name;
+   * both need the bot's own token, never the sender's. A failed read is not a
+   * failed answer: the runner names the file it could not open.
+   */
+  private async downloadAttachment(ref: ChatAttachmentRef): Promise<string | undefined> {
+    const token = await this.accessToken()
+    const headers = { authorization: `Bearer ${token}` }
+    const resource = ref.attachmentDataRef?.resourceName?.trim()
+    const media =
+      resource === undefined || resource.length === 0 ? undefined : `${this.apiUrl}/media/${resource}?alt=media`
+    const direct = ref.downloadUri?.trim()
+    if (direct !== undefined && direct.length > 0) {
+      const read = await fetchAttachment(direct, { headers })
+      if (read !== undefined || media === undefined) return read
+    }
+    return media === undefined ? undefined : fetchAttachment(media, { headers })
   }
 
   send(message: ChatMessage, reply: ChatReply): void {
@@ -410,6 +445,16 @@ function renderTable(rows: readonly string[][]): string {
     ...body.map(line),
     "```",
   ].join("\n")
+}
+
+function gchatAttachments(
+  refs: readonly ChatAttachmentRef[] | undefined,
+  load: (ref: ChatAttachmentRef) => Promise<string | undefined>,
+): ChatAttachment[] {
+  return (refs ?? []).flatMap((ref) => {
+    const name = (ref.contentName ?? "").trim() || "attachment"
+    return [{ name, mime: (ref.contentType ?? "").trim() || mimeFromName(name), load: () => load(ref) }]
+  })
 }
 
 function requireText(message: ChatEventMessage): string {

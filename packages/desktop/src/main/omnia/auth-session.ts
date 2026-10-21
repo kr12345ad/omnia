@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { app } from "electron"
 import { decryptString } from "./secret-storage"
+import { isEnterpriseSessionUrl } from "./enterprise"
 
 export interface ControlPlaneAuth {
   readonly url: string
@@ -49,7 +50,10 @@ export function readAuthSession(): ControlPlaneAuth | undefined {
   const url = firstString(session.controlPlaneUrl, session.url)
   const clientToken = firstString(session.clientToken, session.token)
   if (url === undefined || clientToken === undefined) return undefined
-  return { url: url.replace(/\/+$/, ""), clientToken }
+  const normalized = url.replace(/\/+$/, "")
+  // A tenant client must not act on a credential minted by another server.
+  if (!isEnterpriseSessionUrl(normalized)) return undefined
+  return { url: normalized, clientToken }
 }
 
 /**
@@ -61,7 +65,11 @@ export function readAuthSession(): ControlPlaneAuth | undefined {
  * text; the server treats the id as an opaque key.
  */
 export function readSessionProfileId(): string | undefined {
-  const profile = readSession()?.profile
+  const session = readSession()
+  if (session === undefined) return undefined
+  const url = firstString(session.controlPlaneUrl, session.url)
+  if (url === undefined || !isEnterpriseSessionUrl(url.replace(/\/+$/, ""))) return undefined
+  const profile = session.profile
   if (typeof profile !== "object" || profile === null || Array.isArray(profile)) return undefined
   const id = (profile as { id?: unknown }).id
   if (typeof id === "number" && Number.isSafeInteger(id) && id > 0) return String(id)

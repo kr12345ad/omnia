@@ -68,6 +68,8 @@ export function createPromptInputV2Controller(input: {
   onSuggestionSelect?: (item: PromptInputV2Suggestion) => (() => void) | void
   view: PromptInputV2ViewConfig
   attachments?: PromptInputV2AttachmentConfig
+  /** A fleet without the shell tool never enters shell mode, by any path. */
+  shellDisabled?: boolean
 }) {
   let editor: HTMLElement | undefined
   let fileInput: HTMLInputElement | undefined
@@ -161,7 +163,8 @@ export function createPromptInputV2Controller(input: {
 
   function dispatch(event: PromptInputV2InteractionEvent) {
     const mode = state.mode
-    const result = transitionPromptInputV2(state, event, draft.state)
+    if (input.shellDisabled && event.type === "mode.shell") return false
+    const result = transitionPromptInputV2(state, event, draft.state, { shellDisabled: input.shellDisabled })
     const action = event.type === "popover.select" ? input.onSuggestionSelect?.(event.item) : undefined
     if (event.type === "popover.select") {
       if (!action || state.popover.type !== "command-menu") result.commands.forEach(execute)

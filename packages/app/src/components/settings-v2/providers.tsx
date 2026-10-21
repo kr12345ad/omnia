@@ -5,6 +5,7 @@ import { ProviderIcon } from "@opencode-ai/ui/provider-icon"
 import { showToast } from "@/utils/toast"
 import { popularProviders, useProviders } from "@/hooks/use-providers"
 import { createMemo, type Accessor, type Component, For, Show } from "solid-js"
+import { useEnterprise } from "@/context/enterprise"
 import { useLanguage } from "@/context/language"
 import { useServerProtocol, useServerSDK } from "@/context/server-sdk"
 import { useServerSync } from "@/context/server-sync"
@@ -35,6 +36,7 @@ export const SettingsProvidersV2: Component<{
 }> = (props) => {
   const dialog = useDialog()
   const language = useLanguage()
+  const enterprise = useEnterprise()
   const serverSdk = useServerSDK()
   const protocol = useServerProtocol()
   const serverSync = useServerSync()
@@ -224,7 +226,7 @@ export const SettingsProvidersV2: Component<{
               )}
             </For>
 
-            <Show when={protocol() === "v1"}>
+            <Show when={protocol() === "v1" && enterprise.models()?.allowCustomProviders !== false}>
               <div class="settings-v2-provider-row" data-component="custom-provider-section">
                 <div class="settings-v2-provider-lead">
                   <ProviderIcon

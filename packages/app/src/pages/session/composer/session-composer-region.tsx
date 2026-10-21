@@ -4,6 +4,7 @@ import { useSettings } from "@/context/settings"
 import { SessionPermissionDock } from "@/pages/session/composer/session-permission-dock"
 import { SessionQuestionDock } from "@/pages/session/composer/session-question-dock"
 import { SessionFollowupDock } from "@/pages/session/composer/session-followup-dock"
+import { SessionReplyDock } from "@/pages/session/composer/session-reply-dock"
 import { SessionRevertDock } from "@/pages/session/composer/session-revert-dock"
 import { SessionTodoDock } from "@/pages/session/composer/session-todo-dock"
 import type { SessionComposerRegionController } from "./session-composer-region-controller"
@@ -131,6 +132,13 @@ export function SessionComposerRegion(props: {
                 "margin-top": `${-controller.lift()}px`,
               }}
             >
+              <Show when={controller.reply()} keyed>
+                {(reply) => (
+                  <div class="pb-2">
+                    <SessionReplyDock text={reply.text} onDismiss={reply.onDismiss} />
+                  </div>
+                )}
+              </Show>
               <Show when={controller.followup()?.items.length}>
                 <SessionFollowupDock
                   items={controller.followup()!.items}

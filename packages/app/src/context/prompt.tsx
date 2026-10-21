@@ -15,6 +15,7 @@ import {
   type FileContextItem,
   type Prompt,
   type PromptModel,
+  type PromptReply,
   type PromptScope,
   type PromptSession,
 } from "./prompt-state"
@@ -36,6 +37,7 @@ export type {
   ImageAttachmentPart,
   Prompt,
   PromptModel,
+  PromptReply,
   PromptStore,
   PromptScope,
   PromptSession,
@@ -153,6 +155,11 @@ export const { use: usePrompt, provider: PromptProvider } = createSimpleContext(
       model: {
         current: withSuspense(() => session().model.current()),
         set: (model: PromptModel | undefined) => session().model.set(model),
+      },
+      reply: {
+        current: withSuspense(() => session().reply.current()),
+        set: (reply: PromptReply) => session().reply.set(reply),
+        clear: () => session().reply.clear(),
       },
       context: {
         items: withSuspense(() => session().context.items()),

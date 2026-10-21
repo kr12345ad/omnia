@@ -294,6 +294,7 @@ export const Playground = {
                       centered: () => false,
                       todo: { collapsed, onToggle: () => setCollapsed(!collapsed()) },
                       followup: () => undefined,
+                      reply: () => undefined,
                       revert: () => undefined,
                       onResponseSubmit: pin,
                       openParent: () => {},

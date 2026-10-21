@@ -39,19 +39,20 @@ function MarkShape(props: { mask: string; scale?: number; offsetY?: number }) {
   )
 }
 
-export const Mark = (props: { class?: string }) => {
+export const Mark = (props: { class?: string; square?: boolean }) => {
   const mask = createUniqueId()
   return (
     <svg
       data-component="logo-mark"
       classList={{ [props.class ?? ""]: !!props.class }}
-      // Kept at 16x20 so the portait box every caller sizes against still
-      // applies; the mark itself is square and centred inside it.
-      viewBox="0 0 16 20"
+      // The default 16x20 box keeps the portrait slot callers already size
+      // against. `square` drops the padding for square containers such as the
+      // enterprise rail, where the mark should fill the tile instead.
+      viewBox={props.square ? "2 2 12 12" : "0 0 16 20"}
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <MarkShape mask={mask} offsetY={2} />
+      <MarkShape mask={mask} offsetY={props.square ? 0 : 2} />
     </svg>
   )
 }

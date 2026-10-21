@@ -47,6 +47,10 @@ export type PromptInputV2Props = {
   variantControlVisible?: boolean
   attachKeybind?: string[]
   attachShortcut?: string
+  /** A fleet without file attachments offers no picker at all. */
+  attachHidden?: boolean
+  /** A fleet without the shell tool offers no shell mode at all. */
+  shellHidden?: boolean
   /**
    * Entitlement answers for the capabilities this composer can surface.
    * Omitted means this composer has no billing context and draws no notice.
@@ -242,6 +246,7 @@ export function PromptInputV2(props: PromptInputV2Props) {
               keybind={props.attachKeybind ?? ["Mod", "U"]}
               attachLabel={i18n.t("ui.promptInput.attachments")}
               attachShortcut={props.attachShortcut ?? "Mod+U"}
+              attachHidden={props.attachHidden}
               commandsLabel={i18n.t("ui.promptInput.commands")}
               contextLabel={i18n.t("ui.promptInput.context")}
               shellLabel={i18n.t("ui.promptInput.shell")}
@@ -249,6 +254,7 @@ export function PromptInputV2(props: PromptInputV2Props) {
               onCommands={props.controller.openCommands}
               onContext={props.controller.openContext}
               onShell={props.controller.openShell}
+              shellHidden={props.shellHidden}
             />
             <Show when={view.agent} keyed>
               {(control) => (
@@ -512,6 +518,8 @@ export function PromptInputV2AddMenu(props: {
   keybind?: string[]
   attachLabel: string
   attachShortcut?: string
+  /** A fleet without file attachments offers no picker at all. */
+  attachHidden?: boolean
   commandsLabel: string
   contextLabel: string
   shellLabel: string
@@ -519,6 +527,7 @@ export function PromptInputV2AddMenu(props: {
   onCommands: () => void
   onContext: () => void
   onShell: () => void
+  shellHidden?: boolean
 }) {
   return (
     <TooltipV2
@@ -543,19 +552,23 @@ export function PromptInputV2AddMenu(props: {
         />
         <MenuV2.Portal>
           <MenuV2.Content style={{ "min-width": "180px" }}>
-            <MenuV2.Item onSelect={props.onAttach} shortcut={props.attachShortcut}>
-              {props.attachLabel}
-            </MenuV2.Item>
-            <MenuV2.Separator />
+            <Show when={!props.attachHidden}>
+              <MenuV2.Item onSelect={props.onAttach} shortcut={props.attachShortcut}>
+                {props.attachLabel}
+              </MenuV2.Item>
+              <MenuV2.Separator />
+            </Show>
             <MenuV2.Item onSelect={props.onCommands} shortcut="/">
               {props.commandsLabel}
             </MenuV2.Item>
             <MenuV2.Item onSelect={props.onContext} shortcut="@">
               {props.contextLabel}
             </MenuV2.Item>
-            <MenuV2.Item onSelect={props.onShell} shortcut="!">
-              {props.shellLabel}
-            </MenuV2.Item>
+            <Show when={!props.shellHidden}>
+              <MenuV2.Item onSelect={props.onShell} shortcut="!">
+                {props.shellLabel}
+              </MenuV2.Item>
+            </Show>
           </MenuV2.Content>
         </MenuV2.Portal>
       </MenuV2>

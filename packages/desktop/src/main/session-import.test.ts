@@ -21,26 +21,44 @@ function root(): string {
   return directory
 }
 
-function sourceDb(path: string): void {
-  const db = new DatabaseSync(path)
-  db.exec(`CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT, time_created INTEGER, time_updated INTEGER, sandboxes TEXT);
+const SCHEMA = `CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT, time_created INTEGER, time_updated INTEGER, sandboxes TEXT);
+    CREATE TABLE project_directory (project_id TEXT, directory TEXT, type TEXT, time_created INTEGER, PRIMARY KEY (project_id, directory));
     CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT, slug TEXT, directory TEXT, title TEXT, version TEXT, metadata TEXT, cost REAL DEFAULT 0, tokens_input INTEGER DEFAULT 0, tokens_output INTEGER DEFAULT 0, tokens_reasoning INTEGER DEFAULT 0, tokens_cache_read INTEGER DEFAULT 0, tokens_cache_write INTEGER DEFAULT 0, agent TEXT, model TEXT, time_created INTEGER, time_updated INTEGER);
     CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
     CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+    CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT);
+    CREATE TABLE todo (session_id TEXT, content TEXT, status TEXT, priority TEXT, position INTEGER, time_created INTEGER, time_updated INTEGER, PRIMARY KEY (session_id, position));
+    CREATE TABLE session_input (id TEXT PRIMARY KEY, session_id TEXT, prompt TEXT, delivery TEXT, admitted_seq INTEGER, promoted_seq INTEGER, time_created INTEGER);`
+
+function sourceDb(path: string): void {
+  const db = new DatabaseSync(path)
+  db.exec(`${SCHEMA}
     INSERT INTO project VALUES ('prj-one', '/work/one', 1, 2, '[]');
+    INSERT INTO project_directory VALUES ('prj-one', '/work/one/packages/app', 'root', 1);
     INSERT INTO session VALUES ('ses_one', 'prj-one', NULL, 'one', '/work/one', 'First session', '1', '{"mode":"code"}', 0, 1, 2, 0, 0, 0, 'build', '{"id":"m"}', 10, 20);
     INSERT INTO session VALUES ('ses_two', 'prj-one', 'ses_one', 'two', '/work/one', 'Child session', '1', NULL, 0, 0, 0, 0, 0, 0, 'build', NULL, 30, 40);
     INSERT INTO message VALUES ('msg_one', 'ses_one', 10, 11, '{"role":"user"}');
-    INSERT INTO part VALUES ('prt_one', 'msg_one', 'ses_one', 10, 11, '{"type":"text","text":"hi"}');`)
+    INSERT INTO part VALUES ('prt_one', 'msg_one', 'ses_one', 10, 11, '{"type":"text","text":"hi"}');
+    INSERT INTO session_message VALUES ('smsg_one', 'ses_one', 'user', 1, 10, 10, '{"type":"user"}');
+    INSERT INTO todo VALUES ('ses_one', 'finish the import', 'pending', 'high', 0, 10, 10);
+    INSERT INTO session_input VALUES ('inp_one', 'ses_one', '{}', 'steer', 2, NULL, 10);`)
   db.close()
 }
 
 function destDb(path: string): void {
   const db = new DatabaseSync(path)
-  db.exec(`CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT, time_created INTEGER, time_updated INTEGER, sandboxes TEXT);
-    CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT, slug TEXT, directory TEXT, title TEXT, version TEXT, metadata TEXT, cost REAL DEFAULT 0, tokens_input INTEGER DEFAULT 0, tokens_output INTEGER DEFAULT 0, tokens_reasoning INTEGER DEFAULT 0, tokens_cache_read INTEGER DEFAULT 0, tokens_cache_write INTEGER DEFAULT 0, agent TEXT, model TEXT, time_created INTEGER, time_updated INTEGER);
-    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
-    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);`)
+  db.exec(SCHEMA)
+  db.close()
+}
+
+// A real Omnia database enforces the durable-history foreign key; older ones
+// still point it at the pre-rename `session_v2` table.
+function constrainedDestDb(path: string, parent: "session" | "session_v2"): void {
+  const db = new DatabaseSync(path)
+  db.exec(`${SCHEMA}
+    CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT, slug TEXT, directory TEXT, title TEXT, version TEXT, time_created INTEGER, time_updated INTEGER);
+    DROP TABLE session_message;
+    CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL, FOREIGN KEY (session_id) REFERENCES ${parent}(id) ON DELETE CASCADE);`)
   db.close()
 }
 
@@ -136,6 +154,117 @@ describe("importOpencodeDb", () => {
     expect(ledger.opencode[source].sessions).toBe(2)
   })
 
+  test("carries durable history, todos and project directories, but not pending prompts", async () => {
+    const directory = root()
+    const userData = join(directory, "user")
+    mkdirSync(userData, { recursive: true })
+    const source = join(directory, "opencode.db")
+    const dest = join(directory, "OMNIA.db")
+    sourceDb(source)
+    destDb(dest)
+    await importOpencodeDb(dest, source, userData)
+    const check = new DatabaseSync(dest)
+    try {
+      expect(count(check, "session_message")).toBe(1)
+      expect(count(check, "todo")).toBe(1)
+      expect(count(check, "project_directory")).toBe(1)
+      // A pending prompt belongs to the install that admitted it.
+      expect(count(check, "session_input")).toBe(0)
+    } finally {
+      check.close()
+    }
+  })
+
+  test("imports every session when the source exceeds one commit chunk", async () => {
+    const directory = root()
+    const userData = join(directory, "user")
+    mkdirSync(userData, { recursive: true })
+    const source = join(directory, "opencode.db")
+    const dest = join(directory, "OMNIA.db")
+    sourceDb(source)
+    destDb(dest)
+    const origin = new DatabaseSync(source)
+    try {
+      const session = origin.prepare("INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated) VALUES (?, 'prj-one', ?, '/work/one', ?, '1', ?, ?)")
+      const message = origin.prepare("INSERT INTO message VALUES (?, ?, 1, 1, '{\"role\":\"user\"}')")
+      for (let index = 0; index < 120; index++) {
+        session.run(`ses_many_${index}`, `many-${index}`, `Session ${index}`, 100 + index, 100 + index)
+        message.run(`msg_many_${index}`, `ses_many_${index}`)
+      }
+    } finally {
+      origin.close()
+    }
+    const report = await importOpencodeDb(dest, source, userData)
+    expect(report.importedSessions).toBe(122)
+    expect(report.importedMessages).toBe(121)
+    expect(report.skippedSessions).toBe(0)
+    const check = new DatabaseSync(dest)
+    try {
+      expect(count(check, "session")).toBe(122)
+      expect(count(check, "message")).toBe(121)
+    } finally {
+      check.close()
+    }
+  })
+
+  test("inserts durable history under a real foreign key", async () => {
+    const directory = root()
+    const userData = join(directory, "user")
+    mkdirSync(userData, { recursive: true })
+    const source = join(directory, "opencode.db")
+    const dest = join(directory, "OMNIA.db")
+    sourceDb(source)
+    constrainedDestDb(dest, "session")
+    const report = await importOpencodeDb(dest, source, userData)
+    expect(report.errors).toHaveLength(0)
+    const check = new DatabaseSync(dest)
+    try {
+      expect(count(check, "session_message")).toBe(1)
+      // The rename already happened here: no mirror row is needed.
+      expect(count(check, "session_v2")).toBe(0)
+    } finally {
+      check.close()
+    }
+  })
+
+  test("mirrors sessions when durable history still points at session_v2", async () => {
+    const directory = root()
+    const userData = join(directory, "user")
+    mkdirSync(userData, { recursive: true })
+    const source = join(directory, "opencode.db")
+    const dest = join(directory, "OMNIA.db")
+    sourceDb(source)
+    constrainedDestDb(dest, "session_v2")
+    const report = await importOpencodeDb(dest, source, userData)
+    expect(report.errors).toHaveLength(0)
+    const check = new DatabaseSync(dest)
+    try {
+      expect(count(check, "session_message")).toBe(1)
+      expect(count(check, "session_v2")).toBe(2)
+    } finally {
+      check.close()
+    }
+  })
+
+  test("never writes to the source database", async () => {
+    const directory = root()
+    const userData = join(directory, "user")
+    mkdirSync(userData, { recursive: true })
+    const source = join(directory, "opencode.db")
+    const dest = join(directory, "OMNIA.db")
+    sourceDb(source)
+    destDb(dest)
+    await importOpencodeDb(dest, source, userData)
+    const origin = new DatabaseSync(source, { readOnly: true })
+    try {
+      expect(count(origin, "session")).toBe(2)
+      expect(count(origin, "message")).toBe(1)
+      expect(count(origin, "session_message")).toBe(1)
+    } finally {
+      origin.close()
+    }
+  })
+
   test("a rerun picks up messages appended to held sessions", async () => {
     const directory = root()
     const userData = join(directory, "user")
@@ -193,11 +322,42 @@ describe("importCodexFile", () => {
       expect(session.directory).toBe("/work/codex")
       const messages = check.prepare("SELECT id, data FROM message ORDER BY time_created").all() as { id: string; data: string }[]
       expect(messages).toHaveLength(4)
-      expect(JSON.parse(messages[1].data)).toMatchObject({ role: "assistant", parentID: messages[0].id })
+      expect(JSON.parse(messages[0].data)).toMatchObject({
+        role: "user",
+        agent: "build",
+        model: { providerID: "codex", modelID: "gpt-5" },
+      })
+      // An assistant message has to satisfy the V1 message schema: parent, model,
+      // mode, path, cost and tokens are all required for the turn to render.
+      expect(JSON.parse(messages[1].data)).toMatchObject({
+        role: "assistant",
+        parentID: messages[0].id,
+        mode: "code",
+        agent: "build",
+        modelID: "gpt-5",
+        providerID: "codex",
+        path: { cwd: "/work/codex", root: "/work/codex" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      })
       const toolPart = check.prepare("SELECT data FROM part WHERE data LIKE '%\"tool\"%'").get() as { data: string }
-      expect(JSON.parse(toolPart.data)).toMatchObject({ tool: "read", callID: expect.any(String) })
+      expect(JSON.parse(toolPart.data)).toMatchObject({
+        tool: "read",
+        callID: expect.any(String),
+        state: {
+          status: "completed",
+          input: { path: "a.ts" },
+          output: "file contents here",
+          title: "read",
+          metadata: {},
+          time: { start: expect.any(Number), end: expect.any(Number) },
+        },
+      })
       const project = check.prepare("SELECT worktree FROM project").get() as { worktree: string }
       expect(project.worktree).toBe("/work/codex")
+      const model = check.prepare("SELECT model FROM session").get() as { model: string }
+      // The session model column is JSON, not a bare id.
+      expect(JSON.parse(model.model)).toMatchObject({ id: "gpt-5", providerID: "codex" })
     } finally {
       check.close()
     }
