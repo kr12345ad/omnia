@@ -191,6 +191,25 @@ describe("omnia-server cli", () => {
     expect(usage.requests).toBe(0)
   })
 
+  test("an account can be banned and unbanned, and the record is kept", async () => {
+    const banned = await json("ban", "--email", "Trouble@CLI.test", "--reason", "test")
+    expect(banned).toMatchObject({ kind: "account", value: "trouble@cli.test", reason: "test" })
+    expect(await json("bans", "--json")).toMatchObject({ active: 1 })
+
+    // A ban needs a readable reason and a usable subject; neither is guessed.
+    expect((await cli("ban", "--email", "other@cli.test")).code).toBe(2)
+    expect((await cli("ban", "--email", "not-an-email", "--reason", "test")).code).toBe(1)
+
+    const lifted = await json("unban", "--email", "trouble@cli.test")
+    expect(typeof lifted.liftedAt).toBe("number")
+    const listed = await json("bans", "--json")
+    expect(listed.active).toBe(0)
+    expect(listed.bans).toHaveLength(1)
+
+    const again = await cli("unban", "--email", "trouble@cli.test")
+    expect(again.code).toBe(1)
+  })
+
   test("destructive actions need confirmation", async () => {
     const refused = await cli("builds", "delete", "work")
     expect(refused.code).toBe(1)

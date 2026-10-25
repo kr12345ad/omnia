@@ -184,7 +184,15 @@ function EnterpriseGate(props: {
   // accent-colored action are the same fields, in the same order.
   const primary = () => brand().primaryColor || "#0a0a0a"
   const accent = () => brand().accentColor || "#2563eb"
-  const logo = () => brand().logoUrl ?? brand().iconUrl
+  // An icon is a valid mark on its own, so a blank logo must not shadow it.
+  const logo = () => brand().logoUrl || brand().iconUrl
+  // A stale upload URL (the admin replaced or deleted that asset) falls back to
+  // the initial instead of leaving a broken image in the sign-in card.
+  const [failedLogo, setFailedLogo] = createSignal("")
+  const showLogo = () => {
+    const url = logo()
+    return url !== undefined && url !== failedLogo() ? url : undefined
+  }
   const productName = () => brand().productName || clientName() || "Your client"
   const headline = () => brand().signInHeadline || "Sign in to continue"
   const initial = () => (brand().shortName || clientName() || "O").slice(0, 1).toUpperCase()
@@ -229,7 +237,7 @@ function EnterpriseGate(props: {
     >
       <div class="flex w-full max-w-sm flex-col items-center gap-4 rounded-xl border-[0.5px] border-v2-border-border-base bg-v2-background-bg-deep px-6 py-8 text-center">
         <Show
-          when={logo()}
+          when={showLogo()}
           fallback={
             <span
               class="grid size-10 place-items-center rounded-lg text-lg font-semibold text-white"
@@ -239,7 +247,9 @@ function EnterpriseGate(props: {
             </span>
           }
         >
-          {(url) => <img src={url()} alt="" class="max-h-16 max-w-48 object-contain" />}
+          {(url) => (
+            <img src={url()} alt="" class="max-h-16 max-w-48 object-contain" onError={() => setFailedLogo(url())} />
+          )}
         </Show>
         <div class="flex flex-col items-center gap-1">
           <h1 class="text-[15px] font-[640] leading-5 text-v2-text-text-base">{productName()}</h1>

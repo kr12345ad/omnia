@@ -18,6 +18,7 @@ import { useLayout } from "@/context/layout"
 import { useNotification } from "@/context/notification"
 import { usePermission } from "@/context/permission"
 import { usePlatform } from "@/context/platform"
+import { useEnterprise } from "@/context/enterprise"
 import { useServer } from "@/context/server"
 import { useServerSDK } from "@/context/server-sdk"
 import { useServerSync } from "@/context/server-sync"
@@ -68,6 +69,10 @@ export function ShellSidebar() {
   const language = useLanguage()
   const layout = useLayout()
   const platform = usePlatform()
+  const enterprise = useEnterprise()
+  // The admin's mark replaces the shipped wordmark; a build without branding
+  // keeps the wordmark so the column never renders a blank header.
+  const brandMark = () => enterprise.branding()?.iconUrl || enterprise.branding()?.logoUrl
   const server = useServer()
   const sync = useServerSync()
   const tabs = useTabs()
@@ -195,7 +200,12 @@ export function ShellSidebar() {
           column. */}
       <div data-slot="shell-sidebar-header" class="flex h-8 shrink-0 items-center px-2">
         <div data-slot="shell-sidebar-brand" class="flex min-w-0 flex-1 items-center px-3">
-          <WordmarkV2 class="h-[11px] w-auto text-v2-text-text-inverse opacity-70" />
+          <Show
+            when={brandMark()}
+            fallback={<WordmarkV2 class="h-[11px] w-auto text-v2-text-text-inverse opacity-70" />}
+          >
+            {(url) => <img src={url()} alt={enterprise.branding()?.productName ?? ""} class="h-5 w-auto max-w-36 object-contain" />}
+          </Show>
         </div>
       </div>
 
@@ -303,12 +313,14 @@ export function ShellSidebar() {
           label={language.t("sidebar.settings")}
           onSelect={() => openSettings()}
         />
-        <SidebarAction
-          collapsed={collapsed()}
-          icon={<IconV2 name="message" size="small" />}
-          label={language.t("settings.chatChannels.title")}
-          onSelect={() => openChatChannels()}
-        />
+        <Show when={enterprise.granted("chatChannels")}>
+          <SidebarAction
+            collapsed={collapsed()}
+            icon={<IconV2 name="message" size="small" />}
+            label={language.t("settings.chatChannels.title")}
+            onSelect={() => openChatChannels()}
+          />
+        </Show>
         <SidebarAction
           collapsed={collapsed()}
           icon={<IconV2 name="help" size="small" />}

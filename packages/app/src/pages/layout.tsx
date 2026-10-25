@@ -29,6 +29,7 @@ import { Dialog } from "@opencode-ai/ui/dialog"
 import { getFilename } from "@opencode-ai/core/util/path"
 import { Session } from "@opencode-ai/sdk/v2/client"
 import { usePlatform } from "@/context/platform"
+import { useEnterprise } from "@/context/enterprise"
 import { useSettings } from "@/context/settings"
 import { createStore, produce, reconcile } from "solid-js/store"
 import { DragDropProvider, DragDropSensors, DragOverlay, SortableProvider, closestCenter } from "@thisbeyond/solid-dnd"
@@ -111,6 +112,7 @@ export default function LegacyLayout(props: ParentProps) {
   const layout = useLayout()
   const layoutReady = createMemo(() => layout.ready())
   const platform = usePlatform()
+  const enterprise = useEnterprise()
   const pickDirectory = useDirectoryPicker()
   const settings = useSettings()
   const server = useServer()
@@ -2225,11 +2227,13 @@ export default function LegacyLayout(props: ParentProps) {
             label={language.t("desktop.menu.account")}
             onSelect={() => openSettings("account")}
           />
-          <SidebarFooterItem
-            icon="message"
-            label={language.t("settings.chatChannels.title")}
-            onSelect={() => openSettings("chat-channels")}
-          />
+          <Show when={enterprise.granted("chatChannels")}>
+            <SidebarFooterItem
+              icon="message"
+              label={language.t("settings.chatChannels.title")}
+              onSelect={() => openSettings("chat-channels")}
+            />
+          </Show>
           <SidebarFooterItem
             icon="help"
             label={language.t("sidebar.help")}

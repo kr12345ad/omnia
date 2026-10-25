@@ -132,6 +132,7 @@ export class ChatChannelsRuntime {
   private currentProfile: (() => GitHubProfile | undefined) | undefined
   private readonly secret: string | undefined
   private readonly transports = new Map<string, ChatTransport>()
+  private sawIdentity = false
   private readonly messageLog: ChatMessage[] = []
 
   constructor(options: { file?: string; verify?: ChatWebhookVerifier; secret?: string } = {}) {
@@ -147,6 +148,9 @@ export class ChatChannelsRuntime {
    */
   setIdentity(read: (() => GitHubProfile | undefined) | undefined): void {
     this.currentProfile = read
+    // A channel bound to an account only becomes connectable once the identity
+    // is known, so learning it is what lets those channels start.
+    this.sync()
   }
 
   /** The credential fields each channel has set, and none of their values. */
@@ -221,7 +225,7 @@ export class ChatChannelsRuntime {
   sync(): void {
     for (const [platform, transport] of [...this.transports]) {
       const channel = this.store.get(platform)
-      if (channel !== undefined && channel.enabled) continue
+      if (channel !== undefined && channel.enabled && this.claimable(platform)) continue
       transport.stop()
       this.transports.delete(platform)
     }
@@ -230,6 +234,12 @@ export class ChatChannelsRuntime {
       .list()
       .filter((channel) => channel.enabled && !this.transports.has(channel.platform))
       .forEach((channel) => {
+        if (!this.claimable(channel.platform)) {
+          // Nothing here can answer as the owner, so connecting would only post
+          // the pause notice over the process that is actually signed in.
+          this.store.setError(channel.platform, PAUSED_SIGNED_OUT)
+          return
+        }
         const transport = this.transportFactory?.({
           platform: channel.platform,
           credentials: channel.credentials,
@@ -453,6 +463,32 @@ export class ChatChannelsRuntime {
   // check is the gate in front of every agent turn: a webhook, a Discord
   // gateway event and a Slack mention all reach answer(), so none of them can
   // spend a model call while the account in use is not the bound one.
+  /**
+   * Whether this process may hold the platform's connection for a channel.
+   *
+   * A bound channel answers as the account that connected it, so only a process
+   * signed in as somebody can speak for it. Installs share the channel file by
+   * path, and a server nobody signed into would otherwise open the bot's
+   * connection too and answer every message with the pause notice while the
+   * owner's process is connected as well. An unbound channel is nobody's yet,
+   * so any server may hold it and explain how to bind it. A process that had an
+   * account and then signed out keeps its connection: that was this install's
+   * own doing, and the notice is how it says so.
+   */
+  private claimable(platform: string): boolean {
+    const channel = this.store.get(platform)
+    if (channel === undefined) return false
+    if (channel.owner === undefined) return true
+    // The identity is wired after the transports at boot, so an unwired reader
+    // is not the same answer as "nobody is signed in".
+    if (this.currentProfile === undefined) return true
+    if (this.currentProfile() !== undefined) {
+      this.sawIdentity = true
+      return true
+    }
+    return this.sawIdentity
+  }
+
   private paused(platform: string): string | undefined {
     const profile = this.currentProfile?.()
     const channel = this.store.get(platform)

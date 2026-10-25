@@ -439,7 +439,11 @@ export async function enterprisePolicy(): Promise<EnterprisePolicy | undefined> 
   const profile = enterpriseProfile()
   if (profile === undefined) return undefined
   const manifest = await enterpriseManifest().catch(() => undefined)
-  const brand = { ...profile.branding, ...(manifest?.branding ?? {}) }
+  // The live manifest is the admin's current branding and the baked profile is
+  // only the offline fallback. Merging the two would let a logo the admin has
+  // since removed keep its baked URL, so the client would request a dead asset
+  // forever while the manifest said nothing about it.
+  const brand = manifest?.branding ?? profile.branding
   const auth = { ...profile.auth, ...(manifest?.auth ?? {}) }
   const productName = brand.productName ?? profile.name
   const limits = { ...(isRecord(profile.limits) ? profile.limits : {}), ...(manifest?.limits ?? {}) }

@@ -1,9 +1,11 @@
-import { createEffect, createResource, onCleanup } from "solid-js"
+import { Show, createEffect, createResource, onCleanup } from "solid-js"
+import { Link } from "@solidjs/meta"
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import { useTheme } from "@opencode-ai/ui/theme/context"
 import { usePlatform, type EnterprisePermissions, type EnterprisePolicy } from "./platform"
 import { normalizeLocale, useLanguage } from "./language"
 import { GITHUB_AUTH_CHANGED_EVENT } from "@/components/github-auth"
+import { managedFeatureGranted } from "@/utils/enterprise-features"
 
 /**
  * The admin's manifest, resolved by the main process (baked profile underneath,
@@ -35,6 +37,11 @@ export const { use: useEnterprise, provider: EnterpriseProvider } = createSimple
 
     const active = () => (managed ? policy() : undefined)
     const feature = (name: string) => active()?.features[name] !== false
+    // A capability the admin must grant; absent means the build never opted in.
+    // A managed build with no policy yet grants nothing: the renderer mounts
+    // before the manifest resolves, and that window must not leak a surface the
+    // admin never switched on. An unmanaged build keeps every surface.
+    const granted = (name: string) => (managed ? managedFeatureGranted(active()?.features, name) : true)
     // Tool rules are separate from the capability switches: an admin can keep
     // shell on but require approval, or deny it without touching the switch.
     const permission = (name: keyof EnterprisePermissions) => active()?.permissions?.[name] ?? "allow"
@@ -73,6 +80,8 @@ export const { use: useEnterprise, provider: EnterpriseProvider } = createSimple
       policy: active,
       /** A capability switch. Unrestricted unless the policy turns it off. */
       feature,
+      /** A capability that must be granted explicitly; off when absent. */
+      granted,
       /** A tool rule; `allow` when the policy does not name one. */
       permission,
       modelPermitted,
@@ -116,6 +125,17 @@ function storedLocale(): string | null {
  * profile once and never overwrite a person's own choice; density rides the
  * document so compact fleets stay compact on every launch.
  */
+/**
+ * The browser tab carries the admin's mark. index.html ships the Omnia favicon,
+ * so a branded deployment adds its own icon link on top of it; a deployment
+ * without branding adds nothing and keeps the default.
+ */
+export function EnterpriseFavicon() {
+  const policy = useEnterprise()
+  const icon = () => policy.policy()?.branding.iconUrl || policy.policy()?.branding.logoUrl
+  return <Show when={icon()}>{(url) => <Link rel="icon" href={url()} />}</Show>
+}
+
 export function EnterpriseExperience() {
   const policy = useEnterprise()
   const theme = useTheme()

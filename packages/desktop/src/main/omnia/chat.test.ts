@@ -1,32 +1,20 @@
-import { plugin } from "bun"
+import { rmSync } from "node:fs"
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test"
+import { writeTestAuthSession } from "../../../test-support/auth-session"
+import { handlers } from "../../../test-support/electron"
+import { activateTestUserData, useTestUserData } from "../../../test-support/user-data"
+import { forgetEnterpriseProfile } from "./enterprise"
 
-const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>()
-
-const fakeElectron = {
-  app: { getPath: () => "", isPackaged: false, on: () => undefined, once: () => undefined },
-  ipcMain: {
-    handle: (channel: string, handler: (event: unknown, ...args: unknown[]) => unknown) => {
-      handlers.set(channel, handler)
-    },
-  },
-}
-
-plugin({
-  name: "omnia-chat-electron",
-  setup(build) {
-    build.module("electron", () => ({ exports: { ...fakeElectron, default: fakeElectron }, loader: "object" }))
-  },
-})
+// One Electron substitution serves every main-process suite, so the handlers
+// this file registers are read from the shared record and its fake app answers
+// with a userData directory this suite owns.
+const userData = useTestUserData("omnia-chat-")
 
 const controlPlane = "https://control.example/omnia"
+// The signed-in session is a real file in this suite's userData directory, so
+// no module in this process is replaced for later suites.
 let session: { url: string; clientToken: string } | undefined
 
-mock.module("./remote-agent", () => ({ readControlPlaneUrl: () => controlPlane }))
-mock.module("./auth-session", () => ({
-  readAuthSession: () => session,
-  readSessionProfileId: () => undefined,
-}))
 // Other files in this directory replace ./server-call process-wide; restore its
 // real delegation so these handlers reach the control-plane client under test.
 const controlPlaneModule = await import("./control-plane")
@@ -51,9 +39,15 @@ function invoke(channel: string, ...args: unknown[]) {
 }
 
 beforeEach(() => {
+  activateTestUserData(userData)
+  // The real reader consults this, so no module is replaced for later suites.
+  process.env.OMNIA_CONTROL_PLANE_URL = controlPlane
+  delete process.env.OMNIA_ENTERPRISE_PROFILE
+  forgetEnterpriseProfile()
   requests.length = 0
   responses = []
   session = { url: controlPlane, clientToken: "client-token" }
+  writeTestAuthSession(userData, session)
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     requests.push({
       url: String(input),
@@ -66,6 +60,9 @@ beforeEach(() => {
 
 afterAll(() => {
   globalThis.fetch = originalFetch
+  delete process.env.OMNIA_CONTROL_PLANE_URL
+  delete process.env.OMNIA_TEST_USER_DATA
+  rmSync(userData, { force: true, recursive: true })
   mock.restore()
 })
 
@@ -140,6 +137,7 @@ describe("chat IPC handlers", () => {
 
   test("asks for a sign-in before the user has one", async () => {
     session = undefined
+    writeTestAuthSession(userData, undefined)
     await expect(invoke("chat-channels")).rejects.toThrow("Sign in")
     expect(requests).toHaveLength(0)
   })

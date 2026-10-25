@@ -1,38 +1,19 @@
-import { plugin } from "bun"
+import { rmSync } from "node:fs"
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test"
+import { writeTestAuthSession } from "../../../test-support/auth-session"
+import { handlers } from "../../../test-support/electron"
+import { activateTestUserData, useTestUserData } from "../../../test-support/user-data"
+import { forgetEnterpriseProfile } from "./enterprise"
 
-// billing.ts reaches Electron through ipcMain. Substitute that narrow surface
-// and capture the handlers so the IPC layer can be driven the way the renderer
-// would. The signed-in session is stubbed per test instead of read off disk:
-// another test file in this directory loads the real auth-session module first,
-// and every module in the process then shares the Electron instance it saw.
-const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>()
-
-const fakeElectron = {
-  app: { getPath: () => "", isPackaged: false, on: () => undefined, once: () => undefined },
-  ipcMain: {
-    handle: (channel: string, handler: (event: unknown, ...args: unknown[]) => unknown) => {
-      handlers.set(channel, handler)
-    },
-  },
-}
-
-plugin({
-  name: "omnia-billing-electron",
-  setup(build) {
-    build.module("electron", () => ({ exports: { ...fakeElectron, default: fakeElectron }, loader: "object" }))
-  },
-})
+// billing.ts reaches Electron through ipcMain. The shared substitution records
+// the handlers it registers so the IPC layer can be driven the way the renderer
+// would, and its fake app answers with a userData directory this suite owns.
+// The signed-in session is a real file in that directory, so no module in this
+// process is replaced for later suites.
+const userData = useTestUserData("omnia-billing-")
 
 const controlPlane = "https://control.example/omnia"
-let session: { url: string; clientToken: string } | undefined
-let profileId: string | undefined
-
-mock.module("./remote-agent", () => ({ readControlPlaneUrl: () => controlPlane }))
-mock.module("./auth-session", () => ({
-  readAuthSession: () => session,
-  readSessionProfileId: () => profileId,
-}))
+let session: { url: string; clientToken: string; profileId?: string } | undefined
 
 const billing = await import("./billing")
 billing.registerBillingIpcHandlers()
@@ -48,11 +29,17 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 beforeEach(() => {
+  activateTestUserData(userData)
+  // Configured through the environment the real reader consults, so no module
+  // in this process is replaced for later suites.
+  process.env.OMNIA_CONTROL_PLANE_URL = controlPlane
+  delete process.env.OMNIA_ENTERPRISE_PROFILE
+  forgetEnterpriseProfile()
   requests.length = 0
   responses = []
   failure = undefined
-  session = { url: controlPlane, clientToken: "client-token" }
-  profileId = "7"
+  session = { url: controlPlane, clientToken: "client-token", profileId: "7" }
+  writeTestAuthSession(userData, session)
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     requests.push({
       url: String(input),
@@ -67,6 +54,9 @@ beforeEach(() => {
 
 afterAll(() => {
   globalThis.fetch = originalFetch
+  delete process.env.OMNIA_CONTROL_PLANE_URL
+  delete process.env.OMNIA_TEST_USER_DATA
+  rmSync(userData, { force: true, recursive: true })
   mock.restore()
 })
 
@@ -147,6 +137,7 @@ describe("billing failures", () => {
 
   test("asks for no session before the user signs in", async () => {
     session = undefined
+    writeTestAuthSession(userData, undefined)
     await expect(billing.readBillingEntitlement()).rejects.toThrow("Sign in")
     expect(requests).toHaveLength(0)
   })
@@ -175,6 +166,7 @@ describe("account state", () => {
 
   test("reports signed out without asking the server", async () => {
     session = undefined
+    writeTestAuthSession(userData, undefined)
     expect(await billing.readBillingAccount()).toEqual({
       plan: undefined,
       billingConfigured: false,

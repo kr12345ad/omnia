@@ -7,6 +7,7 @@ import type { WslServersPlatform } from "@opencode-ai/app/wsl/types"
 import type { UpdaterState } from "@opencode-ai/app/updater"
 import type { DesktopNativeBundle } from "@opencode-ai/app/i18n/desktop-native"
 import type { OmniaAPI } from "../main/omnia/types"
+import type { LegalStatus } from "../main/legal"
 
 export type SuperskillSummary = {
   id: string
@@ -147,6 +148,13 @@ export type ElectronAPI = {
   auth: GitHubAuthPlatform
   computers: ComputerPlatform
   chat: ChatPlatform
+  /** Terms acceptance and ban enforcement; absent in browser builds. */
+  legal: {
+    status: () => Promise<LegalStatus>
+    accept: (version: string) => Promise<LegalStatus>
+    refresh: () => Promise<LegalStatus>
+    decline: () => Promise<void>
+  }
   computerUse: ComputerUsePlatform
   browserPanel: BrowserPanelPlatform
   killSidecar: () => Promise<void>

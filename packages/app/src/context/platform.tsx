@@ -399,9 +399,34 @@ export type FatalRendererErrorLog = {
   os?: DesktopOS
 }
 
+export type LegalStatus = {
+  readonly termsVersion: string
+  readonly acceptedVersion: string | null
+  readonly acceptedAt: number | null
+  readonly accepted: boolean
+  readonly banned: boolean
+  readonly reason: string | null
+  readonly bannedAt: number | null
+  readonly fingerprint: string
+  readonly sealed: boolean
+  readonly source: "local" | "remote" | null
+}
+
+/** Terms acceptance and ban enforcement (desktop only). */
+export type LegalPlatform = {
+  status(): Promise<LegalStatus>
+  accept(version: string): Promise<LegalStatus>
+  /** Re-check the operator; restores a sealed database and relaunches when unbanned. */
+  refresh(): Promise<LegalStatus>
+  decline(): Promise<void>
+}
+
 type PlatformBase = {
   /** App version */
   version?: string
+
+  /** Terms of Service acceptance and ban enforcement (desktop only) */
+  legal?: LegalPlatform
 
   /** Open a web or mail URL in the default system application */
   openExternal(url: string): void

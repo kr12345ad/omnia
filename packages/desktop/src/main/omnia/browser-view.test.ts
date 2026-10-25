@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
+import { fakeElectron as sharedElectron } from "../../../test-support/electron"
 
 // browser-view.ts talks to the Electron main-process APIs, which only exist
 // inside a running app. The fake window and webContents below reproduce the
@@ -245,8 +246,13 @@ function filterResponse(details: Record<string, unknown>): { cancelled: boolean 
   return { cancelled: results[0]?.cancel === true }
 }
 
+// The shared substitution supplies every other Electron member, so a module
+// that binds this registration still finds app paths, safe storage, and the
+// handler record. The browser surface below is what the manager drives.
 const fakeElectron = {
+  ...sharedElectron,
   app: {
+    ...sharedElectron.app,
     on: (event: string, listener: FakeListener) => addListener(fakeAppListeners, event, listener),
     removeListener: (event: string, listener: FakeListener) => removeListener(fakeAppListeners, event, listener),
   },
@@ -255,7 +261,6 @@ const fakeElectron = {
     getFocusedWindow: () => state.focused ?? null,
     fromWebContents: (contents: unknown) => state.windows.find((window) => window.webContents === contents) ?? null,
   },
-  ipcMain: { handle: () => undefined },
   session: {
     fromPartition: () => fakeSession,
   },

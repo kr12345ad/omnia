@@ -314,6 +314,8 @@ const createPlatform = (windowState: DesktopWindowState): Platform => {
     runs: window.api.runs,
     auth: window.api.auth,
 
+    legal: window.api.legal,
+
     computers: window.api.computers,
 
     chat: window.api.chat,

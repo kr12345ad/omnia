@@ -5,6 +5,7 @@ import oc2ThemeJson from "../../../ui/src/theme/themes/oc-2.json"
 import { randomUUID } from "node:crypto"
 import { rmSync } from "node:fs"
 import { app, BrowserWindow, dialog, net, nativeImage, nativeTheme, protocol, shell } from "electron"
+import type { NativeImage } from "electron"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import type { TitlebarTheme } from "../preload/types"
@@ -175,6 +176,38 @@ export function setDockIcon() {
   if (!icon.isEmpty()) app.dock?.setIcon(icon)
 }
 
+let brandIcon: NativeImage | undefined
+
+/**
+ * The operator's mark, once its bytes decode. A tenant install is packaged with
+ * the shipped icon; the admin's upload replaces it at runtime for the window and
+ * the dock, the same way the in-app wordmark does.
+ *
+ * Electron decodes PNG/JPEG (and ICO on Windows) but not SVG, and an uploaded
+ * SVG therefore keeps the shipped icon instead of blanking it. The size cap
+ * keeps a hostile or mistaken URL from buffering the whole process.
+ */
+export async function applyBrandIcon(url: string | undefined) {
+  if (url === undefined || url.length === 0) return
+  try {
+    const response = await net.fetch(url, { signal: AbortSignal.timeout(8_000) })
+    if (!response.ok) return
+    const bytes = Buffer.from(await response.arrayBuffer())
+    if (bytes.byteLength === 0 || bytes.byteLength > 4 * 1024 * 1024) return
+    const icon = nativeImage.createFromBuffer(bytes)
+    if (icon.isEmpty()) return
+    brandIcon = icon
+    if (process.platform === "darwin") {
+      app.dock?.setIcon(icon)
+      return
+    }
+    for (const win of BrowserWindow.getAllWindows()) win.setIcon(icon)
+  } catch {
+    // Decoration only: an offline console or an undecodable format keeps the
+    // shipped icon rather than failing the launch.
+  }
+}
+
 export function createMainWindow(id: string = randomUUID()) {
   const state = windowState({
     file: windowStateFile(id),
@@ -194,7 +227,7 @@ export function createMainWindow(id: string = randomUUID()) {
     show: false,
     autoHideMenuBar: true,
     title: "Omnia",
-    icon: iconPath(),
+    icon: brandIcon ?? iconPath(),
     backgroundColor: backgroundColor ?? defaultBackgroundColor(),
     ...(process.platform === "darwin"
       ? {

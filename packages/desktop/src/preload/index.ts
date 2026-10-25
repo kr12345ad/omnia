@@ -242,6 +242,12 @@ const api: ElectronAPI = {
   isFirstLaunchOnboardingPending: () => ipcRenderer.invoke("is-first-launch-onboarding-pending"),
   finishFirstLaunchOnboarding: (createDefaultProject) =>
     ipcRenderer.invoke("finish-first-launch-onboarding", createDefaultProject),
+  legal: {
+    status: () => ipcRenderer.invoke("legal-status"),
+    accept: (version) => ipcRenderer.invoke("legal-accept-terms", version),
+    refresh: () => ipcRenderer.invoke("legal-refresh"),
+    decline: () => ipcRenderer.invoke("legal-decline"),
+  },
   importSourcesDetect: () => ipcRenderer.invoke("import-sources-detect"),
   importSessionsRun: (input) => ipcRenderer.invoke("import-sessions-run", input),
   isOldLayoutEligible: () => ipcRenderer.invoke("is-old-layout-eligible"),

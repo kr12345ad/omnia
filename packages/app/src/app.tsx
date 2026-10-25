@@ -38,7 +38,7 @@ import {
 } from "solid-js"
 import { Dynamic } from "solid-js/web"
 import { makeEventListener } from "@solid-primitives/event-listener"
-import { EnterpriseExperience, EnterpriseProvider, useEnterprise } from "@/context/enterprise"
+import { EnterpriseExperience, EnterpriseFavicon, EnterpriseProvider, useEnterprise } from "@/context/enterprise"
 import { CommandProvider, useCommand, type CommandOption } from "@/context/command"
 import { CommentsProvider } from "@/context/comments"
 import { FileProvider } from "@/context/file"
@@ -63,6 +63,7 @@ import LegacyLayout from "@/pages/layout"
 import NewLayout from "@/pages/layout-new"
 import { ErrorPage } from "./pages/error"
 import { FirstRunGate } from "./components/first-run-gate"
+import { LegalGate } from "./components/legal-gate"
 import { OnboardingWizard } from "./components/onboarding-wizard"
 import { useCheckServerHealth } from "./utils/server-health"
 import { legacySessionHref, legacySessionServer, requireServerKey, sessionHref } from "./utils/session-route"
@@ -275,6 +276,12 @@ declare global {
       deepLinks?: string[]
     }
     api?: {
+      legal?: {
+        status: () => Promise<import("./context/platform").LegalStatus>
+        accept: (version: string) => Promise<import("./context/platform").LegalStatus>
+        refresh: () => Promise<import("./context/platform").LegalStatus>
+        decline: () => Promise<void>
+      }
       setTitlebar?: (theme: { mode: "light" | "dark"; scheme?: "system" | "light" | "dark" }) => Promise<void>
       exportDebugLogs?: () => Promise<string>
       isFirstLaunchOnboardingPending?: () => Promise<boolean>
@@ -442,6 +449,7 @@ export function AppBaseProviders(
                   <DialogProvider>
                     <FileComponentProvider component={File}>
                       <EnterpriseProvider>
+                        <EnterpriseFavicon />
                         <EnterpriseExperience />
                         {props.children}
                       </EnterpriseProvider>
@@ -610,8 +618,9 @@ export function AppInterface(props: {
   )
 
   return (
-    <FirstRunGate>
-      <Show when={useEnterprise().experience()?.showTips !== false}>
+    <LegalGate>
+      <FirstRunGate>
+        <Show when={useEnterprise().experience()?.showTips !== false}>
         <OnboardingWizard />
       </Show>
       <ServerProvider
@@ -646,7 +655,8 @@ export function AppInterface(props: {
           </SettingsProvider>
         </GlobalProvider>
       </ServerProvider>
-    </FirstRunGate>
+      </FirstRunGate>
+    </LegalGate>
   )
 }
 

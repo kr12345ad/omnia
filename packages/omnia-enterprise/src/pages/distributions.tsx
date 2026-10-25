@@ -51,7 +51,7 @@ function BuildMark(props: { distribution: Distribution; size?: "small" | "large"
         background: `linear-gradient(135deg, ${props.distribution.branding.primaryColor}, ${props.distribution.branding.accentColor})`,
       }}
     >
-      <Show when={props.distribution.branding.logoUrl ?? props.distribution.branding.iconUrl} fallback={initial()}>
+      <Show when={props.distribution.branding.logoUrl || props.distribution.branding.iconUrl} fallback={initial()}>
         {(url) => <img src={url()} alt="" />}
       </Show>
     </span>

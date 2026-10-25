@@ -42,6 +42,7 @@ import {
   setAppQuitting,
   setBackgroundColor,
   setDockIcon,
+  applyBrandIcon,
   restoreMainWindows,
 } from "./windows"
 import { createWslServersController } from "./wsl/servers"
@@ -55,12 +56,15 @@ import {
   agentEventSource,
   createRemoteBrowserHandler,
   readRegisteredComputerId,
+  resolvedControlPlaneUrl,
   setNativeActionObserver,
   setRemoteBrowserHandler,
 } from "./omnia/remote-agent"
+import { createLegalController } from "./legal"
 import { registerWslIpcHandlers } from "./wsl/ipc"
 import { controlPlaneFingerprint } from "./omnia/control-plane"
-import { enterpriseProfile } from "./omnia/enterprise"
+import { readSessionProfileEmail } from "./omnia/auth-session"
+import { enterprisePolicy, enterpriseProfile } from "./omnia/enterprise"
 import { watchControlPlaneSession, type ControlPlaneSessionWatch } from "./omnia/control-plane-session"
 import { spawnWslSidecar } from "./wsl/sidecar"
 import { migrate } from "./migrate"
@@ -414,6 +418,21 @@ const main = Effect.gen(function* () {
   app.setAsDefaultProtocolClient("opencode")
   registerRendererProtocol()
   setDockIcon()
+  // Bans and terms acceptance are decided before the local server exists: a
+  // banned installation must not open its database (it gets sealed instead) and
+  // must not answer on loopback at all.
+  const legal = createLegalController({
+    userDataPath: app.getPath("userData"),
+    banUrl: process.env.OMNIA_BAN_URL ?? controlPlaneBanUrl(),
+    account: readSessionProfileEmail,
+    beforeSeal: async () => {
+      await stopSidecars()
+    },
+    log: (message, meta) => logger.log(`legal: ${message}`, meta),
+  })
+  const legalStatus = yield* Effect.promise(() => legal.startup())
+  if (legalStatus.banned) logger.warn("legal: installation banned", { reason: legalStatus.reason })
+
   const updater = setupAutoUpdater(stopSidecars)
   const menuDeps = {
     trigger: (id: string) => {
@@ -454,6 +473,8 @@ const main = Effect.gen(function* () {
     setNativeTranslations: (bundle) => {
       if (setNativeTranslations(bundle)) createMenu(menuDeps)
     },
+    legal,
+    quit: () => app.quit(),
   })
   registerWslIpcHandlers(wslServers)
   registerBrowserViewIpc()
@@ -471,7 +492,9 @@ const main = Effect.gen(function* () {
     ),
   )
 
-  const loadingTask = yield* Effect.gen(function* () {
+  const loadingTask = legalStatus.banned
+    ? undefined
+    : yield* Effect.gen(function* () {
     logger.log("sidecar connection started", { version: SIDECAR_VERSION })
 
     ensureLoopbackNoProxy()
@@ -531,9 +554,21 @@ const main = Effect.gen(function* () {
     const { listener, health } = yield* Effect.promise(() => spawnLocalServer(hostname, port, password, options))
     server = listener
     sidecarTarget = { hostname, port, password, options }
+    // A sign-in can be the moment an account ban becomes visible, so the check
+    // runs before the sidecar is re-forked: refresh() seals the database first,
+    // and a relaunch is what shows the ban screen against a stopped server.
+    const restartForSession = async () => {
+      const checked = await legal.refresh()
+      if (checked.status.banned) {
+        logger.warn("legal: installation banned after sign-in", { reason: checked.status.reason })
+        relaunch()
+        return
+      }
+      await restartSidecar()
+    }
     controlPlaneSession = watchControlPlaneSession({
       fingerprint: controlPlaneFingerprint,
-      restart: restartSidecar,
+      restart: restartForSession,
       intervalMs: CONTROL_PLANE_SESSION_POLL_MS,
       onError: (error) => logger.error("failed to restart the sidecar after the control-plane session changed", error),
     })
@@ -559,7 +594,7 @@ const main = Effect.gen(function* () {
     logger.log("loading task finished")
   }).pipe(forwardInitializationFailure(serverReady), Effect.forkChild)
 
-  yield* Fiber.await(loadingTask)
+  if (loadingTask !== undefined) yield* Fiber.await(loadingTask)
 
   app.on("window-all-closed", () => {
     if (process.platform === "darwin") return
@@ -572,6 +607,24 @@ const main = Effect.gen(function* () {
 
   const windows = restoreMainWindows()
   if (windows.length) createMenu(menuDeps)
+  // A managed install draws the admin's mark in its window and dock. This runs
+  // after the first window exists (so it can retitle that one) and never blocks
+  // startup: an unreachable console keeps the shipped icon.
+  void enterprisePolicy()
+    .then((policy) => applyBrandIcon(policy?.branding.iconUrl))
+    .catch(() => undefined)
 })
+
+// The ban endpoint follows the configured control plane when the operator has
+// one, so a managed deployment can enforce bans without extra configuration.
+function controlPlaneBanUrl(): string | undefined {
+  const base = process.env.OMNIA_BAN_URL ?? resolvedControlPlaneUrl()
+  if (base === undefined || base.length === 0) return undefined
+  try {
+    return new URL("v1/legal/status", base.endsWith("/") ? base : `${base}/`).toString()
+  } catch {
+    return undefined
+  }
+}
 
 Effect.runFork(main)

@@ -18,6 +18,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs"
@@ -52,6 +53,9 @@ import {
   type EnterpriseState,
   type EnterpriseUser,
   type InstallerLink,
+  type LegalBan,
+  type LegalBanKind,
+  type LegalDecision,
   type OrganizationSettings,
   type Platform,
   type Policies,
@@ -71,6 +75,7 @@ const MAX_RELEASES = 500
 const MAX_RELEASE_LOG = 200
 const MAX_AUDIT = 20_000
 const MAX_USAGE = 100_000
+const MAX_LEGAL_BANS = 10_000
 const MAX_STRING = 2_048
 const SESSION_TOUCH_MS = 60_000
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000
@@ -130,6 +135,9 @@ export class EnterpriseStore {
   private state: EnterpriseState
   private lastWriteAt: number | undefined
   private writable = true
+  /** Mtime of the ban records this process is holding, so a running server
+   * notices an operator's `ban`/`unban` without a restart. */
+  private legalBansAt = 0
 
   constructor(options: EnterpriseStoreOptions) {
     this.file = options.file
@@ -150,6 +158,13 @@ export class EnterpriseStore {
         permissions: normalizePermissions(distribution.permissions, distribution.features),
       }))
       this.state.releases = (this.state.releases ?? []).filter((release) => Array.isArray(release.log))
+      // Files written before bans existed have no field at all, and a partially
+      // written one may hold shapes this build cannot enforce; both read as none
+      // rather than failing every login on an unknown record.
+      this.state.legalBans = (this.state.legalBans ?? []).filter(
+        (ban) => ban.kind === "account" || ban.kind === "installation",
+      )
+      this.legalBansAt = mtimeOf(this.file)
       return
     }
     const at = this.now()
@@ -180,6 +195,7 @@ export class EnterpriseStore {
       releases: [],
       audit: [],
       usage: [],
+      legalBans: [],
     }
     this.save()
   }
@@ -463,6 +479,19 @@ export class EnterpriseStore {
       return { ok: false, reason: "The email address or password is incorrect." }
     }
     if (user.status === "suspended") return { ok: false, reason: "This account is suspended. Contact your administrator." }
+    // A ban outranks a valid password: the account is refused before the
+    // credential is even checked, and the refusal is audited so an appeal can
+    // see the attempt.
+    const decision = this.legalDecision({ email: user.email })
+    if (decision.banned) {
+      this.appendAudit({
+        action: "legal.login_blocked",
+        actorId: user.id,
+        actorEmail: user.email,
+        ...meta,
+      })
+      return { ok: false, reason: "This account is banned. Appeal using the address on the ban notice." }
+    }
     if (user.status === "invited" || user.passwordHash === undefined) {
       return { ok: false, reason: "This account has not finished setup. Use the invitation link to set a password." }
     }
@@ -1270,6 +1299,110 @@ export class EnterpriseStore {
 
   // ── Events ───────────────────────────────────────────────────────────────
 
+  // ── Legal bans ───────────────────────────────────────────────────────
+
+  /**
+   * Picks up ban changes written by another process, such as the operator CLI
+   * running `ban`/`unban` against a live server.
+   *
+   * Only the ban collection is reloaded: the rest of the state belongs to this
+   * process, and replacing it wholesale would drop writes made since the read.
+   * The file is written with an atomic rename, so this read is consistent.
+   */
+  private syncLegalBans(): void {
+    const mtime = mtimeOf(this.file)
+    if (mtime === 0 || mtime === this.legalBansAt) return
+    try {
+      const next = readState(this.file)
+      this.state.legalBans = (next.legalBans ?? []).filter(
+        (ban) => ban.kind === "account" || ban.kind === "installation",
+      )
+      this.legalBansAt = mtime
+    } catch {
+      // An unreadable file keeps the loaded bans in force: the safe failure for
+      // enforcement is to keep blocking, not to let a broken file lift a ban.
+    }
+  }
+
+  /** Every ban, lifted ones included; the console lists them for appeals. */
+  legalBans(): readonly LegalBan[] {
+    this.syncLegalBans()
+    return structuredClone(this.state.legalBans ?? [])
+  }
+
+  /**
+   * The answer the ban endpoint publishes for one caller.
+   *
+   * An account ban and an installation ban are independent: either one blocks
+   * the caller, and a lifted record blocks nobody. An email that fails
+   * validation or a fingerprint that is not hex matches nothing, so junk input
+   * can never accidentally hit a stored ban.
+   */
+  legalDecision(input: { readonly email?: string; readonly fingerprint?: string }): LegalDecision {
+    this.syncLegalBans()
+    const email = sanitizeEmail(input.email)
+    const fingerprint = normalizeFingerprint(input.fingerprint)
+    const match = (this.state.legalBans ?? []).find(
+      (ban) =>
+        ban.liftedAt === undefined &&
+        ((ban.kind === "account" && email !== undefined && ban.value === email) ||
+          (ban.kind === "installation" && fingerprint !== undefined && ban.value === fingerprint)),
+    )
+    if (match === undefined) return { banned: false }
+    return { banned: true, reason: match.reason, bannedAt: match.bannedAt }
+  }
+
+  /** Applies a ban, or refreshes the reason of one that is already active. */
+  banLegalSubject(input: {
+    kind: LegalBanKind
+    value: string
+    reason: string
+    createdBy: string
+    at?: number
+  }): LegalBan {
+    const value = requireLegalSubject(input.kind, input.value)
+    const reason = sanitizeText(input.reason, 300)
+    if (reason.length === 0) throw new EnterpriseStoreError("A ban needs a reason the user can read.")
+    const existing = (this.state.legalBans ?? []).find(
+      (ban) => ban.kind === input.kind && ban.value === value && ban.liftedAt === undefined,
+    )
+    if (existing !== undefined) {
+      const updated: LegalBan = { ...existing, reason }
+      this.state.legalBans = (this.state.legalBans ?? []).map((ban) => (ban.id === existing.id ? updated : ban))
+      this.save()
+      return structuredClone(updated)
+    }
+    const ban: LegalBan = {
+      id: `ban_${randomBytes(8).toString("hex")}`,
+      kind: input.kind,
+      value,
+      reason,
+      bannedAt: input.at ?? this.now(),
+      createdBy: sanitizeText(input.createdBy, 200) || "operator",
+    }
+    this.state.legalBans = [...(this.state.legalBans ?? []), ban].slice(-MAX_LEGAL_BANS)
+    this.appendAudit({ action: "legal.ban_applied", target: value, metadata: { kind: input.kind, createdBy: ban.createdBy } })
+    return structuredClone(ban)
+  }
+
+  /**
+   * Lifts the active ban for one subject. The record stays in the store with
+   * `liftedAt` set, so the same file explains why the account was blocked and
+   * who released it. Returns undefined when nothing was active.
+   */
+  liftLegalBan(input: { kind: LegalBanKind; value: string; liftedBy: string }): LegalBan | undefined {
+    const value = requireLegalSubject(input.kind, input.value)
+    const active = (this.state.legalBans ?? []).find(
+      (ban) => ban.kind === input.kind && ban.value === value && ban.liftedAt === undefined,
+    )
+    if (active === undefined) return undefined
+    const liftedBy = sanitizeText(input.liftedBy, 200) || "operator"
+    const lifted: LegalBan = { ...active, liftedAt: this.now(), liftedBy }
+    this.state.legalBans = (this.state.legalBans ?? []).map((ban) => (ban.id === active.id ? lifted : ban))
+    this.appendAudit({ action: "legal.ban_lifted", target: value, metadata: { kind: input.kind, liftedBy } })
+    return structuredClone(lifted)
+  }
+
   appendAudit(input: Omit<AuditEvent, "id" | "at"> & { at?: number }): AuditEvent {
     const at = input.at ?? this.now()
     const event: AuditEvent = {
@@ -1346,6 +1479,7 @@ export class EnterpriseStore {
       renameSync(temporary, this.file)
       chmodSync(this.file, 0o600)
       this.lastWriteAt = this.now()
+      this.legalBansAt = mtimeOf(this.file)
       this.writable = true
     } catch (error) {
       rmSync(temporary, { force: true })
@@ -1356,6 +1490,14 @@ export class EnterpriseStore {
 }
 
 // ── Parsing and validation ─────────────────────────────────────────────────
+
+function mtimeOf(file: string): number {
+  try {
+    return statSync(file).mtimeMs
+  } catch {
+    return 0
+  }
+}
 
 function readState(file: string): EnterpriseState {
   if (lstatSync(file).isSymbolicLink()) throw new EnterpriseStoreError(`Refusing to read ${file} through a symlink.`)
@@ -1401,6 +1543,19 @@ export function hashToken(token: string): string {
 export function sanitizeText(value: unknown, max = MAX_STRING): string {
   if (typeof value !== "string") return ""
   return value.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, max)
+}
+
+function normalizeFingerprint(value: unknown): string | undefined {
+  const text = sanitizeText(value, 64).toLowerCase()
+  return /^[0-9a-f]{8,64}$/.test(text) ? text : undefined
+}
+
+function requireLegalSubject(kind: LegalBanKind, value: unknown): string {
+  const subject = kind === "account" ? sanitizeEmail(value) : normalizeFingerprint(value)
+  if (subject !== undefined) return subject
+  throw new EnterpriseStoreError(
+    kind === "account" ? "A valid email address is required." : "A valid installation fingerprint is required.",
+  )
 }
 
 export function sanitizeEmail(value: unknown): string | undefined {

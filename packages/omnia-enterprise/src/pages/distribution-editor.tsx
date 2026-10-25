@@ -250,7 +250,7 @@ function BuildPreview(props: { distribution: Distribution }) {
       </div>
       <div class="ent-device-body">
         <Show
-          when={brand().logoUrl ?? brand().iconUrl}
+          when={brand().logoUrl || brand().iconUrl}
           fallback={
             <span
               class="ent-device-logo"
@@ -381,7 +381,22 @@ export function DistributionEditorPage() {
         const uploaded = await api.uploadAsset({ kind, contentType: file.type, data })
         patchBranding(kind === "logo" ? { logoUrl: uploaded.url } : { iconUrl: uploaded.url })
         void refetchAssets()
-        toast.push("Asset uploaded. Save the build to publish it.", "success")
+        // Persist the asset pointer now. The file itself is already stored, but
+        // the URL only lived in this tab's draft: leaving the builder (or
+        // rebuilding from another tab) saved a distribution without the mark,
+        // so the console, the app and the installer all kept the shipped icon.
+        const value = draft()
+        if (value !== undefined) {
+          const branding =
+            kind === "logo"
+              ? { ...value.branding, logoUrl: uploaded.url }
+              : { ...value.branding, iconUrl: uploaded.url }
+          const saved = await api.updateDistribution(value.id, { branding })
+          setDraft((current) =>
+            current === undefined ? current : { ...current, branding: saved.distribution.branding },
+          )
+        }
+        toast.push("Asset uploaded and saved.", "success")
       } catch (cause) {
         setAssetError(cause instanceof Error ? cause.message : "The image could not be uploaded.")
       } finally {

@@ -93,6 +93,24 @@ mock.module("@/context/command", () => ({
 mock.module("@solidjs/router", () => ({ useParams: () => params }))
 mock.module("@/context/language", () => ({
   useLanguage: () => ({ t: (key: keyof typeof en) => en[key] }),
+  // The mock stands in for the whole module, so it has to carry the same
+  // surface: the enterprise context imports the normalizer at module scope.
+  normalizeLocale: (value: string) => value,
+}))
+// Outside a managed build every page is available, so the enterprise context
+// is a boundary here. Mocking it keeps this file independent of whichever
+// enterprise mock an earlier test file left in the process.
+mock.module("@/context/enterprise", () => ({
+  useEnterprise: () => ({
+    managed: false,
+    policy: () => undefined,
+    feature: () => true,
+    granted: () => true,
+    permission: () => "allow",
+    branding: () => undefined,
+  }),
+  EnterpriseProvider: (props: ParentProps) => props.children,
+  EnterpriseExperience: () => null,
 }))
 mock.module("@/context/platform", () => ({ usePlatform: () => ({ version: "26.10.0" }) }))
 mock.module("@/context/layout", () => ({ useLayout: () => ({ route: () => ({ type: "home" }) }) }))

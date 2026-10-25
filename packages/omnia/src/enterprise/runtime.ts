@@ -1614,9 +1614,12 @@ export class EnterpriseRuntime {
   }
 
   private allowedOrigin(origin: string, request: IncomingMessage): boolean {
-    const normalized = origin.replace(/\/+$/, "")
-    if (normalized === this.publicUrl) return true
-    if (this.devOrigins.includes(normalized)) return true
+    const normalized = comparableOrigin(origin)
+    // A browser's Origin header never carries a path, but publicUrl is the
+    // console's full mount (https://host/test1/ent). Comparing the raw strings
+    // rejected every browser call once the console stopped sitting at the root.
+    if (normalized === comparableOrigin(this.publicUrl)) return true
+    if (this.devOrigins.some((entry) => comparableOrigin(entry) === normalized)) return true
     // Browsing the console at localhost when the configured public URL names
     // 127.0.0.1 (or the other way around) is still the same server. Compare the
     // authority the browser actually used, never a caller-supplied body field.
@@ -1949,6 +1952,22 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) =>
     char === "&" ? "&amp;" : char === "<" ? "&lt;" : char === ">" ? "&gt;" : char === '"' ? "&quot;" : "&#39;",
   )
+}
+
+/**
+ * The part of a URL that identifies an origin, for comparing a browser's
+ * Origin header against a configured console URL. `publicUrl` may name the
+ * console's mount path; the Origin header never does.
+ */
+function comparableOrigin(value: string): string {
+  try {
+    const url = new URL(value)
+    // Non-special schemes (oc://renderer) report origin "null"; scheme and
+    // authority are still what identifies the caller.
+    return url.origin === "null" ? `${url.protocol}//${url.host}` : url.origin
+  } catch {
+    return value.replace(/\/+$/, "")
+  }
 }
 
 function bearer(request: IncomingMessage): string | undefined {

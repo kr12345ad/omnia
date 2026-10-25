@@ -181,6 +181,14 @@ a {
   display: block;
 }
 
+.ent-brand-image {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+  border-radius: 9px;
+  display: block;
+}
+
 .ent-brand-text {
   min-width: 0;
 }

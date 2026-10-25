@@ -19,7 +19,15 @@ import type {
   UserStatus,
 } from "@/types"
 
-const BASE = "/v1/enterprise"
+/**
+ * Where this console is mounted, derived from the document rather than assumed.
+ * The admin UI is served at `<mount>/admin/` — `/admin/` on the console's own
+ * origin, `/test1/ent/admin/` behind the hosted edge — and its API lives beside
+ * that mount, not at the domain root. A hard-coded `/v1/enterprise` sent every
+ * request to the wrong host path for anyone reaching the console through the
+ * public URL.
+ */
+const BASE = `${window.location.pathname.slice(0, window.location.pathname.indexOf("/admin/") + 1)}v1/enterprise`
 
 export class ApiError extends Error {
   readonly status: number

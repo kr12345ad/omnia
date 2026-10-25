@@ -1,52 +1,21 @@
-import { plugin } from "bun"
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test"
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { handlers, opened, setEncryptionAvailable } from "../../../test-support/electron"
+import { activateTestUserData, useTestUserData } from "../../../test-support/user-data"
 import { forgetEnterpriseProfile } from "./enterprise"
 
 // auth.ts imports Electron main-process modules that only exist inside a
-// running app. Substitute the narrow surface it touches (app paths, safe
-// storage, shell, ipcMain) and capture registered handlers so the IPC layer
-// can be driven the way the renderer would.
-const userData = mkdtempSync(join(tmpdir(), "omnia-auth-"))
-const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>()
-const opened: string[] = []
-let encryptionAvailable = true
+// running app. The shared substitution stands in for the whole main-process
+// surface and captures registered handlers so the IPC layer can be driven the
+// way the renderer would.
+const userData = useTestUserData("omnia-auth-")
 
-const fakeElectron = {
-  app: { getPath: () => userData },
-  safeStorage: {
-    isEncryptionAvailable: () => encryptionAvailable,
-    encryptString: (value: string) => Buffer.from(`omnia-test:${value}`, "utf8"),
-    decryptString: (value: Buffer) => {
-      const text = Buffer.from(value).toString("utf8")
-      if (!text.startsWith("omnia-test:")) throw new Error("not produced by the test safe storage")
-      return text.slice("omnia-test:".length)
-    },
-  },
-  shell: {
-    openExternal: async (url: string) => {
-      opened.push(url)
-    },
-  },
-  ipcMain: {
-    handle: (channel: string, handler: (event: unknown, ...args: unknown[]) => unknown) => {
-      handlers.set(channel, handler)
-    },
-  },
-}
-
-plugin({
-  name: "omnia-auth-electron",
-  setup(build) {
-    build.module("electron", () => ({ exports: { ...fakeElectron, default: fakeElectron }, loader: "object" }))
-  },
-})
-
+// The control plane is configured the way a user configures it, through the
+// environment the real reader consults. A module-level mock of `./remote-agent`
+// would leak into every later suite in this process.
 const controlPlane = "https://control.example/omnia"
-let controlPlaneUrl: string | undefined = controlPlane
-mock.module("./remote-agent", () => ({ readControlPlaneUrl: () => controlPlaneUrl }))
 
 const auth = await import("./auth")
 auth.registerGitHubAuthIpcHandlers()
@@ -69,18 +38,21 @@ function mockFetch() {
 }
 
 beforeEach(() => {
+  activateTestUserData(userData)
   rmSync(sessionPath, { force: true })
   requests.length = 0
   responses = []
   opened.length = 0
-  controlPlaneUrl = controlPlane
-  encryptionAvailable = true
+  process.env.OMNIA_CONTROL_PLANE_URL = controlPlane
+  setEncryptionAvailable(true)
   delete process.env.OMNIA_SAFE_STORAGE
   mockFetch()
 })
 
 afterAll(() => {
   globalThis.fetch = originalFetch
+  delete process.env.OMNIA_CONTROL_PLANE_URL
+  delete process.env.OMNIA_TEST_USER_DATA
   rmSync(userData, { force: true, recursive: true })
 })
 
@@ -90,7 +62,7 @@ describe("auth status", () => {
   })
 
   test("falls back to the deployment control plane when none is configured", () => {
-    controlPlaneUrl = undefined
+    delete process.env.OMNIA_CONTROL_PLANE_URL
     expect(auth.authStatus().controlPlaneUrl).toBe("https://openfoodpantry.org/test1/omnia")
   })
 })
@@ -152,7 +124,7 @@ describe("sign-in flow", () => {
   })
 
   test("falls back to plaintext with owner-only permissions when encryption is unavailable", async () => {
-    encryptionAvailable = false
+    setEncryptionAvailable(false)
     process.env.OMNIA_SAFE_STORAGE = "0"
     responses = [
       jsonResponse({ ok: true, authorizeUrl: "https://github.com/login/oauth/authorize", state: "state-2" }),
@@ -314,7 +286,7 @@ describe("stored credential safety", () => {
 
   test("reports a stored session that can no longer be decrypted instead of looking signed out", () => {
     process.env.OMNIA_SAFE_STORAGE = "0"
-    encryptionAvailable = true
+    setEncryptionAvailable(true)
     writeFileSync(sessionPath, JSON.stringify({ encrypted: true, payload: "not-from-this-keychain" }))
 
     expect(auth.loadAuthSession()).toBeUndefined()
@@ -325,7 +297,7 @@ describe("stored credential safety", () => {
   })
 
   test("reports a keychain that is available but cannot open the ciphertext", () => {
-    encryptionAvailable = true
+    setEncryptionAvailable(true)
     writeFileSync(sessionPath, JSON.stringify({ encrypted: true, payload: "garbage" }))
 
     expect(auth.authStatus()).toMatchObject({
@@ -335,7 +307,7 @@ describe("stored credential safety", () => {
   })
 
   test("reports a session that had to be stored in the clear", () => {
-    encryptionAvailable = false
+    setEncryptionAvailable(false)
     process.env.OMNIA_SAFE_STORAGE = "0"
     auth.persistAuthSession({ url: controlPlane, clientToken: "client-token-5" })
 

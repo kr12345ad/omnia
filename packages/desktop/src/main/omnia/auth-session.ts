@@ -76,6 +76,31 @@ export function readSessionProfileId(): string | undefined {
   return typeof id === "string" && id.trim().length > 0 ? id.trim() : undefined
 }
 
+/**
+ * The email the signed-in account is known by.
+ *
+ * Account bans are enforced by email, so the ban check has to carry it. GitHub
+ * and Google sessions expose `email` on the profile; a work-email deployment
+ * stores the address as `login`. Anything that is not an email address is
+ * ignored rather than sent, because the server would only reject it.
+ */
+export function readSessionProfileEmail(): string | undefined {
+  const session = readSession()
+  if (session === undefined) return undefined
+  const url = firstString(session.controlPlaneUrl, session.url)
+  if (url === undefined || !isEnterpriseSessionUrl(url.replace(/\/+$/, ""))) return undefined
+  const profile = session.profile
+  if (typeof profile !== "object" || profile === null || Array.isArray(profile)) return undefined
+  const record = profile as { email?: unknown; login?: unknown }
+  return emailValue(record.email) ?? emailValue(record.login)
+}
+
+function emailValue(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined
+  const email = value.trim().toLowerCase()
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? email : undefined
+}
+
 function readSession(): Record<string, unknown> | undefined {
   const file = join(app.getPath("userData"), "auth-session.json")
   if (!existsSync(file)) return undefined

@@ -1,4 +1,4 @@
-import { For, Show, type ParentProps } from "solid-js"
+import { For, Show, createEffect, type ParentProps } from "solid-js"
 import { Icon } from "@opencode-ai/ui/icon"
 import type { IconProps } from "@opencode-ai/ui/icon"
 import { Mark } from "@opencode-ai/ui/logo"
@@ -6,6 +6,7 @@ import { useSession } from "@/state"
 import { href, navigate, routePath, routeSegments } from "@/lib/router"
 import { plural } from "@/lib/format"
 import { Avatar, Button, Tag } from "@/components/ui"
+import { setFavicon } from "@/lib/favicon"
 import type { Capability } from "@/types"
 
 interface NavItem {
@@ -49,6 +50,10 @@ export function AppShell(props: ParentProps) {
   const session = useSession()
   const user = () => session.session()!.user
   const org = () => session.session()!.organization
+  // The rail is the console's own brand surface: an operator who set a mark
+  // sees it here instead of the shipped glyph.
+  const mark = () => org().branding.iconUrl || org().branding.logoUrl
+  createEffect(() => setFavicon(mark()))
   const daysLeft = () => {
     const endsAt = org().trialEndsAt
     return Math.max(0, Math.ceil((endsAt - Date.now()) / 86_400_000))
@@ -70,9 +75,16 @@ export function AppShell(props: ParentProps) {
     <div class="ent-shell">
       <aside class="ent-rail">
         <a class="ent-brand" href={href("/overview")} aria-label="Omnia Enterprise home">
-          <span class="ent-brand-mark">
-            <Mark square class="ent-brand-glyph" />
-          </span>
+          <Show
+            when={mark()}
+            fallback={
+              <span class="ent-brand-mark">
+                <Mark square class="ent-brand-glyph" />
+              </span>
+            }
+          >
+            {(url) => <img class="ent-brand-image" src={url()} alt="" />}
+          </Show>
           <span class="ent-brand-text">
             <span class="ent-brand-name">Omnia</span>
             <span class="ent-brand-sub">Enterprise</span>

@@ -22,6 +22,81 @@ afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 
+describe("legal bans", () => {
+  const PASSWORD = "correct horse battery"
+
+  test("an account ban blocks the password sign-in until it is lifted", async () => {
+    const instance = store()
+    await instance.createUser({
+      email: "Person@Example.com",
+      name: "Person",
+      role: "member",
+      password: PASSWORD,
+    })
+    const ban = instance.banLegalSubject({
+      kind: "account",
+      value: "PERSON@example.com",
+      reason: "test",
+      createdBy: "cli",
+    })
+    expect(ban.value).toBe("person@example.com")
+    expect(instance.legalDecision({ email: "Person@Example.com" })).toEqual({
+      banned: true,
+      reason: "test",
+      bannedAt: ban.bannedAt,
+    })
+
+    // A valid password does not get past a ban, and the attempt is audited so
+    // an appeal can see that the person tried to sign in.
+    expect(await instance.login("person@example.com", PASSWORD)).toEqual({
+      ok: false,
+      reason: "This account is banned. Appeal using the address on the ban notice.",
+    })
+    expect(instance.auditAll().some((event) => event.action === "legal.login_blocked")).toBe(true)
+
+    // Lifting keeps the record and lets the same password through again.
+    const lifted = instance.liftLegalBan({ kind: "account", value: "person@example.com", liftedBy: "cli" })
+    expect(typeof lifted?.liftedAt).toBe("number")
+    expect(instance.legalDecision({ email: "person@example.com" })).toEqual({ banned: false })
+    expect((await instance.login("person@example.com", PASSWORD)).ok).toBe(true)
+    expect(instance.legalBans()).toHaveLength(1)
+  })
+
+  test("installation bans are separate, and unusable input matches nothing", () => {
+    const instance = store()
+    instance.banLegalSubject({
+      kind: "installation",
+      value: "8B971E7A7450184D6EC77C39361B3C48",
+      reason: "device",
+      createdBy: "cli",
+    })
+    expect(instance.legalDecision({ fingerprint: "8b971e7a7450184d6ec77c39361b3c48" }).banned).toBe(true)
+    expect(instance.legalDecision({ email: "someone@example.com" }).banned).toBe(false)
+    expect(instance.legalDecision({ fingerprint: "not-a-fingerprint" }).banned).toBe(false)
+    expect(instance.legalDecision({ email: "not-an-email" }).banned).toBe(false)
+    expect(instance.legalDecision({}).banned).toBe(false)
+    expect(() => instance.banLegalSubject({ kind: "account", value: "nope", reason: "x", createdBy: "cli" })).toThrow()
+    expect(() => instance.banLegalSubject({ kind: "account", value: "a@b.co", reason: "  ", createdBy: "cli" })).toThrow(
+      /reason/i,
+    )
+  })
+
+  test("bans survive a reopen and a repeated ban refreshes the reason", () => {
+    const directory = mkdtempSync(join(tmpdir(), "omnia-legal-bans-"))
+    directories.push(directory)
+    const file = join(directory, "enterprise.json")
+    const first = openEnterpriseStore({ file, orgName: "Acme", adminEmail: "owner@acme.test" })
+    const applied = first.banLegalSubject({ kind: "account", value: "a@acme.test", reason: "first", createdBy: "cli" })
+    const reopened = openEnterpriseStore({ file, orgName: "Acme", adminEmail: "owner@acme.test" })
+    expect(reopened.legalDecision({ email: "a@acme.test" }).reason).toBe("first")
+    const refreshed = reopened.banLegalSubject({ kind: "account", value: "a@acme.test", reason: "second", createdBy: "cli" })
+    // Re-banning updates the active record rather than stacking duplicates.
+    expect(refreshed.id).toBe(applied.id)
+    expect(reopened.legalBans()).toHaveLength(1)
+    expect(reopened.legalDecision({ email: "a@acme.test" }).reason).toBe("second")
+  })
+})
+
 describe("policy enforcement", () => {
   test("ages out usage and audit records at the windows the policy publishes", () => {
     const directory = mkdtempSync(join(tmpdir(), "omnia-enterprise-retention-"))

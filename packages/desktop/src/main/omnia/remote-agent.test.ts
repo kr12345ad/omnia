@@ -1,84 +1,16 @@
-import { plugin } from "bun"
 import { recordGrabSubscription } from "./host-grab"
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test"
-import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { existsSync, lstatSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { handlers, setEncryptionAvailable } from "../../../test-support/electron"
+import { activateTestUserData, useTestUserData } from "../../../test-support/user-data"
 
 // remote-agent.ts imports Electron main-process modules that only exist inside
 // a running app. Substitute the narrow surface it touches (app paths, safe
 // storage, ipcMain) and capture registered handlers so the IPC layer can be
-// driven the way the renderer would.
-const userData = mkdtempSync(join(tmpdir(), "omnia-remote-agent-"))
-const handlers = new Map<string, (event: unknown, ...args: unknown[]) => unknown>()
-let encryptionAvailable = true
-
-class FakeBrowserWindow {
-  destroyed = false
-  constructor(_options?: unknown) {}
-  setMenuBarVisibility() {}
-  setIgnoreMouseEvents() {}
-  setAlwaysOnTop() {}
-  setVisibleOnAllWorkspaces() {}
-  setFocusable() {}
-  setSkipTaskbar() {}
-  setSimpleFullScreen() {}
-  setFullScreen() {}
-  setBounds() {}
-  showInactive() {}
-  once() {}
-  on() {}
-  loadURL() {
-    return Promise.resolve()
-  }
-  destroy() {
-    this.destroyed = true
-  }
-  isDestroyed() {
-    return this.destroyed
-  }
-}
-
-const fakeElectron = {
-  app: { getPath: () => userData, once: () => undefined },
-  systemPreferences: { isTrustedAccessibilityClient: () => false },
-  powerSaveBlocker: { start: () => 1, stop: () => undefined, isStarted: () => false },
-  screen: {
-    getDisplayNearestPoint: () => ({ x: 0, y: 0 }),
-    getCursorScreenPoint: () => ({ x: 0, y: 0 }),
-    getPrimaryDisplay: () => ({ bounds: { x: 0, y: 0, width: 800, height: 600 } }),
-    on: () => undefined,
-    removeListener: () => undefined,
-  },
-  BrowserWindow: FakeBrowserWindow,
-  safeStorage: {
-    isEncryptionAvailable: () => encryptionAvailable,
-    encryptString: (value: string) => Buffer.from(`omnia-test:${value}`, "utf8"),
-    decryptString: (value: Buffer) => {
-      const text = Buffer.from(value).toString("utf8")
-      if (!text.startsWith("omnia-test:")) throw new Error("not produced by the test safe storage")
-      return text.slice("omnia-test:".length)
-    },
-  },
-  shell: { openExternal: async () => undefined },
-  crashReporter: { start: () => undefined },
-  netLog: { startLogging: async () => undefined, stopLogging: async () => undefined, currentlyLogging: false },
-  ipcMain: {
-    handle: (channel: string, handler: (event: unknown, ...args: unknown[]) => unknown) => {
-      handlers.set(channel, handler)
-    },
-    on: () => undefined,
-    removeListener: () => undefined,
-  },
-}
-
-plugin({
-  name: "remote-agent-electron",
-  setup(build) {
-    build.module("electron", () => ({ exports: { ...fakeElectron, default: fakeElectron }, loader: "object" }))
-  },
-})
-
+// driven the way the renderer would. The directory is this suite's own, so the
+// real module and this suite agree on where its files live.
+const userData = useTestUserData("omnia-remote-agent-")
 mock.module("./server-host", () => ({
   createPlatformHostDriver: () => ({
     id: "test-host",
@@ -111,14 +43,16 @@ beforeAll(() => {
 })
 
 beforeEach(() => {
+  activateTestUserData(userData)
   rmSync(configPath, { force: true })
   rmSync(controlPlanePath, { force: true })
   rmSync(sessionPath, { force: true })
-  encryptionAvailable = true
+  setEncryptionAvailable(true)
 })
 
 afterAll(() => {
   delete process.env.OMNIA_CONTROL_PLANE_URL
+  delete process.env.OMNIA_TEST_USER_DATA
   rmSync(userData, { force: true, recursive: true })
 })
 
@@ -254,7 +188,7 @@ describe("credential storage", () => {
   })
 
   test("falls back to plaintext with owner-only permissions when encryption is unavailable", () => {
-    encryptionAvailable = false
+    setEncryptionAvailable(false)
     remoteAgent.persistRemoteAgentConfig({
       serverUrl: "http://192.168.1.20:4200",
       computerId: "c3",
@@ -282,7 +216,7 @@ describe("remote key safety", () => {
 
   test("refuses to store the private key when no keychain is available", async () => {
     signedIn()
-    encryptionAvailable = false
+    setEncryptionAvailable(false)
     process.env.OMNIA_SAFE_STORAGE = "0"
     const originalFetch = globalThis.fetch
     globalThis.fetch = (async () => new Response(JSON.stringify({ ok: true }), {
@@ -298,7 +232,7 @@ describe("remote key safety", () => {
     } finally {
       globalThis.fetch = originalFetch
       delete process.env.OMNIA_SAFE_STORAGE
-      encryptionAvailable = true
+      setEncryptionAvailable(true)
       rmSync(keyPath, { force: true })
     }
   })

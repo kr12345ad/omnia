@@ -119,6 +119,16 @@ export interface ServerSession {
 
 export interface ApiContext {
   readonly descriptor: ServerDescriptor
+  /**
+   * Ban lookup behind the public legal endpoint. The enterprise control plane
+   * supplies it from the account store; a computer-only server leaves it off
+   * and the endpoint answers "not banned".
+   */
+  readonly legal?: (input: { email?: string; fingerprint?: string }) => {
+    readonly banned: boolean
+    readonly reason?: string
+    readonly bannedAt?: number
+  }
   // The server bearer token. It keys the session proof that binds a caller
   // supplied session id to this server instance.
   readonly token: string
@@ -256,6 +266,12 @@ export function isPublicApiRoute(method: string, pathname: string): boolean {
   // anything is answered, and an unknown platform or an unconnected channel is
   // refused inside the route, so the path being public grants nothing by itself.
   if (method === "POST" && /^\/chat\/[a-z0-9-]+\/webhook$/.test(route)) return true
+  // The ban check is what a blocked installation reads before it has any
+  // credential: a banned account must be told so at startup, and a banned
+  // device has already had its locally stored token removed. It only answers
+  // with ban state for the identifier in the query, never account details, so
+  // being reachable without a bearer grants nothing beyond the notice itself.
+  if (method === "GET" && route === "/legal/status") return true
   return false
 }
 
@@ -1180,6 +1196,25 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
 
   if (parsed.method === "GET" && segments.length === 2 && segments[1] === "health") {
     json(response, 200, { ok: true, health: context.health() })
+    return true
+  }
+
+  // `?email=` binds an account ban to any installation signed into it, and
+  // `?fingerprint=` binds a ban to one machine. Either one blocks the caller;
+  // the answer carries only the ban reason and date, which the ban screen shows.
+  if (parsed.method === "GET" && segments.length === 3 && segments[1] === "legal" && segments[2] === "status") {
+    const email = parsed.url.searchParams.get("email") ?? undefined
+    const fingerprint = parsed.url.searchParams.get("fingerprint") ?? undefined
+    const decision = context.legal?.({
+      ...(email === undefined ? {} : { email }),
+      ...(fingerprint === undefined ? {} : { fingerprint }),
+    })
+    json(response, 200, {
+      ok: true,
+      banned: decision?.banned === true,
+      ...(decision?.reason === undefined ? {} : { reason: decision.reason }),
+      ...(decision?.bannedAt === undefined ? {} : { bannedAt: decision.bannedAt }),
+    })
     return true
   }
 
@@ -2852,6 +2887,9 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       }
       const callback = await context.auth.completeCallback(state, code)
       if (callback.ok) {
+        // The channels answer as the account that connected them, so a fresh
+        // sign-in is what lets their transports start.
+        context.chatChannels.sync()
         html(
           response,
           200,
@@ -2930,6 +2968,9 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         return true
       }
       await context.auth.logout()
+      // Nobody can speak for a bound channel now, so this process gives the
+      // platform's connection up instead of answering with the pause notice.
+      context.chatChannels.sync()
       json(response, 200, { ok: true, status: context.auth.status() })
       return true
     }

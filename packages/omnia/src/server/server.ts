@@ -657,6 +657,10 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
       platform: options.platform ?? process.platform,
     },
     token,
+    // The ban endpoint reads the control plane's account store, so an account
+    // ban reaches every installation signed into it, not just a fingerprint.
+    legal:
+      enterprise === undefined ? undefined : (input) => enterprise.store.legalDecision(input),
     auditPublicAuthentication: (request) => {
       if (auditFailed) return false
       try {

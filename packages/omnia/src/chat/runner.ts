@@ -14,6 +14,7 @@ import {
   type OpenCodeRunnerConfig,
   type SessionSummary,
 } from "../agent-run/client"
+import { openCodeCliRunnerFromEnv, runHeadlessCli, type CliRunnerConfig } from "../agent-run/cli"
 import { runHeadless, type HeadlessRunInput } from "../agent-run/runner"
 import { readAttachments, type ChatFiles } from "./attachments"
 import type { AgentRunner, ChatMessage, ChatTrace } from "./service"
@@ -159,6 +160,7 @@ export interface ChatAgentRunnerOptions {
   readonly list?: typeof listSessions
   readonly models?: typeof listModels
   readonly model?: () => { providerID: string; modelID: string } | undefined
+  readonly cli?: () => CliRunnerConfig | undefined
 }
 
 interface ActiveTurn {
@@ -171,6 +173,10 @@ export function createChatAgentRunner(options: ChatAgentRunnerOptions): AgentRun
   const list = options.list ?? listSessions
   const find = options.models ?? listModels
   const model = options.model ?? chatModel
+  // A free model is only reachable through the official client, so an install
+  // that names one runs the CLI for its turns and keeps the server for the
+  // conversation commands (models, sessions) it still answers from.
+  const cli = (options.cli ?? openCodeCliRunnerFromEnv)()
   // Turns in flight, per conversation. A platform delivers a message without
   // waiting for the previous answer, so !stop arrives while the turn it means
   // is still running and has to find it here.
@@ -265,15 +271,16 @@ export function createChatAgentRunner(options: ChatAgentRunnerOptions): AgentRun
       signal: turn.controller.signal,
       ...(onProgress === undefined ? {} : { onProgress }),
     }
+    const execute = (input: HeadlessRunInput) => (cli === undefined ? run(config, input) : runHeadlessCli(cli, input))
     let result: Awaited<ReturnType<typeof runHeadless>>
     try {
-      result = await run(config, { ...request(message, bound, key, attached), ...live })
+      result = await execute({ ...request(message, bound, key, attached), ...live })
     } catch (error) {
       // A bound session that was deleted or archived answers 404. The binding is
       // stale, not the channel: forget it and open a fresh session once.
       if (bound !== undefined && isMissingSession(error)) {
         options.sessions.clear(key)
-        const retry = await run(config, { ...request(message, undefined, key, attached), ...live })
+        const retry = await execute({ ...request(message, undefined, key, attached), ...live })
         if (retry.ok) options.sessions.bind(key, retry.sessionId)
         return reply(retry)
       }

@@ -23,6 +23,7 @@ import type {
 } from "./types"
 import type { PromptInputV2Interaction, PromptInputV2SelectControl } from "./interaction"
 import { PromptInputV2Paywall, PromptInputV2ShellPaywall, promptInputV2VisionOwed, type PromptInputV2Paywalls } from "./paywall"
+import { PromptInputV2VariantSlider } from "./variant-slider"
 import "./attachments.css"
 
 export type {
@@ -285,10 +286,14 @@ export function PromptInputV2(props: PromptInputV2Props) {
             <Show when={(props.variantControlVisible ?? true) && view.variant} keyed>
               {(control) => (
                 <Show when={control.options().length > 1}>
-                  <PromptInputV2ConfiguredSelect
+                  {/* Effort is a small set of named steps, so it reads better as
+                      a slider than as a menu that has to be opened first. */}
+                  <PromptInputV2VariantSlider
                     title={i18n.t("ui.promptInput.chooseVariant")}
                     keybind={["Shift", "Mod", "D"]}
-                    control={control}
+                    options={control.options()}
+                    current={control.current()}
+                    onSelect={control.onSelect}
                   />
                 </Show>
               )}

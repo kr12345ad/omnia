@@ -126,6 +126,67 @@ describe("chat channel account binding", () => {
     expect(restored.describeOne("slack")?.error).toBeUndefined()
   })
 
+  test("a process with no account does not hold a channel bound elsewhere", () => {
+    const file = storeFile()
+    runtime(file, OWNER).connect("slack", { botToken: "xoxb-token" })
+
+    // Installs share the channel file by path, so a server nobody signed into
+    // would otherwise connect the bot and answer every message with the pause
+    // notice while the owner's process is connected too.
+    const signedOut = runtime(file, undefined)
+    const started: string[] = []
+    signedOut.setTransportFactory(({ platform }) => {
+      started.push(platform)
+      return { start: () => {}, stop: () => {}, send: () => {} }
+    })
+
+    expect(started).toEqual([])
+    // The reason still lands where the settings panel shows it.
+    expect(signedOut.describeOne("slack")?.error).toContain("no Omnia account is signed in")
+  })
+
+  test("the transport starts once its owner signs in", () => {
+    const file = storeFile()
+    runtime(file, OWNER).connect("slack", { botToken: "xoxb-token" })
+
+    let profile: typeof OWNER | typeof OTHER | undefined
+    const channels = new ChatChannelsRuntime({ file, secret: "server-token" })
+    channels.setIdentity(() => profile)
+    const started: string[] = []
+    channels.setTransportFactory(({ platform }) => {
+      started.push(platform)
+      return { start: () => {}, stop: () => {}, send: () => {} }
+    })
+    expect(started).toEqual([])
+
+    profile = OWNER
+    channels.sync()
+    expect(started).toEqual(["slack"])
+  })
+
+  test("an install that signed out keeps answering with the reason", async () => {
+    const file = storeFile()
+    const owner = runtime(file, OWNER)
+    owner.connect("slack", { botToken: "xoxb-token" })
+
+    let profile: typeof OWNER | undefined = OWNER
+    owner.setIdentity(() => profile)
+    const started: string[] = []
+    owner.setTransportFactory(({ platform }) => {
+      started.push(platform)
+      return { start: () => {}, stop: () => {}, send: () => {} }
+    })
+    expect(started).toEqual(["slack"])
+
+    // Signing out is this install's own doing, so the connection stays and the
+    // channel says why instead of going quiet. Another install that never had
+    // an account never got this far.
+    profile = undefined
+    owner.sync()
+    expect(started).toEqual(["slack"])
+    expect((await owner.answer(message)).reply).toContain("no Omnia account is signed in")
+  })
+
   test("another account cannot reconnect or remove an owned channel", () => {
     const file = storeFile()
     runtime(file, OWNER).connect("slack", { botToken: "xoxb-token" })

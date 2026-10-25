@@ -1,4 +1,5 @@
 export * from "./client.js"
+export * from "./cli.js"
 export * from "./runner.js"
 export * from "./store.js"
 export * from "./scheduler.js"

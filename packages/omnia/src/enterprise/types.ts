@@ -204,10 +204,13 @@ export interface Branding {
 export function absoluteBranding(baseUrl: string, branding: Branding): Branding {
   const base = baseUrl.replace(/\/+$/, "")
   const asset = (value: string | undefined) => {
-    if (value === undefined) return undefined
-    if (value.startsWith("/")) return base.length === 0 ? value : `${base}${value}`
-    if (!URL.canParse(value)) return value
-    const url = new URL(value)
+    const text = value?.trim()
+    // A blank field means "no asset". Keeping it would ship an empty URL that a
+    // client resolves against its own origin and then fails to load.
+    if (text === undefined || text.length === 0) return undefined
+    if (text.startsWith("/")) return base.length === 0 ? text : `${base}${text}`
+    if (!URL.canParse(text)) return text
+    const url = new URL(text)
     // Uploads are stored under the console's configured address, which can be
     // loopback while a LAN client reached the same server elsewhere.
     if (!url.pathname.startsWith("/v1/enterprise/public/assets/")) return value
@@ -599,6 +602,9 @@ export type AuditAction =
   | "scim.user_created"
   | "scim.user_updated"
   | "export.downloaded"
+  | "legal.ban_applied"
+  | "legal.ban_lifted"
+  | "legal.login_blocked"
 
 export interface AuditEvent {
   readonly id: string
@@ -628,6 +634,34 @@ export interface UsageEvent {
   distributionId?: string
 }
 
+export type LegalBanKind = "account" | "installation"
+
+/**
+ * One Terms of Service ban, kept next to the accounts it applies to.
+ *
+ * A ban is never deleted: lifting it records who lifted it and when, so an
+ * appeal can be answered from the same record that enforced it. An account ban
+ * applies to every installation signed into that email, which is what makes it
+ * survive a reinstall on the same machine and a fresh machine alike.
+ */
+export interface LegalBan {
+  readonly id: string
+  readonly kind: LegalBanKind
+  /** A lowercased email for `account`, a lowercased fingerprint for `installation`. */
+  readonly value: string
+  readonly reason: string
+  readonly bannedAt: number
+  readonly createdBy: string
+  liftedAt?: number
+  liftedBy?: string
+}
+
+export interface LegalDecision {
+  readonly banned: boolean
+  readonly reason?: string
+  readonly bannedAt?: number
+}
+
 export interface EnterpriseState {
   version: typeof ENTERPRISE_STATE_VERSION
   organization: OrganizationSettings
@@ -640,6 +674,8 @@ export interface EnterpriseState {
   releases: ClientRelease[]
   audit: AuditEvent[]
   usage: UsageEvent[]
+  /** Active and lifted bans; older files have no field and read as none. */
+  legalBans?: LegalBan[]
   /** Operators set this once during `init`; it is cleared after setup. */
   bootstrapTokenHash?: string
   bootstrapExpiresAt?: number
@@ -772,7 +808,9 @@ export function defaultDistribution(slug: string, name: string, now: number): Cl
       cloudVision: true,
       liveView: true,
       scheduledRuns: true,
-      chatChannels: true,
+      // Chat channels stay off until the admin opts in: the surface is a set of
+      // connected workspaces, not something a build should ship silently.
+      chatChannels: false,
       memory: true,
       superskills: true,
       subagents: true,

@@ -73,6 +73,14 @@ plugin({
 // route helpers; a stub carrying only the hook it replaces breaks them.
 const [os, setOS] = createSignal<"macos" | "windows" | "linux" | undefined>("macos")
 const [collapsed, setCollapsed] = createSignal(false)
+// The admin's policy, read through the same accessors the column uses: a surface
+// the console never granted, and the mark the console configured.
+const [granted, setGranted] = createSignal<Record<string, boolean>>({})
+const [branding, setBranding] = createSignal<{ productName?: string; iconUrl?: string } | undefined>()
+
+mock.module("@/context/enterprise", () => ({
+  useEnterprise: () => ({ granted: (name: string) => granted()[name] === true, branding }),
+}))
 
 mock.module("@/context/platform", () => ({
   usePlatform: () => ({
@@ -171,6 +179,8 @@ function labels(container: HTMLElement) {
 
 afterEach(() => {
   cleanups.splice(0).forEach((cleanup) => cleanup())
+  setGranted({})
+  setBranding(undefined)
 })
 
 describe("shell sidebar toggle", () => {
@@ -203,6 +213,7 @@ describe("shell sidebar toggle", () => {
 describe("shell sidebar footer", () => {
   test("offers Settings, Chat Channels and Help, and Chat Channels opens its own page", async () => {
     setOS("windows")
+    setGranted({ chatChannels: true })
     const container = await mount()
     const footer = container.querySelector<HTMLElement>('[data-slot="shell-sidebar-footer"]')
     expect(footer).not.toBeNull()
@@ -222,5 +233,38 @@ describe("shell sidebar footer", () => {
     rows[1]!.click()
     await settle()
     expect(openedSettings).toEqual(["chat-channels"])
+  })
+
+  test("hides Chat Channels when the admin never granted it", async () => {
+    setOS("windows")
+    setGranted({})
+    const container = await mount()
+    const footer = container.querySelector<HTMLElement>('[data-slot="shell-sidebar-footer"]')!
+    expect(labels(container)).not.toContain(en["settings.chatChannels.title"])
+    expect([...footer.querySelectorAll('[data-slot="shell-sidebar-action"]')].map((row) => row.getAttribute("aria-label"))).toEqual([
+      en["sidebar.settings"],
+      en["sidebar.help"],
+    ])
+  })
+})
+
+describe("shell sidebar brand", () => {
+  test("draws the admin's icon in place of the wordmark", async () => {
+    setOS("windows")
+    setBranding({ productName: "Acme Field", iconUrl: "https://acme.test/icon.png" })
+    const container = await mount()
+    const brand = container.querySelector<HTMLElement>('[data-slot="shell-sidebar-brand"]')!
+    const image = brand.querySelector("img")
+    expect(image?.getAttribute("src")).toBe("https://acme.test/icon.png")
+    expect(image?.getAttribute("alt")).toBe("Acme Field")
+  })
+
+  test("keeps the shipped wordmark when the build has no mark", async () => {
+    setOS("windows")
+    setBranding(undefined)
+    const container = await mount()
+    const brand = container.querySelector<HTMLElement>('[data-slot="shell-sidebar-brand"]')!
+    expect(brand.querySelector("img")).toBeNull()
+    expect(brand.innerHTML).toContain("svg")
   })
 })

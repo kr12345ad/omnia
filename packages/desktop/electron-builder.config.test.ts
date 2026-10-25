@@ -11,23 +11,39 @@ const channels = [
   { channel: "prod", appId: "io.omnia.desktop" },
 ] as const
 
+// A beta artifact carries its own update feed, so the config refuses to build
+// one without OMNIA_UPDATE_URL. Tests that read the beta config supply a
+// throwaway feed instead of depending on an operator's environment.
+function withUpdateFeed(): () => void {
+  const previous = process.env.OMNIA_UPDATE_URL
+  process.env.OMNIA_UPDATE_URL = "https://updates.example.test/omnia"
+  return () => {
+    if (previous === undefined) delete process.env.OMNIA_UPDATE_URL
+    else process.env.OMNIA_UPDATE_URL = previous
+  }
+}
+
 for (const channel of channels) {
   test(`uses one Linux desktop identity for ${channel.channel}`, async () => {
     const previous = process.env.OPENCODE_CHANNEL
     process.env.OPENCODE_CHANNEL = channel.channel
+    const restoreFeed = withUpdateFeed()
 
-    const module = await import(`./electron-builder.config.ts?channel=${channel.channel}`)
-    const config = module.default as Configuration
+    try {
+      const module = await import(`./electron-builder.config.ts?channel=${channel.channel}`)
+      const config = module.default as Configuration
 
-    if (previous === undefined) delete process.env.OPENCODE_CHANNEL
-    else process.env.OPENCODE_CHANNEL = previous
-
-    expect(config.appId).toBe(channel.appId)
-    expect(config.extraMetadata?.desktopName).toBe(`${channel.appId}.desktop`)
-    expect(config.linux?.executableName).toBe(channel.appId)
-    expect(config.linux?.desktop?.entry?.StartupWMClass).toBe(channel.appId)
-    expect(config.deb?.fpm).toContainEqual(expect.stringContaining(`/usr/share/metainfo/${channel.appId}.metainfo.xml`))
-    expect(config.rpm?.fpm).toContainEqual(expect.stringContaining(`/usr/share/metainfo/${channel.appId}.metainfo.xml`))
+      expect(config.appId).toBe(channel.appId)
+      expect(config.extraMetadata?.desktopName).toBe(`${channel.appId}.desktop`)
+      expect(config.linux?.executableName).toBe(channel.appId)
+      expect(config.linux?.desktop?.entry?.StartupWMClass).toBe(channel.appId)
+      expect(config.deb?.fpm).toContainEqual(expect.stringContaining(`/usr/share/metainfo/${channel.appId}.metainfo.xml`))
+      expect(config.rpm?.fpm).toContainEqual(expect.stringContaining(`/usr/share/metainfo/${channel.appId}.metainfo.xml`))
+    } finally {
+      restoreFeed()
+      if (previous === undefined) delete process.env.OPENCODE_CHANNEL
+      else process.env.OPENCODE_CHANNEL = previous
+    }
   })
 }
 
@@ -51,8 +67,10 @@ for (const channel of ["beta", "prod"] as const) {
   test(`does not bundle the CLI in ${channel} builds`, async () => {
     const previous = process.env.OPENCODE_CHANNEL
     process.env.OPENCODE_CHANNEL = channel
+    const restoreFeed = withUpdateFeed()
     const module = await import(`./electron-builder.config.ts?no-cli-resource=${channel}`)
     const config = module.default as Configuration
+    restoreFeed()
     if (previous === undefined) delete process.env.OPENCODE_CHANNEL
     else process.env.OPENCODE_CHANNEL = previous
 
@@ -88,10 +106,12 @@ const packaging = async (raw: string | undefined, cacheKey: string) => {
   const previous = process.env.OPENCODE_CHANNEL
   if (raw === undefined) delete process.env.OPENCODE_CHANNEL
   else process.env.OPENCODE_CHANNEL = raw
+  const restoreFeed = withUpdateFeed()
   try {
     const module = await import(`./electron-builder.config.ts?${cacheKey}`)
     return module.default as Configuration
   } finally {
+    restoreFeed()
     if (previous === undefined) delete process.env.OPENCODE_CHANNEL
     else process.env.OPENCODE_CHANNEL = previous
   }

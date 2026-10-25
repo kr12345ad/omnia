@@ -37,7 +37,7 @@ export const DialogSettings: Component<{
   // A managed client only offers the surfaces its distribution enables.
   const enterprise = useEnterprise()
   const visible = (value: string) => {
-    if (value === "chat-channels") return enterprise.feature("chatChannels")
+    if (value === "chat-channels") return enterprise.granted("chatChannels")
     if (value === "superskills") return enterprise.feature("superskills")
     if (value === "marketplace") return enterprise.feature("mcpMarketplace")
     if (value === "memory") return enterprise.feature("memory")

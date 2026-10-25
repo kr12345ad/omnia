@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { ModelSummary, OpenCodeRunnerConfig, SessionSummary } from "../agent-run/client"
@@ -26,6 +26,7 @@ function harness(
   listed: SessionSummary[] = [],
   catalog: ModelSummary[] = [],
   model?: () => { providerID: string; modelID: string } | undefined,
+  cli?: () => { bin: string } | undefined,
 ) {
   const { sessions, cleanup } = setup()
   const inputs: HeadlessRunInput[] = []
@@ -39,6 +40,7 @@ function harness(
     list: async () => listed,
     models: async () => catalog,
     ...(model === undefined ? {} : { model }),
+    ...(cli === undefined ? {} : { cli }),
   })
   return { sessions, inputs, runner, cleanup }
 }
@@ -155,6 +157,36 @@ describe("chat session continuity", () => {
       expect(inputs[2]?.sessionId).toBe("ses_1")
     } finally {
       cleanup()
+    }
+  })
+
+  test("a configured official client runs the turn and keeps the session it opens", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "omnia-chat-cli-"))
+    const bin = join(dir, "opencode")
+    writeFileSync(
+      bin,
+      `#!/usr/bin/env bun
+console.log(JSON.stringify({ type: "text", sessionID: "ses_cli1", part: { id: "p1", messageID: "m1", type: "text", text: "answered by the client" } }))\n`,
+    )
+    chmodSync(bin, 0o755)
+    // A free model is only reachable through the official client, so the server
+    // path must not be touched at all while one is configured.
+    const { runner, inputs, sessions, cleanup } = harness(
+      () => {
+        throw new Error("the paired server must not be used for this turn")
+      },
+      [],
+      [],
+      undefined,
+      () => ({ bin }),
+    )
+    try {
+      expect(await runner(message("hello"))).toBe("answered by the client")
+      expect(inputs).toHaveLength(0)
+      expect(sessions.get("discord:C1")).toBe("ses_cli1")
+    } finally {
+      cleanup()
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 

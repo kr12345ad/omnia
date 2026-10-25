@@ -1,8 +1,9 @@
-import { Show, createResource, createSignal, type JSX } from "solid-js"
+import { Show, createEffect, createResource, createSignal, type JSX } from "solid-js"
 import { Icon } from "@opencode-ai/ui/icon"
 import { Mark } from "@opencode-ai/ui/logo"
 import { api } from "@/lib/api"
 import { navigate, routeQuery } from "@/lib/router"
+import { setFavicon } from "@/lib/favicon"
 import { useSession } from "@/state"
 import { Button, Field, Input, InlineNote, Tag } from "@/components/ui"
 import type { PublicConfig } from "@/types"
@@ -16,6 +17,9 @@ function AuthFrame(props: {
   footer?: JSX.Element
 }) {
   const name = () => props.config?.organization.name ?? "Omnia Enterprise"
+  // Before sign-in there is no session, so the public config supplies the tab
+  // mark; signing in hands the same job to the shell.
+  createEffect(() => setFavicon(props.config?.branding.iconUrl || props.config?.branding.logoUrl))
   return (
     <div class="ent-auth">
       <aside class="ent-auth-aside">
@@ -70,13 +74,15 @@ function AuthFrame(props: {
       </aside>
       <main class="ent-auth-main">
         <div class="ent-auth-card">
-          <Show when={props.config?.branding.logoUrl}>
+          <Show
+            when={props.config?.branding.logoUrl || props.config?.branding.iconUrl}
+            fallback={
+              <span class="ent-brand-mark ent-auth-card-mark">
+                <Mark square class="ent-brand-glyph" />
+              </span>
+            }
+          >
             {(url) => <img src={url()} alt="" style={{ height: "30px", "object-fit": "contain" }} />}
-          </Show>
-          <Show when={!props.config?.branding.logoUrl}>
-            <span class="ent-brand-mark ent-auth-card-mark">
-              <Mark square class="ent-brand-glyph" />
-            </span>
           </Show>
           <h1>{props.title}</h1>
           <p>{props.subtitle}</p>

@@ -103,6 +103,10 @@ Usage:
   omnia-server license status            Show plan, trial and license state
   omnia-server license inspect <file>    Verify a license without installing it
   omnia-server license activate <file>   Install a signed license
+  omnia-server ban --email <address> --reason <text>  Ban an account on every install
+  omnia-server ban --fingerprint <id> --reason <text> Ban one installation
+  omnia-server unban --email <address>   Lift an account ban (also --fingerprint)
+  omnia-server bans                      List bans, including lifted ones
   omnia-server version                   Print the version
 
 Options:
@@ -1859,6 +1863,86 @@ function usageCommand(parsed: Parsed): number {
   }
 }
 
+/** The subject of a ban command, from whichever identifier the operator gave. */
+function legalSubject(parsed: Parsed): { kind: "account" | "installation"; value: string } | undefined {
+  const email = flag(parsed, "email")
+  const fingerprint = flag(parsed, "fingerprint")
+  if (email !== undefined && fingerprint !== undefined) return undefined
+  if (email !== undefined) return { kind: "account", value: email }
+  if (fingerprint !== undefined) return { kind: "installation", value: fingerprint }
+  return undefined
+}
+
+export function banCommand(parsed: Parsed): number {
+  try {
+    const subject = legalSubject(parsed)
+    const reason = flag(parsed, "reason")?.trim()
+    if (subject === undefined) {
+      console.error("Usage: omnia-server ban --email <address> --reason <text>\n       omnia-server ban --fingerprint <id> --reason <text>")
+      return 2
+    }
+    if (reason === undefined || reason.length === 0) {
+      console.error("A ban needs --reason <text>: the text is shown on the banned installation.")
+      return 2
+    }
+    const { store } = openCliStore(parsed)
+    printJson(store.banLegalSubject({ ...subject, reason, createdBy: "cli" }))
+    return 0
+  } catch (error) {
+    return report(error)
+  }
+}
+
+export function unbanCommand(parsed: Parsed): number {
+  try {
+    const subject = legalSubject(parsed)
+    if (subject === undefined) {
+      console.error("Usage: omnia-server unban --email <address>\n       omnia-server unban --fingerprint <id>")
+      return 2
+    }
+    const { store } = openCliStore(parsed)
+    const lifted = store.liftLegalBan({ ...subject, liftedBy: "cli" })
+    if (lifted === undefined) {
+      console.log("No active ban matches that subject.")
+      return 1
+    }
+    printJson(lifted)
+    return 0
+  } catch (error) {
+    return report(error)
+  }
+}
+
+export function bansCommand(parsed: Parsed): number {
+  try {
+    const { store } = openCliStore(parsed)
+    const bans = store.legalBans().toSorted((left, right) => right.bannedAt - left.bannedAt)
+    const active = bans.filter((ban) => ban.liftedAt === undefined)
+    if (bool(parsed, "json")) {
+      printJson({ active: active.length, bans })
+      return 0
+    }
+    if (bans.length === 0) {
+      console.log("No bans recorded.")
+      return 0
+    }
+    table(
+      ["SUBJECT", "KIND", "REASON", "APPLIED", "LIFTED"],
+      bans.map((ban) => [
+        ban.value,
+        ban.kind,
+        ban.reason,
+        iso(ban.bannedAt),
+        ban.liftedAt === undefined ? "-" : iso(ban.liftedAt),
+      ]),
+    )
+    console.log(`\n${active.length} active of ${bans.length} recorded`)
+    return 0
+  } catch (error) {
+    return report(error)
+  }
+}
+
 export async function statusCommand(parsed: Parsed): Promise<number> {
   const home = homeDir(parsed)
   const runtime = readRuntime(home)
@@ -1968,6 +2052,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       return tokenCommand(parsed)
     case "license":
       return licenseCommand(parsed)
+    case "ban":
+      return banCommand(parsed)
+    case "unban":
+      return unbanCommand(parsed)
+    case "bans":
+      return bansCommand(parsed)
     case "status":
       return statusCommand(parsed)
     case "stop":

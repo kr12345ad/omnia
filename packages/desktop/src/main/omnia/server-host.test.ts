@@ -1,12 +1,14 @@
 import { plugin } from "bun"
 import { describe, expect, test } from "bun:test"
+import { fakeElectron as sharedElectron } from "../../../test-support/electron"
 
 // server-host.ts imports Electron main-process modules that only exist inside
-// a running app. Substitute the narrow surface the factory touches, then import
-// the module dynamically (same pattern as browser-view.test.ts).
+// a running app. The shared substitution supplies the whole surface, so a
+// module that binds this registration still finds every member it expects;
+// this suite only pins the app path the factory reads.
 const fakeElectron = {
-  app: { isPackaged: false, getAppPath: () => ".", getPath: () => "." },
-  systemPreferences: { isTrustedAccessibilityClient: () => false },
+  ...sharedElectron,
+  app: { ...sharedElectron.app, getAppPath: () => "." },
 }
 
 plugin({

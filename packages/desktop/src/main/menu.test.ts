@@ -6,15 +6,19 @@ import {
   DESKTOP_NATIVE_ENGLISH,
   type DesktopNativeKey,
 } from "@opencode-ai/app/i18n/desktop-native"
+import { fakeElectron as sharedElectron } from "../../test-support/electron"
 
 // Keep the shared menu and native translations real; substitute the Electron
 // boundary and browser opener so choosing a menu item cannot launch anything.
 type Item = MenuItemConstructorOptions
 const installed: Item[][] = []
 const trigger = mock((_id: string) => undefined)
+// The shared substitution supplies every other Electron member, so a module
+// that binds this registration still finds app paths, safe storage, and the
+// handler record. Only the menu surface is this suite's.
 const electron = {
-  app: { isPackaged: false },
-  BrowserWindow: { getFocusedWindow: () => undefined },
+  ...sharedElectron,
+  app: { ...sharedElectron.app, isPackaged: false },
   Menu: {
     buildFromTemplate: (template: Item[]) => ({ template }),
     setApplicationMenu: (menu: { template: Item[] }) => installed.push(menu.template),

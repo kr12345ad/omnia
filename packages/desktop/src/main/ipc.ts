@@ -35,6 +35,7 @@ import { registerChatIpcHandlers } from "./omnia/chat"
 import { registerComputerUseIpcHandlers } from "./omnia/computer-use"
 import { registerRemoteAgentIpcHandlers } from "./omnia/remote-agent"
 import { registerUsageReportIpcHandlers } from "./omnia/usage-report"
+import type { LegalController } from "./legal"
 
 const pickerFilters = (ext?: string[]) => {
   if (!ext || ext.length === 0) return undefined
@@ -73,6 +74,8 @@ type Deps = {
   exportDebugLogs: () => Promise<string>
   recordFatalRendererError: (error: FatalRendererError) => Promise<void> | void
   setNativeTranslations: (bundle: DesktopNativeBundle) => void
+  legal?: LegalController
+  quit?: () => void
 }
 
 export function registerIpcHandlers(deps: Deps) {
@@ -87,6 +90,21 @@ export function registerIpcHandlers(deps: Deps) {
   registerComputerUseIpcHandlers()
   registerRemoteAgentIpcHandlers()
   registerUsageReportIpcHandlers()
+  const legal = deps.legal
+  if (legal !== undefined) {
+    ipcMain.handle("legal-status", () => legal.status())
+    ipcMain.handle("legal-accept-terms", (_event: IpcMainInvokeEvent, version: string) => legal.accept(version))
+    ipcMain.handle("legal-refresh", async () => {
+      const result = await legal.refresh()
+      // The session database only exists again after a successful restore, so the
+      // server has to start fresh; relaunching is the simplest correct order.
+      if (result.restored) deps.relaunch()
+      return result.status
+    })
+    ipcMain.handle("legal-decline", () => {
+      deps.quit?.()
+    })
+  }
   const drafts = createDesktopDraftStore(join(app.getPath("userData"), "drafts.sqlite"))
   const updaterSubscriptions = createUpdaterSubscriptions()
   app.once("will-quit", updaterSubscriptions.clear)

@@ -1,0 +1,80 @@
+/* A compact effort slider that replaces the variant dropdown: a small rail with
+   one tick per named level and a thumb that snaps to the nearest tick. */
+[data-component="prompt-variant-slider"] {
+  color: var(--v2-text-text-muted);
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+[data-component="prompt-variant-slider"]:hover,
+[data-component="prompt-variant-slider"]:focus-within {
+  background-color: var(--v2-overlay-simple-overlay-hover);
+  color: var(--v2-text-text-base);
+}
+
+[data-component="prompt-variant-slider"] [data-slot="variant-rail"] {
+  background-color: var(--v2-border-border-base);
+}
+
+[data-component="prompt-variant-slider"] [data-slot="variant-fill"] {
+  background-color: var(--v2-background-bg-accent);
+  transition: width 90ms ease-out;
+}
+
+[data-component="prompt-variant-slider"][data-dragging] [data-slot="variant-fill"] {
+  transition: none;
+}
+
+[data-component="prompt-variant-slider"] [data-slot="variant-stop"] {
+  background-color: var(--v2-border-border-strong);
+  transition: background-color 90ms ease;
+}
+
+[data-component="prompt-variant-slider"] [data-slot="variant-stop"][data-current] {
+  background-color: var(--v2-background-bg-accent);
+}
+
+[data-component="prompt-variant-slider"] [data-slot="variant-stop"] {
+  transform: translateX(-50%);
+}
+
+[data-component="prompt-variant-slider"] [data-slot="variant-thumb"] {
+  background-color: var(--v2-background-bg-accent);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.28);
+  transform: translateX(-50%);
+  transition:
+    inset-inline-start 90ms ease-out,
+    transform 120ms ease;
+}
+
+/* The rail is laid out from the inline start, so a mirrored thumb is centred
+   from the other side. */
+[dir="rtl"] [data-component="prompt-variant-slider"] [data-slot="variant-stop"],
+[dir="rtl"] [data-component="prompt-variant-slider"] [data-slot="variant-thumb"] {
+  transform: translateX(50%);
+}
+
+[data-component="prompt-variant-slider"][data-dragging] [data-slot="variant-thumb"] {
+  transform: translateX(-50%) scale(1.18);
+  transition: transform 120ms ease;
+}
+
+[dir="rtl"] [data-component="prompt-variant-slider"][data-dragging] [data-slot="variant-thumb"] {
+  transform: translateX(50%) scale(1.18);
+}
+
+[data-component="prompt-variant-slider"] [role="slider"]:focus-visible [data-slot="variant-thumb"] {
+  box-shadow:
+    0 0 0 2px var(--v2-background-bg-base),
+    0 0 0 3.5px var(--v2-border-border-focus);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-component="prompt-variant-slider"],
+  [data-component="prompt-variant-slider"] [data-slot="variant-fill"],
+  [data-component="prompt-variant-slider"] [data-slot="variant-thumb"],
+  [data-component="prompt-variant-slider"] [data-slot="variant-stop"] {
+    transition: none;
+  }
+}
