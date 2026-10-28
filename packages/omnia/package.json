@@ -19,6 +19,7 @@
     "typecheck": "tsgo --noEmit",
     "test": "bun test",
     "test:computer-use": "bun test src/computer-use/live-harness/ src/computer-use/",
+    "test:input-freeze": "bun test src/server/input-freeze.test.ts",
     "standalone": "bun ./src/server/standalone.ts",
     "enterprise": "bun ./src/server/cli.ts",
     "build:server": "bun build ./src/server/cli.ts --compile --outfile ./dist/omnia-server",

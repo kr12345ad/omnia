@@ -1220,6 +1220,54 @@ describe("browser image verification", () => {
     expect(JSON.stringify(outcome.result.metadata)).toContain("f.txt")
   })
 
+  test("browser_downloads only reports records attributed to tabs this session owns", async () => {
+    const { browser } = browserHarness({
+      downloads: async () => [
+        {
+          id: "owned",
+          url: "https://example.com/owned.txt",
+          filename: "owned.txt",
+          path: "/home/user/Downloads/omnia/owned.txt",
+          state: "completed",
+          receivedBytes: 10,
+          totalBytes: 10,
+          startedAt: 1,
+          finishedAt: 2,
+          tabId: "tab-2",
+        },
+        {
+          id: "foreign",
+          url: "https://example.com/foreign.txt",
+          filename: "foreign.txt",
+          path: "/home/user/Downloads/omnia/foreign.txt",
+          state: "completed",
+          receivedBytes: 10,
+          totalBytes: 10,
+          startedAt: 1,
+          finishedAt: 2,
+          tabId: "tab-1",
+        },
+        {
+          id: "unattributed",
+          url: "https://example.com/unattributed.txt",
+          filename: "unattributed.txt",
+          path: "/home/user/Downloads/omnia/unattributed.txt",
+          state: "completed",
+          receivedBytes: 10,
+          totalBytes: 10,
+          startedAt: 1,
+          finishedAt: 2,
+        },
+      ],
+    })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
+    const outcome = await manager.execute("local", { action: "browser_downloads", sessionId: "s" })
+    expect(outcome.result.success).toBe(true)
+    expect(JSON.stringify(outcome.result.metadata)).toContain("owned.txt")
+    expect(JSON.stringify(outcome.result.metadata)).not.toContain("foreign.txt")
+    expect(JSON.stringify(outcome.result.metadata)).not.toContain("unattributed.txt")
+  })
+
   test("browser_downloads stays unverified while a download is progressing", async () => {
     const { browser } = browserHarness({
       downloads: async () => [
@@ -1261,6 +1309,38 @@ describe("browser image verification", () => {
     expect(answered).toEqual([{ username: "tomsmith", password: "SuperSecretPassword!" }])
     expect(outcome.result.verification?.status).toBe("verified")
     expect(outcome.result.verification?.method).toBe("browser-auth-readback")
+  })
+
+  test("browser_auth refuses a challenge raised on another session's tab", async () => {
+    const answered: string[] = []
+    let seenTabs: readonly string[] | undefined
+    const { browser } = browserHarness({
+      authRequired: async (tabIds) => {
+        seenTabs = tabIds
+        return {
+          url: "https://example.com",
+          host: "example.com",
+          realm: "R",
+          isProxy: false,
+          tabId: "tab-1",
+        }
+      },
+      answerAuth: async (input) => {
+        answered.push(input.username)
+        return { answered: true }
+      },
+    })
+    const { manager } = await createSessionManager(baseDriver(), { browser })
+    const outcome = await manager.execute("local", {
+      action: "browser_auth",
+      username: "u",
+      password: "p",
+      sessionId: "s",
+    })
+    expect(seenTabs).toEqual(["tab-2"])
+    expect(outcome.httpStatus).toBe(403)
+    expect(errorCode(outcome.result.error)).toBe("tab_not_owned")
+    expect(answered).toEqual([])
   })
 
   test("browser_auth fails closed when no challenge is pending or the host differs", async () => {

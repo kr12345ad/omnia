@@ -69,6 +69,17 @@ jobs:
         env:
           OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
 
+      # The input-grab suite is skipped without an X display. Run it under
+      # Xvfb on Linux so the real X11 path is exercised instead of silently
+      # disappearing from `bun turbo test`.
+      - name: Run X11 input-freeze integration tests
+        if: runner.os == 'Linux'
+        working-directory: packages/omnia
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libxtst6
+          xvfb-run -a bun run test:input-freeze
+
       - name: Check generated client
         if: runner.os == 'Linux'
         working-directory: packages/client

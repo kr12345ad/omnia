@@ -89,6 +89,7 @@ export interface BrowserDownload {
   readonly finishedAt?: number
   readonly mimeType?: string
   readonly error?: string
+  readonly tabId?: string
 }
 
 interface TrackedDownload {
@@ -103,6 +104,7 @@ interface TrackedDownload {
   finishedAt: number | undefined
   readonly mimeType: string | undefined
   error: string | undefined
+  readonly tabId: string | undefined
 }
 
 interface PendingAuthChallenge {
@@ -210,8 +212,11 @@ export class EmbeddedBrowserManager {
   private watching = false
   // Kept as a field so destroy() can remove exactly the listener watch() added.
   private readonly onWebContentsCreated = (_event: Electron.Event, contents: WebContents): void => this.prepare(contents)
-  private readonly onWillDownload = (_event: Electron.Event, item: Electron.DownloadItem): void =>
-    this.trackDownload(item)
+  private readonly onWillDownload = (
+    _event: Electron.Event,
+    item: Electron.DownloadItem,
+    contents: WebContents,
+  ): void => this.trackDownload(item, this.pageForContents(contents)?.id.toString())
   // Newest first, capped so a long-lived app cannot grow without bound.
   private readonly downloads: TrackedDownload[] = []
   // Per-webContents FIFO: a rejected credential produces another login event,
@@ -423,7 +428,17 @@ export class EmbeddedBrowserManager {
         ...(typeof params.expectedMessage === "string" ? { expectedMessage: params.expectedMessage } : {}),
       })
     }
-    if (method === "Omnia.downloads") return { downloads: this.downloads.map(downloadJson) }
+    if (method === "Omnia.downloads") {
+      const requested = Array.isArray(params.tabIds)
+        ? params.tabIds.filter((id): id is string => typeof id === "string" && id.length > 0)
+        : undefined
+      const allowed = requested === undefined ? undefined : new Set(requested)
+      return {
+        downloads: this.downloads
+          .filter((download) => allowed === undefined || (download.tabId !== undefined && allowed.has(download.tabId)))
+          .map(downloadJson),
+      }
+    }
     if (method === "Omnia.auth") {
       const username = typeof params.username === "string" ? params.username : undefined
       const password = typeof params.password === "string" ? params.password : undefined
@@ -575,7 +590,11 @@ export class EmbeddedBrowserManager {
   // Browser-initiated downloads land in the same downloads root the image
   // saver uses; the record is live-updated so Omnia.downloads always reports
   // the current state instead of a snapshot taken at start.
-  private trackDownload(item: Electron.DownloadItem): void {
+  private pageForContents(contents: WebContents): ManagedPage | undefined {
+    return [...this.pages.values()].find((candidate) => candidate.webContents === contents)
+  }
+
+  private trackDownload(item: Electron.DownloadItem, tabId: string | undefined): void {
     const directory = imageDownloadsDir()
     mkdirSync(directory, { recursive: true })
     const path = collisionSafeDownloadPath(directory, item.getFilename())
@@ -592,6 +611,7 @@ export class EmbeddedBrowserManager {
       finishedAt: undefined,
       mimeType: safeMimeType(item),
       error: undefined,
+      tabId,
     }
     this.downloads.unshift(record)
     if (this.downloads.length > MAX_TRACKED_DOWNLOADS) this.downloads.pop()
@@ -627,7 +647,7 @@ export class EmbeddedBrowserManager {
     authInfo: { host: string; realm?: string; isProxy?: boolean },
     callback: (username?: string, password?: string) => void,
   ): void {
-    const page = [...this.pages.values()].find((candidate) => candidate.webContents === contents)
+    const page = this.pageForContents(contents)
     if (page === undefined) {
       const queue = this.pendingAuthByContents.get(contents.id) ?? []
       if (queue.some((entry) => entry.host === authInfo.host && entry.realm === (authInfo.realm ?? ""))) {
@@ -667,6 +687,7 @@ export class EmbeddedBrowserManager {
       host: challenge.host,
       realm: challenge.realm,
       isProxy: challenge.isProxy,
+      tabId: page.id,
     })
   }
 
@@ -1096,6 +1117,7 @@ export class EmbeddedBrowserManager {
           host: challenge.host,
           realm: challenge.realm,
           isProxy: challenge.isProxy,
+          tabId: page.id,
         })
       }
     }
@@ -1456,6 +1478,7 @@ function downloadJson(record: TrackedDownload): BrowserDownload {
     ...(record.finishedAt === undefined ? {} : { finishedAt: record.finishedAt }),
     ...(record.mimeType === undefined ? {} : { mimeType: record.mimeType }),
     ...(record.error === undefined ? {} : { error: record.error }),
+    ...(record.tabId === undefined ? {} : { tabId: record.tabId }),
   }
 }
 

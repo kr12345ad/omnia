@@ -16,6 +16,14 @@ const generated = await import("./generate.ts")
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
 
+// A local build would report "0.0.0-dev-<stamp>" and the Console free tier
+// rejects clients older than 1.18.0, so preview versions use the workspace
+// package version in the binary while the UI keeps its seasonal version.
+const version =
+  Script.version.startsWith("0.0.0-") && typeof pkg.version === "string" && pkg.version.length > 0
+    ? pkg.version
+    : Script.version
+
 const singleFlag = process.argv.includes("--single")
 const baselineFlag = process.argv.includes("--baseline")
 const skipInstall = process.argv.includes("--skip-install")
@@ -191,7 +199,7 @@ for (const item of targets) {
     ],
     define: {
       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
-      OPENCODE_VERSION: `'${Script.version}'`,
+      OPENCODE_VERSION: `'${version}'`,
       OPENCODE_MODELS_DEV: generated.modelsData,
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + treeSitterWorkerPath,
       OPENCODE_WORKER_PATH: workerPath,
@@ -203,7 +211,8 @@ for (const item of targets) {
 
   // Smoke test: only run if binary is for current platform
   if (item.os === process.platform && item.arch === process.arch && !item.abi) {
-    const binaryPath = `dist/${name}/bin/opencode`
+    const compiled = `dist/${name}/bin/opencode`
+    const binaryPath = (await Bun.file(`${compiled}.exe`).exists()) ? `${compiled}.exe` : compiled
     console.log(`Running smoke test: ${binaryPath} --version`)
     try {
       const versionOutput = await $`${binaryPath} --version`.text()

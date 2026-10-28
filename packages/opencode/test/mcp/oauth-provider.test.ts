@@ -65,10 +65,7 @@ describe("MCP OAuth scope selection", () => {
   test("adds offline_access when the authorization server and client support refresh tokens", () => {
     expect(
       determineScope({
-        resourceMetadata: {
-          resource: "https://mcp.example.com/mcp",
-          scopes_supported: ["resource.read"],
-        },
+        resourceMetadata: { resource: "https://mcp.example.com/mcp", scopes_supported: ["resource.read"] },
         authServerMetadata: {
           issuer: "https://auth.example.com",
           authorization_endpoint: "https://auth.example.com/authorize",
@@ -84,10 +81,7 @@ describe("MCP OAuth scope selection", () => {
   test("does not add unsupported authorization server scopes", () => {
     expect(
       determineScope({
-        resourceMetadata: {
-          resource: "https://mcp.example.com/mcp",
-          scopes_supported: ["resource.read"],
-        },
+        resourceMetadata: { resource: "https://mcp.example.com/mcp", scopes_supported: ["resource.read"] },
         authServerMetadata: {
           issuer: "https://auth.example.com",
           authorization_endpoint: "https://auth.example.com/authorize",

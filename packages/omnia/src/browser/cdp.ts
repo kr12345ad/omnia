@@ -392,6 +392,8 @@ export interface BrowserDownload {
   readonly finishedAt?: number
   readonly mimeType?: string
   readonly error?: string
+  // The tab that initiated the download, when the guest is registered.
+  readonly tabId?: string
 }
 
 export interface CdpAuthChallenge {
@@ -399,6 +401,10 @@ export interface CdpAuthChallenge {
   readonly host: string
   readonly realm: string
   readonly isProxy: boolean
+  // The tab that is waiting for credentials. An unregistered guest has no tab
+  // id yet; the server treats that as unattributable and withholds it from
+  // sessions that own tabs.
+  readonly tabId?: string
 }
 
 export interface CdpRuntimeOptions {
@@ -1167,6 +1173,7 @@ export class CdpRuntime {
         host: typeof record.host === "string" ? record.host : "",
         realm: typeof record.realm === "string" ? record.realm : "",
         isProxy: record.isProxy === true,
+        ...(key === "default" ? {} : { tabId: key }),
       })
       // The challenge blocks the guest until it is answered, so the in-flight
       // navigation must fail now instead of stalling the whole remote agent.
@@ -2065,9 +2072,12 @@ export class CdpRuntime {
     }
   }
 
-  async downloads(): Promise<BrowserDownload[]> {
+  async downloads(tabIds?: readonly string[]): Promise<BrowserDownload[]> {
     await this.authorizeBrowserOperation()
-    const result = await this.send<{ downloads?: unknown }>("Omnia.downloads", {})
+    const result = await this.send<{ downloads?: unknown }>(
+      "Omnia.downloads",
+      tabIds === undefined ? {} : { tabIds: [...tabIds] },
+    )
     if (result === null || typeof result !== "object" || !Array.isArray(result.downloads)) {
       throw new CdpError("cdp_error", "The embedded browser returned an unexpected download list.")
     }
@@ -2078,18 +2088,26 @@ export class CdpRuntime {
   }
 
   // Pending challenges only arrive as Omnia.authRequired events; the bridge
-  // offers no query command, so an unseen challenge is reported as none.
-  async authRequired(): Promise<CdpAuthChallenge | null> {
-    const preferred = [...this.authChallenges.keys()].at(-1)
-    if (preferred === undefined) return null
-    const challenge = this.authChallenges.get(preferred)
+  // offers no query command, so an unseen challenge is reported as none. A
+  // caller that owns tabs passes their ids and never sees an unattributable
+  // guest challenge from another session.
+  async authRequired(tabIds?: readonly string[]): Promise<CdpAuthChallenge | null> {
+    const allowed = tabIds === undefined ? undefined : new Set(tabIds)
+    const key = [...this.authChallenges.keys()]
+      .filter((candidate) => candidate !== "default")
+      .filter((candidate) => allowed === undefined || allowed.has(candidate))
+      .at(-1)
+    if (key === undefined) return null
+    const challenge = this.authChallenges.get(key)
     return challenge === undefined ? null : { ...challenge }
   }
 
-  async answerAuth(input: { username: string; password: string }): Promise<{ answered: true }> {
+  async answerAuth(input: { username: string; password: string; tabId?: string }): Promise<{ answered: true }> {
     await this.authorizeBrowserOperation()
-    const preferred = [...this.authChallenges.keys()].at(-1)
-    const tabId = preferred === undefined || preferred === "default" ? undefined : preferred
+    const preferred = input.tabId ?? [...this.authChallenges.keys()].filter((key) => key !== "default").at(-1)
+    const tabId = preferred === undefined ? undefined : preferred
+    const challenge = preferred === undefined ? undefined : this.authChallenges.get(preferred)
+    if (challenge === undefined) throw new CdpError("no_auth_challenge", "No authentication challenge is pending for that tab.")
     const result = await this.send<{ answered?: unknown }>(
       "Omnia.auth",
       { ...(tabId === undefined ? {} : { tabId }), username: input.username, password: input.password },
@@ -2188,6 +2206,7 @@ function parseBrowserDownload(value: unknown): BrowserDownload | undefined {
     ...(typeof record.finishedAt === "number" ? { finishedAt: record.finishedAt } : {}),
     ...(typeof record.mimeType === "string" ? { mimeType: record.mimeType } : {}),
     ...(typeof record.error === "string" ? { error: record.error } : {}),
+    ...(typeof record.tabId === "string" && record.tabId.length > 0 ? { tabId: record.tabId } : {}),
   }
 }
 

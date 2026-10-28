@@ -24,11 +24,13 @@ export {
 export type { RemoteKeyPair, RemoteKeyStorage } from "./keys"
 export {
   REMOTE_KEY_ID_HEADER,
+  REMOTE_REGISTRATION_PATH,
   REMOTE_REPLAY_WINDOW_MS,
   REMOTE_SIGNATURE_HEADER,
   REMOTE_TIMESTAMP_HEADER,
   hashRemoteBody,
   remoteAuthHeaders,
+  remoteRegistrationBody,
   remoteRequestDigest,
   remoteRequestPath,
   signRemoteRequest,

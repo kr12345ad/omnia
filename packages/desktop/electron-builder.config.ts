@@ -88,6 +88,9 @@ const windowsPublisherName = process.env.OMNIA_WINDOWS_PUBLISHER_NAME?.trim()
 // Portable builds ship as a self-contained AppImage with no publish provider:
 // nothing phones home and the in-app updater is compiled out.
 const portable = process.env.OMNIA_NO_PUBLISH === "1"
+// Unsigned CI builds still need a valid .app; disable the release identity and
+// notarization explicitly instead of letting electron-builder guess.
+const skipMacSigning = process.env.OMNIA_SKIP_MAC_SIGNING === "1"
 // Lean by default: no model weights and only the CPU llama.cpp runtime. Set
 // OMNIA_INCLUDE_MODELS=1 or OMNIA_INCLUDE_ALL_LLAMA=1 for a full bundle.
 const includeModels = process.env.OMNIA_INCLUDE_MODELS === "1"
@@ -177,15 +180,13 @@ const getBase = (appId: string): Configuration => ({
   },
   files: ["out/**/*"],
   extraResources: [
-    ...(channel === "dev"
-      ? [
-          {
-            from: "resources/",
-            to: "",
-            filter: ["opencode-cli*"],
-          },
-        ]
-      : []),
+    // The desktop app runs its server through the bundled Bun CLI, so every
+    // channel must ship the matching binary outside app.asar.
+    {
+      from: "resources/",
+      to: "",
+      filter: ["opencode-cli*"],
+    },
     // The packaged runtime reads these from process.resourcesPath, so they must
     // stay outside app.asar (binaries cannot be executed from an asar archive).
     ...(existsSync(path.join(packageDir, "resources/icons")) ? [{ from: "resources/icons", to: "icons" }] : []),
@@ -223,11 +224,10 @@ const getBase = (appId: string): Configuration => ({
   mac: {
     category: "public.app-category.developer-tools",
     icon: `resources/icons/icon.icns`,
-    hardenedRuntime: true,
+    ...(skipMacSigning ? { identity: null, hardenedRuntime: false, notarize: false } : { hardenedRuntime: true, notarize: true }),
     gatekeeperAssess: false,
     entitlements: "resources/entitlements.plist",
     entitlementsInherit: "resources/entitlements.plist",
-    notarize: true,
     extendInfo: {
       NSAppleEventsUsageDescription:
         "Omnia uses Apple events to drive the accessibility fallbacks that control applications on your behalf.",
@@ -241,7 +241,7 @@ const getBase = (appId: string): Configuration => ({
     target: ["dmg", "zip"],
   },
   dmg: {
-    sign: true,
+    sign: !skipMacSigning,
   },
   protocols: {
     name: "Omnia",

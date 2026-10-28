@@ -1,4 +1,5 @@
-import { execFile } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
+import type { ChildProcess } from "node:child_process"
 import { existsSync } from "node:fs"
 import { chmod, copyFile, mkdir, rename, rm } from "node:fs/promises"
 import { dirname, join } from "node:path"
@@ -7,6 +8,7 @@ import { promisify } from "node:util"
 import { app } from "electron"
 import { migrateOmniaStorage } from "./omnia-storage"
 import { enterprisePermissionEnv, enterprisePermissions } from "./omnia/enterprise"
+import { createSidecarEnv } from "./server"
 
 const execFileAsync = promisify(execFile)
 const root = dirname(fileURLToPath(import.meta.url))
@@ -74,6 +76,72 @@ export async function startBackgroundCli(logger: Logger, _shellStateHome?: strin
     username: "opencode",
     password,
   }
+}
+
+// The bundled server runs on Bun. The gateway that serves free models rejects
+// requests from Node/Electron runtimes, so the desktop app must proxy through
+// the shipped binary instead of hosting the engine in its own process.
+export async function startBundledSidecar(
+  logger: Logger,
+  input: { hostname: string; port: number; password: string },
+) {
+  const bundled = app.isPackaged
+    ? join(process.resourcesPath, executableName())
+    : join(root, "../../resources", executableName())
+  logger.log("bundled CLI executable resolved", { bundled, packaged: app.isPackaged })
+  const version = await run(bundled, ["--version"], logger)
+  const binary = app.isPackaged ? await installCli(bundled, version, logger) : bundled
+  // Same environment the in-process sidecar received: it carries the control
+  // plane URL and client token the computer tools are gated on, so a plain
+  // process.env child would silently lose click/type/screenshot entirely.
+  const child = spawn(binary, ["serve", "--hostname", input.hostname, "--port", String(input.port)], {
+    env: {
+      ...createSidecarEnv(),
+      OPENCODE_SERVER_USERNAME: "opencode",
+      OPENCODE_SERVER_PASSWORD: input.password,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  })
+  const forward = (stream: "stdout" | "stderr") => (chunk: Buffer) => {
+    const text = chunk.toString().trim()
+    if (text.length > 0) logger.log(`bundled CLI ${stream}`, { text })
+  }
+  child.stdout?.on("data", forward("stdout"))
+  child.stderr?.on("data", forward("stderr"))
+  const url = `http://${input.hostname}:${input.port}`
+  return {
+    listener: {
+      stop: async () => {
+        if (child.exitCode !== null || child.signalCode !== null) return
+        child.kill("SIGTERM")
+        await Promise.race([
+          new Promise<void>((resolve) => child.once("exit", () => resolve())),
+          new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+        ])
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL")
+      },
+    },
+    health: { wait: waitForServer(logger, url, input.password, child) },
+    url,
+  }
+}
+
+async function waitForServer(logger: Logger, url: string, password: string, child: ChildProcess) {
+  const authorization = `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`
+  const deadline = Date.now() + 60_000
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null)
+      throw new Error(`bundled sidecar stopped before it was ready (exit ${child.exitCode ?? child.signalCode})`)
+    try {
+      await fetch(`${url}/global/health`, { headers: { authorization } })
+      return
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+  }
+  logger.error("bundled sidecar never answered", { url })
+  throw new Error("bundled sidecar never answered")
 }
 
 async function installCli(source: string, version: string, logger: Logger) {

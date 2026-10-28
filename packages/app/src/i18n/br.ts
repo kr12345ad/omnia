@@ -5,20 +5,10 @@ export const dict = {
 ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.sessions."))),
   // TODO(i18n): needs a native review
   ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("ui.onboarding."))),
-  "ui.onboarding.sessions.two": "{{count}} sessions", // TODO(i18n): needs a native review
-  "ui.onboarding.sessions.few": "{{count}} sessions", // TODO(i18n): needs a native review
   "ui.onboarding.sessions.many": "{{count}} sessions", // TODO(i18n): needs a native review
-  "ui.onboarding.messages.two": "{{count}} messages", // TODO(i18n): needs a native review
-  "ui.onboarding.messages.few": "{{count}} messages", // TODO(i18n): needs a native review
   "ui.onboarding.messages.many": "{{count}} messages", // TODO(i18n): needs a native review
-  "ui.onboarding.importedSessions.two": "Imported {{count}} sessions", // TODO(i18n): needs a native review
-  "ui.onboarding.importedSessions.few": "Imported {{count}} sessions", // TODO(i18n): needs a native review
   "ui.onboarding.importedSessions.many": "Imported {{count}} sessions", // TODO(i18n): needs a native review
-  "ui.onboarding.importedMessages.two": "Imported {{count}} messages", // TODO(i18n): needs a native review
-  "ui.onboarding.importedMessages.few": "Imported {{count}} messages", // TODO(i18n): needs a native review
   "ui.onboarding.importedMessages.many": "Imported {{count}} messages", // TODO(i18n): needs a native review
-  "ui.onboarding.skippedSessions.two": "Skipped {{count}} sessions already here", // TODO(i18n): needs a native review
-  "ui.onboarding.skippedSessions.few": "Skipped {{count}} sessions already here", // TODO(i18n): needs a native review
   "ui.onboarding.skippedSessions.many": "Skipped {{count}} sessions already here", // TODO(i18n): needs a native review
   // TODO(i18n): needs a native review
   ...Object.fromEntries(Object.entries(en).filter(([key]) => key.startsWith("settings.mcpMarketplace."))),

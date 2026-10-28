@@ -16,6 +16,10 @@ export default defineConfig({
   output: "server",
   adapter: cloudflare({
     imageService: "passthrough",
+    // All docs pages are prerendered. Running that pass in Node keeps the
+    // markdown processor's native binding available instead of loading its
+    // Node-only WASI build inside workerd.
+    prerenderEnvironment: "node",
   }),
   devToolbar: {
     enabled: false,

@@ -463,7 +463,6 @@ describe("openui design foundation", () => {
     const drawing = host.querySelector<HTMLElement>('[data-slot="openui-svg-drawing"]')
     expect(drawing).not.toBeNull()
     const markup = drawing!.innerHTML.toLowerCase()
-    expect(markup).toContain("<svg")
     expect(markup).not.toContain("script")
     expect(markup).not.toContain("onload")
     expect(markup).not.toContain("foreignobject")
@@ -471,8 +470,8 @@ describe("openui design foundation", () => {
     expect(drawing!.style.height).toBe("160px")
 
     // Shapes are asserted in a real browser rather than here: happy-dom parses
-    // `<svg>` in the HTML namespace, so DOMPurify drops every SVG child as
-    // invalid, while Chromium keeps `<circle>` in the SVG namespace.
+    // `<svg>` in the HTML namespace, so DOMPurify drops the SVG root and every
+    // child as invalid, while Chromium keeps the drawing in the SVG namespace.
   })
 
   // The path a real answer takes: prose with a fenced program inside it. A model

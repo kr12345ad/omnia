@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -66,6 +66,22 @@ describe("browser image files", () => {
       expect(
         resolveImagePath("/etc/passwd", "https://example.com/a.png", undefined, dir, { allowOutside: true }),
       ).toBe("/etc/passwd")
+    })
+  })
+
+  test("refuses a lexical path through a symlinked directory that leaves the root", () => {
+    withTempDir((dir) => {
+      // The temp root is one of the allowed roots, so the target must live
+      // outside it for the symlink to actually escape containment.
+      const outside = mkdtempSync(join(process.cwd(), ".omnia-images-outside-"))
+      try {
+        symlinkSync(outside, join(dir, "escape"), "dir")
+        expect(() =>
+          resolveImagePath(join(dir, "escape", "shot.png"), "https://example.com/a.png", undefined, dir),
+        ).toThrow(ImageFileError)
+      } finally {
+        rmSync(outside, { recursive: true, force: true })
+      }
     })
   })
 

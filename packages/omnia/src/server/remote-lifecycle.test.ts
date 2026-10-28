@@ -5,11 +5,14 @@ import {
   parseRemotePublicKey,
   REMOTE_MAX_COMMAND_MS,
   REMOTE_STALE_MS,
+  RemoteClaimError,
   RemoteComputerDriver,
   RemotePollLimitError,
   RemoteRegistry,
+  type RemoteRegistrationProof,
 } from "./remote"
 import { createRemoteKeyPair } from "../remote/keys"
+import { REMOTE_REGISTRATION_PATH, remoteRegistrationBody, signRemoteRequest } from "../remote/signing"
 import type { ComputerAction } from "../protocol"
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -197,16 +200,71 @@ describe("remote claim key policy", () => {
     expect(otherKey.computerId).not.toBe("remote-0000000a")
     expect(registry.authorize("remote-0000000a", otherKey.token)).toBe(false)
 
-    // The original key still owns the id, and re-registering rotates its token.
+    // Knowing the id and public key is not enough: re-registration without the
+    // private key must leave the existing entry and token untouched.
+    const noProof = () =>
+      registry.claim({
+        name: "Thief",
+        platform: "linux",
+        publicKey: parseRemotePublicKey(owned.publicKey)!,
+        reuseId: "remote-0000000a",
+      })
+    expect(noProof).toThrow(RemoteClaimError)
+    expect(registry.authorize("remote-0000000a", first.token)).toBe(true)
+
+    const forged: RemoteRegistrationProof = {
+      challenge: first.challenge,
+      timestampMs: 1_000_000,
+      signature: signRemoteRequest(impostor.privateKey, {
+        method: "POST",
+        path: REMOTE_REGISTRATION_PATH,
+        timestampMs: 1_000_000,
+        body: remoteRegistrationBody("remote-0000000a", first.challenge),
+      }),
+    }
+    expect(() =>
+      registry.claim({
+        name: "Thief",
+        platform: "linux",
+        publicKey: parseRemotePublicKey(owned.publicKey)!,
+        reuseId: "remote-0000000a",
+        proof: forged,
+      }),
+    ).toThrow(RemoteClaimError)
+    expect(registry.authorize("remote-0000000a", first.token)).toBe(true)
+
+    // The original key still owns the id, and re-registering rotates both the
+    // token and the challenge so the same proof cannot be replayed.
+    const proof: RemoteRegistrationProof = {
+      challenge: first.challenge,
+      timestampMs: 1_000_000,
+      signature: signRemoteRequest(owned.privateKey, {
+        method: "POST",
+        path: REMOTE_REGISTRATION_PATH,
+        timestampMs: 1_000_000,
+        body: remoteRegistrationBody("remote-0000000a", first.challenge),
+      }),
+    }
     const sameKey = registry.claim({
       name: "Owned",
       platform: "linux",
       publicKey: parseRemotePublicKey(owned.publicKey)!,
       reuseId: "remote-0000000a",
+      proof,
     })
     expect(sameKey.computerId).toBe("remote-0000000a")
+    expect(sameKey.challenge).not.toBe(first.challenge)
     expect(registry.authorize("remote-0000000a", first.token)).toBe(false)
     expect(registry.authorize("remote-0000000a", sameKey.token)).toBe(true)
+    expect(() =>
+      registry.claim({
+        name: "Replay",
+        platform: "linux",
+        publicKey: parseRemotePublicKey(owned.publicKey)!,
+        reuseId: "remote-0000000a",
+        proof,
+      }),
+    ).toThrow(RemoteClaimError)
     registry.close()
   })
 

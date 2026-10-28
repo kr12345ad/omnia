@@ -69,7 +69,7 @@ import { watchControlPlaneSession, type ControlPlaneSessionWatch } from "./omnia
 import { spawnWslSidecar } from "./wsl/sidecar"
 import { migrate } from "./migrate"
 import { cleanupStoreFiles } from "./store-cleanup"
-import { startBackgroundCli } from "./background-cli"
+import { startBackgroundCli, startBundledSidecar } from "./background-cli"
 import { setNativeTranslations } from "./native-translations"
 
 const APP_NAMES: Record<string, string> = {
@@ -83,12 +83,16 @@ const APP_IDS: Record<string, string> = {
   prod: "io.omnia.desktop",
 }
 const TEST_ONBOARDING = process.env.OPENCODE_TEST_ONBOARDING === "1"
-const SIDECAR_VERSION = process.env.OPENCODE_SIDECAR_V2 === "1" ? "v2" : "v1"
+// Free models are only served to the Bun runtime, so the default host is the
+// bundled CLI. OPENCODE_SIDECAR_NODE=1 restores the in-process Electron engine.
+const SIDECAR_VERSION =
+  process.env.OPENCODE_SIDECAR_V2 === "1" ? "v2" : process.env.OPENCODE_SIDECAR_NODE === "1" ? "node" : "cli"
 const jsCallStackFeature = "DocumentPolicyIncludeJSCallStacksInCrashReports"
 
 let logger: ReturnType<typeof initLogging>
 let server: SidecarListener | null = null
 let sidecarTarget: SidecarTarget | null = null
+let bundledTarget: { hostname: string; port: number; password: string } | null = null
 let controlPlaneSession: ControlPlaneSessionWatch | null = null
 
 // The sidecar is forked with the control-plane credentials the Omnia computer
@@ -135,6 +139,21 @@ async function killSidecar() {
 }
 
 async function restartSidecar() {
+  const bundled = bundledTarget
+  if (bundled) {
+    logger.log("restarting bundled sidecar", { port: bundled.port })
+    const previous = server
+    server = null
+    await previous?.stop()
+    const launched = await startBundledSidecar(logger, bundled)
+    server = launched.listener
+    await Promise.race([
+      launched.health.wait.catch((error) => logger.error("restarted bundled sidecar never became healthy", error)),
+      new Promise((resolve) => setTimeout(resolve, SIDECAR_RESTART_HEALTH_TIMEOUT_MS)),
+    ])
+    for (const window of BrowserWindow.getAllWindows()) window.reload()
+    return
+  }
   const target = sidecarTarget
   if (target === null) return
   logger.log("restarting sidecar for the control-plane session", { port: target.port })
@@ -542,7 +561,8 @@ const main = Effect.gen(function* () {
     })
     const hostname = "127.0.0.1"
     const url = `http://${hostname}:${port}`
-    const password = randomUUID()
+    // OPENCODE_SERVER_PASSWORD lets a test harness drive the local server.
+    const password = process.env.OPENCODE_SERVER_PASSWORD?.trim() || randomUUID()
 
     logger.log("spawning sidecar", { url })
     const options = {
@@ -551,9 +571,15 @@ const main = Effect.gen(function* () {
       onStderr: (message: string) => writeLog("server", "stderr", { message }, "warn"),
       onExit: (code: number) => writeLog("utility", "sidecar exited", { code }, "warn"),
     }
-    const { listener, health } = yield* Effect.promise(() => spawnLocalServer(hostname, port, password, options))
+    const launched = yield* Effect.promise(() =>
+      SIDECAR_VERSION === "cli"
+        ? startBundledSidecar(logger, { hostname, port, password })
+        : spawnLocalServer(hostname, port, password, options),
+    )
+    const { listener, health } = launched
     server = listener
-    sidecarTarget = { hostname, port, password, options }
+    if (SIDECAR_VERSION === "cli") bundledTarget = { hostname, port, password }
+    else sidecarTarget = { hostname, port, password, options }
     // A sign-in can be the moment an account ban becomes visible, so the check
     // runs before the sidecar is re-forked: refresh() seals the database first,
     // and a relaunch is what shows the ban screen against a stopped server.

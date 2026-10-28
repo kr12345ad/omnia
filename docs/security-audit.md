@@ -34,65 +34,64 @@ controls. Running services have not been redeployed as part of this audit.
 | No source dependency inventory | `opencode/script/security-sbom.ts` generates CycloneDX 1.6 inventory from `bun.lock`, including package versions and available SHA-512 integrity hashes. Audit CI retains it. It inventories the whole repository lockfile, not platform-artifact reachability. |
 | Security areas absent from CODEOWNERS | Existing reviewers now cover Omnia, server/auth/CLI, core, infra, and workflow changes. Confirm reviewers have appropriate access in this fork and require owner review in branch protection. |
 
-## New high-priority findings still open
+## High-priority findings closed in the current working tree
 
-### Account-to-computer ownership is not authoritative
+### Account-to-computer ownership is profile-bound
 
-Evidence: `auth/github.ts` mints a desktop-kind token after public OAuth;
-`server/api.ts:isTrustedDesktopRequest` checks token kind, not ownership of the
-selected computer; registration passes caller-supplied keys/IDs into
-`server/remote.ts:RemoteRegistry.claim`. Neither remote entries, local computer
-entries, nor persisted pairing offers record a durable profile owner.
+Evidence: `server/api.ts` records the presented desktop profile on new remote
+registrations and uses that owner for list/capabilities/event/pairing filters
+and every `/v1/computers/:id` route except the runtime's own signed transport.
+Local computers remain available to the signed-in user; the deployment operator
+token retains global reach. Remote entries that predate ownership binding are
+quarantined from client tokens instead of being assigned to the first caller.
 
-Impact requires a reachable deployment with OAuth and shared registered
-computers. It is distinct from operator authorization: client tokens **cannot**
-change operator permission settings, but another signed-in desktop may still
-target global computer/credential resources. Permission and billing gates limit
-specific operations; they do not establish ownership.
+Regression: `server/operator-identity.test.ts` verifies another account cannot
+list or target the computer and that an unowned legacy remote entry is hidden
+from client tokens but visible to the operator.
 
-Required remediation: persist owners/key reservations before registration;
-capture owners from authenticated token profiles; bind offers to their creator;
-authorize every computer/credential/input/CUA route; filter lists, sessions,
-live events and replay. Quarantine unassigned legacy IDs/credentials pending
-explicit assignment. Do not infer ownership from `auth.status().profile`: it is
-the last global sign-in and can change while older client tokens remain valid.
+Residual: remote ownership is in-process and disappears on restart; the runtime
+re-establishes it when it re-registers. Local computer resources remain
+installation-scoped rather than per-profile. Durable key reservations and a
+legacy credential-assignment workflow are still required for multi-tenant
+deployments.
 
-### Remote re-registration does not prove private-key possession
+### Re-registration requires proof of private-key possession
 
-Evidence: `server/remote.ts:RemoteRegistry.claim` permits ID reuse when the
-submitted public key equals the existing public key. Registration itself has no
-signed ownership challenge. Knowing a victim ID/public key can rotate its
-runtime bearer and disconnect it. Signed command polling/results remain
-protected, so this is not proven result forgery or command interception.
+Evidence: `server/remote.ts:RemoteRegistry.claim` issues a 32-byte challenge on
+every successful registration and requires an Ed25519 signature over the
+computer id plus the current challenge, timestamped inside the replay window.
+The challenge rotates on success, so a submitted public key alone cannot rotate
+another runtime's bearer or disconnect it.
 
-Required regression: client B submits A's ID/public key without A's private
-key; A's registration/token must remain unchanged. Coordinate a signed
-registration/reconnect protocol with the desktop before altering compatibility.
+Regression: `server/remote-lifecycle.test.ts` covers missing, forged, expired,
+replayed and valid registration proofs; `server/auth.test.ts` covers the HTTP
+path and challenge return value.
 
-### Browser downloads and HTTP-auth challenges remain global
+### Browser downloads and HTTP-auth challenges are tab-scoped
 
-Evidence: `server/computers.ts` download enumeration and auth challenge
-operations use controller methods with no tab/session ownership metadata;
-`desktop/src/main/omnia/browser-view.ts` returns the global download registry.
-Empty-session page operations are now blocked, but a session owning one tab
-can still encounter another tab's challenge. Download URLs, filenames and disk
-paths can cross session boundaries; file bytes are not returned by listing.
+Evidence: download and auth-challenge summaries now carry the originating
+`tabId`; `server/computers.ts` passes the session's owned tab ids to the
+controller and filters unattributed records for restricted sessions. Answering
+a challenge requires ownership of its tab, even when the session owns a
+different tab. `desktop/src/main/omnia/browser-view.ts` attributes new records
+from the originating webContents tab.
 
-Required remediation: attribute downloads and auth challenges to originating
-tab IDs in the controller/remote protocol, then authorize by owned tab. URL
-matching is not reliable ownership evidence.
+Regression: `server/computers-browser.test.ts` verifies that a session cannot
+see another tab's downloads or answer its auth challenge.
 
-### Image-save path containment can follow a parent symlink
+### Image-save containment resolves symlinked ancestors
 
-Evidence: `browser/image-file.ts:resolveImageSavePath/writeImageFile` and
-`server/computers.ts` use lexical containment before writing. `wx` protects the
-final filename, not symlink ancestors. A restricted caller with access to a
-pre-existing allowed-root symlink may create a new image outside that root.
+Evidence: `browser/image-file.ts:resolveImageSavePath` now resolves the deepest
+existing ancestor of both the allowed root and the target directory, then
+requires real-path containment before `mkdir`/write. A pre-existing parent
+symlink pointing outside the root is rejected.
 
-The same-OS-user attacker already has that user's filesystem authority; this
-is a confused-deputy problem for restricted remote callers or shared-temp
-attackers, not new OS privilege escalation by itself. Revalidate resolved
-ancestors and use race-resistant directory-bound file creation where supported.
+Regression: `browser/image-file.test.ts` covers a parent symlink escape and a
+normal nested path. Residual: the check and the subsequent write are still
+separate syscalls, so a same-user attacker who can replace the directory in that
+window can race it; directory-bound file creation would close that gap.
+
+## Residual design limits
 
 ### Command execution is not a workspace jail
 
@@ -107,18 +106,25 @@ Unrestricted GUI/keyboard access can also operate a terminal: denying the
 
 ## Dependency evidence
 
-`bun audit --audit-level=high` reports **143 advisories: 7 critical, 136 high**.
-This is an advisory count, not 143 remotely exploitable production paths.
-Findings include Electron 42.3.3 sandbox/protocol issues, MCP SDK 1.29.0 OAuth
-credential redirection, updater transitive dependencies, Seroval, Astro and
-archive/XML parsers. Build-only dependencies and runtime dependencies need
-separate reachability triage.
+`bun audit` now reports **0 critical and 0 high advisories** (12 moderate and
+6 low remain). This is an advisory count, not a count of remotely exploitable
+production paths. The dependency pass aligned the lockfile with `package.json`,
+applied fixes inside existing ranges, and upgraded across major versions where
+the advisory had no in-range fix: Astro 7.4.2, Starlight 0.41.11, Electron
+42.11.16, Vite 7.3.7/6.4.4/8.3.5, Undici 7.30.1/6.29.1/8.12.2, Zod 4.6.7,
+MCP SDK 1.32.0, Hono 4.13.11, `@actions/artifact` 6.3.1, and Seroval 1.6.3.
+The MCP 1.29 OAuth patch was rebased onto 1.32.0.
 
-`bun audit fix --dry-run` refused with `bun.lock does not match package.json`.
-The repo also pins patches for MCP SDK, Effect, Solid, and other packages.
-Reconcile lockfile/manifests, carry forward and test patches, and upgrade
-compatible vulnerable versions before marking the CI control green. No broad
-major-version replacement or vulnerability suppression was applied.
+Starlight is deliberately held at 0.41.11: 0.42 parses Tabs/Steps/FileTree at
+render time through Sätteri, whose Node WASI binding cannot run in the
+Cloudflare adapter's workerd prerenderer. Astro 7 still supplies the AVIF RCE
+fix. The Cloudflare prerender pass runs in Node (`prerenderEnvironment: "node"`)
+so the remaining markdown processor never loads a WASI binding in workerd.
+
+The remaining moderate/low findings are in transitive ranges blocked by their
+dependents (AWS SDK XML tooling, `@jsx-email/cli`'s React Router 6 line,
+`qs`/`srvx`/`fastify`), and in build-only tools. They are not suppressed: CI
+continues to fail on any newly introduced high or critical advisory.
 
 Inventory generated locally: **3,566 locked components**. Artifact signing,
 build provenance attestations, verification at installation, and platform
@@ -171,17 +177,19 @@ archival/rotation or recovery procedures.
 Observed verification for this pass:
 
 - Omnia package typecheck: passed.
-- Runtime/security suites: **686 passed**, **0 failed**, **7 existing todos**.
-  Two tests that freeze/move input on the real desktop were filtered out; a
-  prior live-X11 run failed to settle the pointer and is not claimed as passed.
-- OpenCode auth/listener suites: **26 passed**, **0 failed**.
-- Desktop typecheck: passed.
-- OpenCode package typecheck: blocked only by four existing errors in the
-  unrelated untracked `src/tool/git/` work. The new CLI typed-error issue was
-  corrected using the existing `CliError` path.
+- Omnia full suite: **2319 passed**, **0 failed**, **4 skipped**, **7 todos**.
+  The real-X11 input-freeze tests ran and passed; the live-harness measurement
+  remains opt-in because it needs a scratch window, not because it fails.
+- OpenCode typecheck: passed; MCP OAuth suite: **11 passed**, **0 failed**.
+- App typecheck: passed; unit suite **756 passed**, browser suite
+  **166 passed**, **0 failed**.
+- Desktop, console app, stats app, core, session-ui, UI, enterprise, server,
+  TUI, SDK, plugin, CLI, and stats typechecks: passed.
+- Web docs build: passed under Astro 7.4.2 with Starlight 0.41.11 and the Node
+  prerender pass.
 - `git diff --check`: passed.
-- Dependency audit: failed with **7 critical / 136 high** advisories.
-- Automated dependency remediation dry-run: blocked by manifest/lock mismatch.
+- Dependency audit: **passed the high/critical gate**, `0 critical / 0 high`
+  (12 moderate, 6 low).
 
 Still required: OS keychain/KMS-backed secret storage; token expiry/revocation
 and rotation lifecycle; enforced SSO/MFA/SCIM and durable resource RBAC;

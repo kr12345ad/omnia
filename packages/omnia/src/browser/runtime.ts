@@ -267,15 +267,15 @@ export class BrowserRuntime {
     return this.embeddedRuntime().screenshot(tabId, sessionId)
   }
 
-  async downloads(): Promise<BrowserDownload[]> {
-    return this.embeddedRuntime().downloads()
+  async downloads(tabIds?: readonly string[]): Promise<BrowserDownload[]> {
+    return this.embeddedRuntime().downloads(tabIds)
   }
 
-  async authRequired(): Promise<CdpAuthChallenge | null> {
-    return this.embeddedRuntime().authRequired()
+  async authRequired(tabIds?: readonly string[]): Promise<CdpAuthChallenge | null> {
+    return this.embeddedRuntime().authRequired(tabIds)
   }
 
-  async answerAuth(input: { username: string; password: string }): Promise<{ answered: true }> {
+  async answerAuth(input: { username: string; password: string; tabId?: string }): Promise<{ answered: true }> {
     return this.embeddedRuntime().answerAuth(input)
   }
 

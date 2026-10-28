@@ -40,7 +40,7 @@ import { isCredentialKind, isCredentialRuleKind, summarizeCredential, type Crede
 import type { PairingManager } from "../pairing"
 import type { ChatChannelsRuntime } from "../chat/service"
 import { formatPairingCode } from "../pairing"
-import { parseRemotePublicKey, type RemoteRegistry } from "./remote"
+import { parseRemotePublicKey, RemoteClaimError, type RemoteRegistry, type RemoteRegistrationProof } from "./remote"
 import { REMOTE_KEY_ID_HEADER, REMOTE_SIGNATURE_HEADER, REMOTE_TIMESTAMP_HEADER } from "../remote/signing"
 import {
   isCapabilitySupport,
@@ -189,7 +189,7 @@ export interface ApiContext {
   // same failure handling every other action gets.
   readonly journalComputerUse: (input: ComputerUseExecutionInput) => void
   readonly health: () => ServerHealth
-  readonly subscribe: (response: ServerResponse) => () => void
+  readonly subscribe: (response: ServerResponse, filter?: (event: ServerEvent) => boolean) => () => void
   readonly now: () => number
 }
 
@@ -412,6 +412,18 @@ function html(response: ServerResponse, status: number, body: string): void {
     "cache-control": "no-store",
   })
   response.end(body)
+}
+
+function registrationProof(value: unknown): RemoteRegistrationProof | undefined {
+  if (!isRecord(value)) return undefined
+  if (typeof value.challenge !== "string" || value.challenge.length === 0 || value.challenge.length > 256) {
+    return undefined
+  }
+  if (typeof value.timestampMs !== "number" || !Number.isFinite(value.timestampMs)) return undefined
+  if (typeof value.signature !== "string" || value.signature.length === 0 || value.signature.length > 256) {
+    return undefined
+  }
+  return { challenge: value.challenge, timestampMs: value.timestampMs, signature: value.signature }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -843,6 +855,79 @@ function unconfirmed(
   }
 }
 
+function presentedProfileId(context: Pick<ApiContext, "auth">, request: IncomingMessage): string | undefined {
+  const presented = bearerToken(request)
+  const profile = presented === undefined ? undefined : context.auth.clientTokenProfile(presented)
+  return profile === undefined ? undefined : String(profile.id)
+}
+
+// A remote runtime belongs to the profile that registered it. The deployment
+// operator token keeps global reach; a client token may only address its own
+// remote computers. A remote entry with no recorded owner predates ownership
+// binding and is quarantined from client tokens: it disappears on restart and
+// re-registers with an owner, so guessing an assignment would only widen access.
+// Local computers have no remote entry and stay visible to the signed-in user.
+function computerVisible(
+  context: Pick<ApiContext, "auth" | "token" | "remote">,
+  request: IncomingMessage,
+): (computerId: string) => boolean {
+  const profile = presentedProfileId(context, request)
+  return (computerId) => {
+    // A token without a recorded profile cannot prove ownership of a remote
+    // runtime; it still reaches local computers on this installation.
+    if (profile === undefined) return context.remote.tokenFor(computerId) === undefined
+    const owner = context.remote.owner(computerId)
+    if (owner !== undefined) return owner === profile
+    return context.remote.tokenFor(computerId) === undefined
+  }
+}
+
+function computerOwnershipDenied(
+  context: Pick<ApiContext, "auth" | "token" | "remote">,
+  request: IncomingMessage,
+  computerId: string,
+): boolean {
+  if (presentsServerToken(context, request)) return false
+  return !computerVisible(context, request)(computerId)
+}
+
+// The computers a client token may see and address, or undefined for the
+// deployment operator, who sees everything.
+function ownedComputers(
+  context: Pick<ApiContext, "auth" | "token" | "remote" | "computers">,
+  request: IncomingMessage,
+): string[] | undefined {
+  if (presentsServerToken(context, request)) return undefined
+  const visible = computerVisible(context, request)
+  return context.computers.ids().filter(visible)
+}
+
+function defaultOwnedComputer(
+  context: Pick<ApiContext, "auth" | "token" | "remote" | "computers">,
+  request: IncomingMessage,
+): string | undefined {
+  const owned = ownedComputers(context, request)
+  // A client with no owned computer must not fall back to the first global
+  // entry; that was another account's runtime when the list was filtered.
+  return owned === undefined ? context.computers.ids()[0] : owned[0]
+}
+
+function eventOwnershipFilter(
+  context: Pick<ApiContext, "auth" | "token" | "remote">,
+  request: IncomingMessage,
+): ((event: ServerEvent) => boolean) | undefined {
+  if (presentsServerToken(context, request)) return undefined
+  const profile = presentedProfileId(context, request)
+  const visible = computerVisible(context, request)
+  return (event) => {
+    // Sign-in state is installation-wide and belongs to the operator screen.
+    if (event.type.startsWith("auth.")) return false
+    if (event.computerId !== undefined && !visible(event.computerId)) return false
+    const pairingOwner = typeof event.data?.owner === "string" ? event.data.owner : undefined
+    return pairingOwner === undefined || pairingOwner === profile
+  }
+}
+
 function runOwner(context: Pick<ApiContext, "auth" | "token">, request: IncomingMessage): string | undefined {
   const presented = bearerToken(request)
   const profile = presented === undefined ? undefined : context.auth.clientTokenProfile(presented)
@@ -1219,7 +1304,10 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
   }
 
   if (parsed.method === "GET" && segments.length === 2 && segments[1] === "capabilities") {
-    const computers = await context.computers.list()
+    const visible = ownedComputers(context, request)
+    const computers = (await context.computers.list()).filter(
+      (entry) => visible === undefined || visible.includes(entry.id),
+    )
     json(response, 200, {
       ok: true,
       server: context.descriptor,
@@ -1266,7 +1354,13 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
   }
 
   if (parsed.method === "GET" && segments.length === 2 && segments[1] === "computers") {
-    json(response, 200, { ok: true, computers: await context.computers.list() })
+    // A signed-in desktop lists what it owns (plus local computers on this
+    // machine); the deployment operator sees the whole deployment.
+    const visible = ownedComputers(context, request)
+    const computers = (await context.computers.list()).filter(
+      (entry) => visible === undefined || visible.includes(entry.id),
+    )
+    json(response, 200, { ok: true, computers })
     return true
   }
 
@@ -1286,6 +1380,13 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
     }
     const params = parsed.url.searchParams
     const computerId = params.get("computerId")
+    if (computerId !== null && computerId.length > 0 && computerOwnershipDenied(context, request, computerId)) {
+      json(response, 403, {
+        ok: false,
+        error: `Computer ${computerId} belongs to another signed-in account.`,
+      })
+      return true
+    }
     const since = params.get("since")
     const limit = params.get("limit")
     const trail =
@@ -1308,15 +1409,28 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
 
   if (segments.length >= 3 && segments[1] === "computers" && segments[2] === "pair") {
     if (parsed.method === "GET" && segments.length === 3) {
-      json(response, 200, { ok: true, pairings: context.pairings.list(), serverUrl: context.pairingUrl() })
+      const operator = presentsServerToken(context, request)
+      const profile = presentedProfileId(context, request)
+      const pairings = context.pairings.list().filter((offer) => operator || offer.owner === undefined || offer.owner === profile)
+      json(response, 200, { ok: true, pairings, serverUrl: context.pairingUrl() })
       return true
     }
     if (parsed.method === "POST" && segments.length === 3) {
       const body = (await readBoundBody(context, request)) as Record<string, unknown> | undefined
-      const offer = context.pairings.create(
-        isRecord(body) && typeof body.name === "string" && body.name.trim().length > 0 ? { name: body.name.trim() } : {},
-      )
-      context.events.emit("computer.pairing_created", { data: { code: offer.code, expiresAt: offer.expiresAt } })
+      const profile = presentedProfileId(context, request)
+      const offer = context.pairings.create({
+        ...(isRecord(body) && typeof body.name === "string" && body.name.trim().length > 0
+          ? { name: body.name.trim() }
+          : {}),
+        ...(profile === undefined ? {} : { owner: profile }),
+      })
+      context.events.emit("computer.pairing_created", {
+        data: {
+          code: offer.code,
+          expiresAt: offer.expiresAt,
+          ...(offer.owner === undefined ? {} : { owner: offer.owner }),
+        },
+      })
       const serverUrl = context.pairingUrl()
       json(response, 200, {
         ok: true,
@@ -1334,8 +1448,23 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 400, { ok: false, error: "The pairing code in the path is not valid percent-encoding." })
         return true
       }
+      // Cancelling is an owner operation: knowing another account's code must
+      // not be enough to invalidate its pending offering.
+      const offer = context.pairings.get(code)
+      if (
+        offer !== undefined &&
+        offer.owner !== undefined &&
+        !presentsServerToken(context, request) &&
+        offer.owner !== presentedProfileId(context, request)
+      ) {
+        json(response, 403, { ok: false, error: "That pairing offer belongs to another signed-in account." })
+        return true
+      }
       const removed = context.pairings.cancel(code)
-      if (removed) context.events.emit("computer.pairing_cancelled", { data: { code } })
+      if (removed)
+        context.events.emit("computer.pairing_cancelled", {
+          data: { code, ...(offer?.owner === undefined ? {} : { owner: offer.owner }) },
+        })
       json(response, removed ? 200 : 404, {
         ok: removed,
         ...(removed ? {} : { error: `No pairing offer ${code}.` }),
@@ -1394,6 +1523,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         ...(info === undefined ? {} : { info }),
         ...(capabilities === undefined ? {} : { capabilities }),
         ...(publicKey === undefined ? {} : { publicKey }),
+        ...(offer.owner === undefined ? {} : { owner: offer.owner }),
       })
       context.events.emit("computer.pairing_claimed", {
         computerId: claimed.computerId,
@@ -1441,18 +1571,34 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       json(response, 400, { ok: false, error: "The capabilities field must be a valid capability support list." })
       return true
     }
-    const claimed = context.remote.claim({
-      name,
-      platform,
-      ...(typeof record.architecture === "string" ? { architecture: record.architecture } : {}),
-      ...(info === undefined ? {} : { info }),
-      ...(capabilities === undefined ? {} : { capabilities }),
-      publicKey,
-      ...(typeof record.computerId === "string" && record.computerId.length > 0
-        ? { reuseId: record.computerId }
-        : {}),
+    const proof = registrationProof(record.registrationProof)
+    const owner = presentedProfileId(context, request)
+    let claimed: ReturnType<typeof context.remote.claim>
+    try {
+      claimed = context.remote.claim({
+        name,
+        platform,
+        ...(typeof record.architecture === "string" ? { architecture: record.architecture } : {}),
+        ...(info === undefined ? {} : { info }),
+        ...(capabilities === undefined ? {} : { capabilities }),
+        publicKey,
+        ...(owner === undefined ? {} : { owner }),
+        ...(typeof record.computerId === "string" && record.computerId.length > 0
+          ? { reuseId: record.computerId }
+          : {}),
+        ...(proof === undefined ? {} : { proof }),
+      })
+    } catch (error) {
+      if (!(error instanceof RemoteClaimError)) throw error
+      json(response, 401, { ok: false, error: error.message, code: error.code })
+      return true
+    }
+    json(response, 200, {
+      ok: true,
+      computerId: claimed.computerId,
+      token: claimed.token,
+      challenge: claimed.challenge,
     })
-    json(response, 200, { ok: true, computerId: claimed.computerId, token: claimed.token })
     return true
   }
 
@@ -1462,6 +1608,15 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
     const computer = context.computers.get(computerId)
     if (!computer) {
       json(response, 404, { ok: false, error: `Unknown computer ${computerId}.` })
+      return true
+    }
+    // The paired runtime authenticates its own transport routes; every
+    // browser/credential/CUA route below is owned by the registering profile.
+    if (segments[3] !== "remote" && computerOwnershipDenied(context, request, computerId)) {
+      json(response, 403, {
+        ok: false,
+        error: `Computer ${computerId} belongs to another signed-in account.`,
+      })
       return true
     }
     if (segments.length === 5 && segments[4] === "commands" && parsed.method === "GET") {
@@ -1829,6 +1984,13 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
   }
 
   if (parsed.method === "GET" && segments.length === 3 && segments[1] === "computers") {
+    if (computerOwnershipDenied(context, request, segments[2]!)) {
+      json(response, 403, {
+        ok: false,
+        error: `Computer ${segments[2]} belongs to another signed-in account.`,
+      })
+      return true
+    }
     const summary = await context.computers.summary(segments[2]!)
     if (!summary) {
       json(response, 404, { ok: false, error: `Unknown computer ${segments[2]}.` })
@@ -2463,13 +2625,21 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
   }
 
   if (parsed.method === "GET" && segments.length === 2 && segments[1] === "events") {
-    const stream = context.subscribe(response)
+    // SSE is a live view of computer activity, so it follows the same ownership
+    // rules as the REST lists: a signed-in desktop sees its own computers and
+    // their pairing/credential events, never another account's.
+    const stream = context.subscribe(response, eventOwnershipFilter(context, request))
     return stream !== undefined
   }
 
   if (segments.length === 3 && segments[1] === "input") {
     if (parsed.method === "GET" && segments[2] === "state") {
-      const state = await context.computers.inputState(parsed.url.searchParams.get("computerId") ?? undefined)
+      const requested = parsed.url.searchParams.get("computerId") ?? undefined
+      if (requested !== undefined && requested.length > 0 && computerOwnershipDenied(context, request, requested)) {
+        json(response, 403, { ok: false, error: `Computer ${requested} belongs to another signed-in account.` })
+        return true
+      }
+      const state = await context.computers.inputState(requested)
       json(response, 200, {
         ok: true,
         frozen: state.frozen,
@@ -2506,6 +2676,10 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 400, { ok: false, error: "Freezing or releasing input needs an explicit computerId." })
         return true
       }
+      if (computerOwnershipDenied(context, request, computerId)) {
+        json(response, 403, { ok: false, error: `Computer ${computerId} belongs to another signed-in account.` })
+        return true
+      }
       if (segments[2] === "freeze") {
         const reason = typeof body.reason === "string" ? body.reason : undefined
         const outcome = await context.computers.freezeInput(computerId, reason)
@@ -2533,7 +2707,13 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
   }
 
   if (parsed.method === "GET" && segments.length === 2 && segments[1] === "sessions") {
-    json(response, 200, { ok: true, sessions: context.sessions() })
+    const owned = ownedComputers(context, request)
+    const allowed = owned === undefined ? undefined : new Set(owned)
+    const sessions = context.sessions().filter((session) => {
+      if (allowed === undefined || session.computerId === undefined) return true
+      return allowed.has(session.computerId)
+    })
+    json(response, 200, { ok: true, sessions })
     return true
   }
 
@@ -2605,7 +2785,7 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       return true
     }
     if (parsed.method === "GET" && segments.length === 3 && segments[2] === "calibration") {
-      const computer = context.computers.get(context.computers.ids()[0] ?? "")
+      const computer = context.computers.get(defaultOwnedComputer(context, request) ?? "")
       const info = await computer?.driver.getInfo().catch(() => undefined)
       const screen = (info as { screen?: { width: number; height: number } } | undefined)?.screen
       json(response, 200, { ok: true, calibration: context.calibration.status(screen) })
@@ -2627,7 +2807,12 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
         json(response, 400, { ok: false, error: "A JSON body is required." })
         return true
       }
-      const computerId = typeof body.computerId === "string" ? body.computerId : context.computers.ids()[0]
+      const requested = typeof body.computerId === "string" ? body.computerId : undefined
+      if (requested !== undefined && computerOwnershipDenied(context, request, requested)) {
+        json(response, 403, { ok: false, error: `Computer ${requested} belongs to another signed-in account.` })
+        return true
+      }
+      const computerId = requested ?? defaultOwnedComputer(context, request)
       const computer = computerId === undefined ? undefined : context.computers.get(computerId)
       if (computer === undefined) {
         json(response, 404, { ok: false, error: "Unknown computer." })
@@ -2692,7 +2877,12 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       // The analyze step captures the screen and reads the accessibility tree,
       // so an agent-originated request needs SCREEN_READ approval. Desktop
       // calls carry no sessionId and the UI itself is the approver.
-      const analyzeComputerId = typeof body.computerId === "string" ? body.computerId : context.computers.ids()[0] ?? "local"
+      const requested = typeof body.computerId === "string" ? body.computerId : undefined
+      if (requested !== undefined && computerOwnershipDenied(context, request, requested)) {
+        json(response, 403, { ok: false, error: `Computer ${requested} belongs to another signed-in account.` })
+        return true
+      }
+      const analyzeComputerId = requested ?? defaultOwnedComputer(context, request) ?? "local"
       const denied = gateAgentAction(context, request, body, "computer-use.analyze", analyzeComputerId, ["SCREEN_READ"])
       if (denied !== undefined) {
         json(response, denied.status, {

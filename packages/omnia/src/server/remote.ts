@@ -1,6 +1,11 @@
 import { createPublicKey, randomBytes, randomUUID } from "node:crypto"
 import type { JsonWebKey, KeyObject } from "node:crypto"
-import { REMOTE_REPLAY_WINDOW_MS, verifyRemoteSignature } from "../remote/signing"
+import {
+  REMOTE_REGISTRATION_PATH,
+  REMOTE_REPLAY_WINDOW_MS,
+  remoteRegistrationBody,
+  verifyRemoteSignature,
+} from "../remote/signing"
 import type { RemoteSignatureProof } from "../remote/signing"
 import type {
   ActionResult,
@@ -142,9 +147,16 @@ export class RemoteComputerDriver implements ServerComputerDriver {
     pendingDialog: (tabId, sessionId) =>
       this.browserCall<BrowserDialogSummary | null>("pendingDialog", { tabId, sessionId }),
     handleDialog: (input) => this.browserCall<{ handled: boolean }>("handleDialog", input),
-    downloads: () => this.browserCall<Awaited<ReturnType<NonNullable<BrowserController["downloads"]>>>>("downloads", {}),
-    authRequired: () =>
-      this.browserCall<Awaited<ReturnType<NonNullable<BrowserController["authRequired"]>>>>("authRequired", {}),
+    downloads: (tabIds, sessionId) =>
+      this.browserCall<Awaited<ReturnType<NonNullable<BrowserController["downloads"]>>>>("downloads", {
+        tabIds,
+        sessionId,
+      }),
+    authRequired: (tabIds, sessionId) =>
+      this.browserCall<Awaited<ReturnType<NonNullable<BrowserController["authRequired"]>>>>("authRequired", {
+        tabIds,
+        sessionId,
+      }),
     answerAuth: (input) => this.browserCall<{ answered: boolean }>("answerAuth", input),
     upload: (files, tabId, sessionId) =>
       this.browserCall<{ files: string[] }>("upload", { files: [...files], tabId, sessionId }),
@@ -399,6 +411,25 @@ export interface RemoteRegistryOptions {
   readonly allowUnsigned?: boolean
 }
 
+export interface RemoteRegistrationProof {
+  readonly challenge: string
+  readonly timestampMs: number
+  readonly signature: string
+}
+
+// A refused re-registration is not a generic failure: the caller must keep its
+// current entry and token, so the route answers an explicit code instead of
+// silently issuing a different computer id.
+export class RemoteClaimError extends Error {
+  readonly code: "registration_proof_required" | "registration_proof_invalid"
+
+  constructor(code: "registration_proof_required" | "registration_proof_invalid", message: string) {
+    super(message)
+    this.name = "RemoteClaimError"
+    this.code = code
+  }
+}
+
 export interface RemoteClaimInput {
   readonly name: string
   readonly platform: string
@@ -406,22 +437,33 @@ export interface RemoteClaimInput {
   readonly info?: ComputerInfo
   readonly capabilities?: readonly CapabilitySupport[]
   readonly publicKey?: KeyObject
+  // The profile that registered this runtime. Route authorization uses it so
+  // another signed-in desktop cannot target this computer's sessions, input or
+  // credentials. Omitted only for legacy/migration callers.
+  readonly owner?: string
   // A thin client that re-registers on every launch reuses its computer id so
   // the deployment does not accumulate stale entries. Reuse requires the same
-  // Ed25519 key (or no key on the existing entry).
+  // Ed25519 key and proof that the caller holds its private key; a submitted
+  // public key alone only proves what the caller chose, not that it owns the id.
   readonly reuseId?: string
+  readonly proof?: RemoteRegistrationProof
 }
 
 export interface RemoteClaimResult {
   readonly computerId: string
   readonly token: string
   readonly driver: RemoteComputerDriver
+  // The next re-registration challenge. It is rotated on every successful
+  // claim and never returned to a caller that failed the proof check.
+  readonly challenge: string
 }
 
 interface RemoteEntry {
   readonly driver: RemoteComputerDriver
   readonly token: string
   readonly publicKey?: KeyObject
+  readonly challenge: string
+  readonly owner?: string
   readonly unregister: () => void
 }
 
@@ -495,8 +537,37 @@ export class RemoteRegistry {
       existing === undefined ||
       existing.publicKey === undefined ||
       (input.publicKey !== undefined && existing.publicKey.equals(input.publicKey))
+    // An id that already belongs to a key can only be reused by a caller that
+    // proves possession of that key. Without this, anyone who learns a victim
+    // id and public key can rotate its runtime bearer. The proof binds the
+    // challenge to the id, is timestamped inside the replay window, and is
+    // invalidated by the challenge rotation below.
+    if (keyOk && requested !== undefined && existing !== undefined && existing.publicKey !== undefined) {
+      const proof = input.proof
+      if (proof === undefined || proof.challenge !== existing.challenge) {
+        throw new RemoteClaimError(
+          "registration_proof_required",
+          "This computer id is already registered to a key; re-registration needs proof of that key.",
+        )
+      }
+      const fresh = Number.isFinite(proof.timestampMs) && Math.abs(this.now() - proof.timestampMs) <= REMOTE_REPLAY_WINDOW_MS
+      const signed = verifyRemoteSignature(existing.publicKey, {
+        method: "POST",
+        path: REMOTE_REGISTRATION_PATH,
+        timestampMs: proof.timestampMs,
+        body: remoteRegistrationBody(requested, proof.challenge),
+        signature: proof.signature,
+      })
+      if (!fresh || !signed) {
+        throw new RemoteClaimError(
+          "registration_proof_invalid",
+          "The re-registration proof is not valid for this computer and challenge.",
+        )
+      }
+    }
     const canReuse = requested !== undefined && keyOk
     const computerId = canReuse ? requested : this.randomComputerId()
+    const challenge = randomBytes(32).toString("hex")
     if (canReuse && existing !== undefined) {
       existing.unregister()
       this.entries.delete(computerId)
@@ -516,17 +587,26 @@ export class RemoteRegistry {
       driver,
       token,
       unregister,
+      challenge,
       ...(input.publicKey === undefined ? {} : { publicKey: input.publicKey }),
+      ...(input.owner === undefined || input.owner.length === 0 ? {} : { owner: input.owner }),
     })
     this.events.emit("computer.paired", {
       computerId,
       data: { name: input.name, platform: input.platform, backend: driver.backend },
     })
-    return { computerId, token, driver }
+    return { computerId, token, driver, challenge }
   }
 
   tokenFor(id: string): string | undefined {
     return this.entries.get(id)?.token
+  }
+
+  // The profile that registered this remote runtime, if known. A computer with
+  // no recorded owner predates ownership binding and is left to the migration
+  // path rather than being silently assigned to whoever asks first.
+  owner(id: string): string | undefined {
+    return this.entries.get(id)?.owner
   }
 
   // Request authentication is the Ed25519 signature over the canonical digest

@@ -41,17 +41,33 @@ function registrationFile(): string {
   return join(app.getPath("userData"), "control-plane-computer.json")
 }
 
-export function readRegisteredComputerId(): string | undefined {
+function readRegistration(): { computerId: string; challenge?: string } | undefined {
   try {
-    const parsed = JSON.parse(readFileSync(registrationFile(), "utf8")) as { computerId?: unknown }
-    return typeof parsed.computerId === "string" && parsed.computerId.length > 0 ? parsed.computerId : undefined
+    const parsed = JSON.parse(readFileSync(registrationFile(), "utf8")) as {
+      computerId?: unknown
+      challenge?: unknown
+    }
+    if (typeof parsed.computerId !== "string" || parsed.computerId.length === 0) return undefined
+    return {
+      computerId: parsed.computerId,
+      ...(typeof parsed.challenge === "string" && parsed.challenge.length > 0
+        ? { challenge: parsed.challenge }
+        : {}),
+    }
   } catch {
     return undefined
   }
 }
 
-function writeRegisteredComputerId(computerId: string): void {
-  writeSecretFile(registrationFile(), JSON.stringify({ computerId }))
+export function readRegisteredComputerId(): string | undefined {
+  return readRegistration()?.computerId
+}
+
+function writeRegistration(computerId: string, challenge: string | undefined): void {
+  writeSecretFile(
+    registrationFile(),
+    JSON.stringify({ computerId, ...(challenge === undefined ? {} : { challenge }) }),
+  )
 }
 
 function decryptToken(value: string): string | undefined {
@@ -412,6 +428,7 @@ export function withNativeActionTracking(
 interface BrowserParams {
   url?: string
   tabId?: string
+  tabIds?: string[]
   sessionId?: string
   key?: string
   query?: string
@@ -566,13 +583,14 @@ export function createRemoteBrowserHandler(runtime: Browser.BrowserRuntime): Rem
         })
       }
       case "downloads":
-        return runtime.downloads()
+        return runtime.downloads(stringArray(params.tabIds))
       case "authRequired":
-        return runtime.authRequired()
+        return runtime.authRequired(stringArray(params.tabIds))
       case "answerAuth":
         return runtime.answerAuth({
           username: requireString(params.username, "username"),
           password: typeof params.password === "string" ? params.password : "",
+          ...(stringOrUndefined(params.tabId) === undefined ? {} : { tabId: stringOrUndefined(params.tabId) }),
         })
       default:
         return Promise.reject(new Error(`Unsupported browser operation ${command.operation}.`))
@@ -588,6 +606,11 @@ function browserParams(value: unknown): BrowserParams {
 function browserTarget(value: unknown): NonNullable<BrowserParams["target"]> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return {}
   return value as NonNullable<BrowserParams["target"]>
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  return value.filter((entry): entry is string => typeof entry === "string")
 }
 
 function stringOrUndefined(value: unknown): string | undefined {
@@ -632,7 +655,25 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
   if (driver === undefined) throw new Error("No computer runtime is available on this machine.")
   const keys = await Remote.loadOrCreateRemoteKeyPair(remoteKeyStorage())
   const info = await driver.getInfo()
-  const reuseId = readRegisteredComputerId()
+  const registration = readRegistration()
+  const reuseId = registration?.computerId
+  const timestampMs = Date.now()
+  // The server issued this challenge with the previous successful claim. Sign
+  // it with the same key that owns the id; knowing the id and public key alone
+  // is not enough to rotate the runtime bearer.
+  const registrationProof =
+    reuseId === undefined || registration?.challenge === undefined
+      ? undefined
+      : {
+          challenge: registration.challenge,
+          timestampMs,
+          signature: Remote.signRemoteRequest(keys.privateKey, {
+            method: "POST",
+            path: Remote.REMOTE_REGISTRATION_PATH,
+            timestampMs,
+            body: Remote.remoteRegistrationBody(reuseId, registration.challenge),
+          }),
+        }
   const path = "/v1/computers/register"
   const response = await fetchControlPlane(path, {
     method: "POST",
@@ -645,16 +686,25 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
       capabilities: driver.capabilities ?? [],
       publicKey: keys.publicKey,
       ...(reuseId === undefined ? {} : { computerId: reuseId }),
+      ...(registrationProof === undefined ? {} : { registrationProof }),
     }),
   })
   const body = (await response.json().catch(() => ({}))) as {
     ok?: boolean
     computerId?: string
     token?: string
+    challenge?: string
     error?: string
+    code?: string
   }
   if (!response.ok || body.ok !== true || typeof body.computerId !== "string" || typeof body.token !== "string") {
     driver.dispose?.()
+    // A proof can go stale if another launch reclaimed the id first. Drop the
+    // stored challenge so the next sync registers as a fresh computer instead
+    // of retrying an unusable proof forever.
+    if (typeof body.code === "string" && body.code.startsWith("registration_proof")) {
+      rmSync(registrationFile(), { force: true })
+    }
     if (response.status === 401) {
       // Registration is not an auth call, so the stored session survives: a 401
       // here only rejects this request and the next sync tick retries it.
@@ -669,7 +719,7 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
   }
   stopControlPlaneRuntime()
   controlPlane = { computerId: body.computerId, serverUrl: auth.url }
-  writeRegisteredComputerId(body.computerId)
+  writeRegistration(body.computerId, typeof body.challenge === "string" ? body.challenge : undefined)
   if (!start({ serverUrl: auth.url, computerId: body.computerId, token: body.token }, { driver, keys })) {
     controlPlane = undefined
     throw new Error("Registered with the control plane, but no computer runtime is available on this machine.")

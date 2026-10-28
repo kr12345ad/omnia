@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { closeSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs"
+import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path"
 
@@ -102,18 +102,47 @@ export function resolveImagePath(
   // downloads directory plus the OS temp directory (mirroring the server's
   // no-approval roots). relative() keeps Windows separators correct.
   const roots = [directory, resolve(tmpdir())]
-  const contained = roots.some((root) => {
-    if (candidate === root) return true
-    const rest = relative(root, candidate)
-    return rest.length > 0 && !rest.startsWith("..") && !isAbsolute(rest)
-  })
+  const contained = roots.some((root) => isWithin(root, candidate))
   if (!contained) {
     throw new ImageFileError(
       "path_blocked",
       `Refusing to write outside ${directory}. Save image paths must stay inside the Omnia downloads directory.`,
     )
   }
+  // Lexical containment alone lets a pre-existing directory symlink inside an
+  // allowed root redirect the write anywhere. Resolve the deepest existing
+  // ancestor and require its real path to stay inside the same roots; a
+  // symlinked parent then fails here instead of after mkdir followed it.
+  if (!roots.some((root) => isWithin(realPathOfExistingAncestor(root), realPathOfExistingAncestor(dirname(candidate))))) {
+    throw new ImageFileError(
+      "path_blocked",
+      `Refusing to write through a symbolic link outside ${directory}. Save image paths must resolve inside the Omnia downloads directory.`,
+    )
+  }
   return candidate
+}
+
+function isWithin(root: string, candidate: string): boolean {
+  if (candidate === root) return true
+  const rest = relative(root, candidate)
+  return rest.length > 0 && !rest.startsWith("..") && !isAbsolute(rest)
+}
+
+// The deepest ancestor that exists on disk. A save path may name directories
+// that mkdir will create; those cannot be symlinks yet, so the nearest existing
+// parent is what the write would actually traverse.
+function realPathOfExistingAncestor(path: string): string {
+  let current = resolve(path)
+  while (true) {
+    try {
+      lstatSync(current)
+      return realpathSync.native(current)
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return current
+      current = parent
+    }
+  }
 }
 
 // Re-reads the file that was just written so save/copy can report bytes and a

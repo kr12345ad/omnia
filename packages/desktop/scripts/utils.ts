@@ -1,4 +1,5 @@
 import { $ } from "bun"
+import { existsSync } from "node:fs"
 import { chmod, copyFile, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -82,6 +83,11 @@ export async function downloadCliToResources() {
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
+  const staged = stagedCliVersion(await clientVersion())
+  if ((await rewriteCliVersion(dest, CLI_VERSION, staged)) === 0) {
+    throw new Error(`The staged v2 CLI does not carry its ${CLI_VERSION} version string`)
+  }
+  console.log(`Staged v2 CLI reports ${staged}`)
   if (process.platform !== "win32") await chmod(dest, 0o755)
   if (process.platform === "win32" && process.env.GITHUB_ACTIONS === "true") {
     await $`pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File ../../script/sign-windows.ps1 ${dest}`
@@ -89,6 +95,76 @@ export async function downloadCliToResources() {
   if (process.platform === "darwin") await $`codesign --force --sign - ${dest}`
 
   console.log(`Copied ${cli.package} to ${dest}`)
+}
+
+// The published CLI tracks its own release train, so a dev build that downloads
+// it can disagree with the database schema this checkout migrates to. Build the
+// server from the same source instead and fall back to the published binary only
+// when the local build is unavailable.
+export async function stageLocalCli() {
+  const dest = windowsify("resources/opencode-cli")
+  const dir = join(import.meta.dirname, "..", "..", "opencode")
+  const build = await $`bun script/build.ts --single`.cwd(dir).nothrow().quiet()
+  if (build.exitCode !== 0) {
+    console.warn("local CLI build failed; staging the published CLI instead")
+    await downloadCliToResources()
+    return
+  }
+  const arch = process.arch === "arm64" ? "arm64" : "x64"
+  const platform = process.platform === "win32" ? "windows" : process.platform
+  const output = join(dir, "dist", `opencode-${platform}-${arch}`, "bin")
+  // Bun appends .exe on Windows; older builds wrote the bare name.
+  const binary = [join(output, "opencode.exe"), join(output, "opencode")].find((candidate) => existsSync(candidate))
+  if (binary === undefined) throw new Error(`local CLI build did not produce a binary in ${output}`)
+  await copyFile(binary, dest)
+  if (process.platform !== "win32") await chmod(dest, 0o755)
+  if (process.platform === "darwin") await $`codesign --force --sign - ${dest}`
+  console.log(`Staged local CLI from ${binary}`)
+}
+
+/**
+ * Zen's free tier answers HTTP 426 for any client older than 1.18.0, and every
+ * published v2 CLI is versioned 0.0.0-<channel>-<build>, which semver sorts
+ * below 1.18.0 however new the build is. The stage therefore reports the
+ * workspace client version instead. That string is compiled into the binary's
+ * fixed-layout bundle, so the replacement carries the build ident trimmed to
+ * the original byte length and can be patched in place.
+ */
+export function stagedCliVersion(version: string, preview = CLI_VERSION) {
+  const staged = `${version}-${preview.split("-").slice(1).join("-")}`.slice(0, preview.length)
+  if (staged.length !== preview.length || staged.endsWith("-") || staged.endsWith(".")) {
+    throw new Error(`Cannot fit client version ${version} into the ${preview.length}-byte v2 CLI version`)
+  }
+  return staged
+}
+
+/**
+ * Rewrites every copy of the version in place. Equal byte length keeps the
+ * bundle's string offsets intact, which is why the caller must not resize it.
+ */
+async function rewriteCliVersion(binary: string, from: string, to: string) {
+  if (from.length !== to.length) throw new Error(`Rewriting ${from} to ${to} would resize the v2 CLI version`)
+  const bytes = Buffer.from(await Bun.file(binary).arrayBuffer())
+  const replacement = Buffer.from(to)
+  const hits = (() => {
+    let found = 0
+    for (let at = bytes.indexOf(from); at !== -1; at = bytes.indexOf(from, at + replacement.length)) {
+      replacement.copy(bytes, at)
+      found++
+    }
+    return found
+  })()
+  if (hits > 0) await Bun.write(binary, bytes)
+  return hits
+}
+
+// The product version the rest of the build reports to providers lives in the
+// server package, so the v2 CLI and the sidecar cannot drift apart.
+async function clientVersion() {
+  const path = join(import.meta.dir, "../../opencode/package.json")
+  const pkg = (await Bun.file(path).json()) as { version?: string }
+  if (typeof pkg.version !== "string" || pkg.version.length === 0) throw new Error(`${path} has no version`)
+  return pkg.version
 }
 
 export function windowsify(path: string) {

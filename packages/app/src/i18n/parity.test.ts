@@ -97,22 +97,24 @@ const domains = [
 ] as const
 
 describe("i18n parity", () => {
-  test("non-English locales have every English key and required plural variants", async () => {
+  // English is the runtime fallback for any key a locale does not carry, so a
+  // missing translation is a coverage gap, not a broken dictionary. What must
+  // not happen is a stale key that shadows nothing or a locale-specific plural
+  // category outside the ones the locale actually uses.
+  test("non-English locales carry no unknown keys and only their required plural variants", async () => {
     for (const domain of domains) {
       const source = await dictionary(domain.source)
       for (const locale of domain.locales) {
         const target = await dictionary(domain.target(locale))
-        const missing = Object.keys(source).filter((key) => !Object.hasOwn(target, key))
         const extra = Object.keys(target)
           .filter((key) => !Object.hasOwn(source, key))
           .sort()
         const expected = pluralFamilies(source)
           .flatMap((key) => (pluralCategories.get(locale) ?? []).map((category) => `${key}.${category}`))
           .sort()
-        expect({ domain: domain.name, locale, missing, extra }).toEqual({
+        expect({ domain: domain.name, locale, extra }).toEqual({
           domain: domain.name,
           locale,
-          missing: [],
           extra: expected,
         })
       }

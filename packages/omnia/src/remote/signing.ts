@@ -2,6 +2,14 @@ import { KeyObject, createHash, createPrivateKey, createPublicKey, sign, verify 
 import type { JsonWebKey } from "node:crypto"
 
 export const REMOTE_REPLAY_WINDOW_MS = 60_000
+// Re-registration proves possession of the key that already owns a computer id.
+// The server issues a fresh random challenge on every successful claim and the
+// client signs the id-bound challenge before reusing that id.
+export const REMOTE_REGISTRATION_PATH = "/v1/computers/register"
+
+export function remoteRegistrationBody(computerId: string, challenge: string): string {
+  return `${computerId}\n${challenge}`
+}
 export const REMOTE_KEY_ID_HEADER = "x-omnia-key-id"
 export const REMOTE_TIMESTAMP_HEADER = "x-omnia-timestamp"
 export const REMOTE_SIGNATURE_HEADER = "x-omnia-signature"

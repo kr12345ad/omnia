@@ -227,7 +227,7 @@ export async function checkHealth(url: string, password?: string | null): Promis
   return false
 }
 
-function createSidecarEnv(): Record<string, string> {
+export function createSidecarEnv(): Record<string, string> {
   const env = Object.fromEntries(
     Object.entries(process.env).flatMap(([key, value]) => (value === undefined ? [] : [[key, String(value)]])),
   )

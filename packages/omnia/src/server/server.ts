@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net"
 import { networkInterfaces } from "node:os"
 import { dirname, join } from "node:path"
 import { randomBytes, timingSafeEqual } from "node:crypto"
-import { EventBus } from "./events"
+import { EventBus, type ServerEvent } from "./events"
 import { SuperskillRegistry, summarizeSuperskill } from "../superskills/registry"
 import { MemoryStore } from "../memory/store"
 import { SpecialistStore } from "../specialists/store"
@@ -576,7 +576,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
   // for a dead reader would grow memory without bound.
   const MAX_SSE_PENDING_FRAMES = 256
 
-  const subscribe = (response: ServerResponse): (() => void) => {
+  const subscribe = (response: ServerResponse, filter?: (event: ServerEvent) => boolean): (() => void) => {
     const sinceHeader = response.req.headers["last-event-id"]
     const since = typeof sinceHeader === "string" ? Number(sinceHeader) : undefined
     response.writeHead(200, {
@@ -622,7 +622,9 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     response.on("drain", flush)
     send(": connected\n\n")
     if (since !== undefined && Number.isFinite(since)) {
-      for (const event of events.since(since)) send(eventFrame(event))
+      for (const event of events.since(since)) {
+        if (filter === undefined || filter(event)) send(eventFrame(event))
+      }
     }
     send(
       `event: server.snapshot\ndata: ${JSON.stringify({ type: "server.snapshot", health: health() })}\n\n`,
@@ -631,7 +633,9 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     // by send(); subscribing and arming the heartbeat for it would leave a
     // listener on the event bus and an interval that nothing ever clears.
     if (closed) return cleanup
-    unsubscribe = events.subscribe((event) => send(eventFrame(event)))
+    unsubscribe = events.subscribe((event) => {
+      if (filter === undefined || filter(event)) send(eventFrame(event))
+    })
     subscribers.set(response, unsubscribe)
     heartbeat = setInterval(() => send(": heartbeat\n\n"), OMNIA_SSE_HEARTBEAT_MS)
     heartbeat.unref?.()

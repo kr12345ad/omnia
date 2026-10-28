@@ -13,6 +13,7 @@ import { OMNIA_SESSION_ID_MAX_LENGTH, isOperatorRequest, presentsServerToken, se
 import { startOmniaServer } from "./server"
 import type { CommandRequest, ServerComputerDriver } from "./computers"
 import type { GitHubProfile } from "../auth/github"
+import { createRemoteKeyPair } from "../remote/keys"
 import type { ActionResult, ComputerAction, FindRequest, Observation } from "../protocol"
 
 function fakeDriver(): { driver: ServerComputerDriver; commands: CommandRequest[] } {
@@ -108,6 +109,67 @@ describe("desktop identity", () => {
         const response = await fetch(`${server.url}${path}`, { headers: headers(desktopToken) })
         expect(`${path} -> ${response.status}`).toBe(`${path} -> 200`)
       }
+    })
+  })
+
+  test("a signed-in desktop cannot list or target another account's registered computer", async () => {
+    await withServer(async (server) => {
+      const owner = server.auth.mintDesktopToken({ id: 2, login: "owner" } satisfies GitHubProfile)
+      const other = server.auth.mintDesktopToken({ id: 3, login: "other" } satisfies GitHubProfile)
+      if (owner === undefined || other === undefined) throw new Error("the desktop tokens were not minted")
+      const registered = await post(server, "/v1/computers/register", owner, {
+        name: "Owner's computer",
+        platform: "linux",
+        publicKey: createRemoteKeyPair().publicKey,
+      })
+      expect(registered.status).toBe(200)
+      const { computerId } = (await registered.json()) as { computerId: string }
+
+      const listed = async (token: string) =>
+        ((await (await fetch(`${server.url}/v1/computers`, { headers: headers(token) })).json()) as {
+          computers: Array<{ id: string }>
+        }).computers.map((entry) => entry.id)
+      expect(await listed(owner)).toContain(computerId)
+      expect(await listed(other)).not.toContain(computerId)
+
+      const targeted = await post(server, `/v1/computers/${computerId}/actions`, other, {
+        action: "get_context",
+        approve: true,
+      })
+      expect(targeted.status).toBe(403)
+      const own = await post(server, `/v1/computers/${computerId}/actions`, owner, {
+        action: "get_context",
+        approve: true,
+      })
+      expect(own.status).not.toBe(403)
+    })
+  })
+
+  test("a legacy remote computer without an owner is quarantined from client tokens", async () => {
+    await withServer(async (server, clientToken) => {
+      // The operator token has no profile, so this registration deliberately
+      // looks like a pre-ownership remote entry. Client tokens must not be able
+      // to see or address it until it re-registers with an owner.
+      const registered = await post(server, "/v1/computers/register", server.token, {
+        name: "Legacy remote",
+        platform: "linux",
+        publicKey: createRemoteKeyPair().publicKey,
+      })
+      expect(registered.status).toBe(200)
+      const { computerId } = (await registered.json()) as { computerId: string }
+
+      const listed = async (token: string) =>
+        ((await (await fetch(`${server.url}/v1/computers`, { headers: headers(token) })).json()) as {
+          computers: Array<{ id: string }>
+        }).computers.map((entry) => entry.id)
+      expect(await listed(server.token)).toContain(computerId)
+      expect(await listed(clientToken)).not.toContain(computerId)
+
+      const targeted = await post(server, `/v1/computers/${computerId}/actions`, clientToken, {
+        action: "get_context",
+        approve: true,
+      })
+      expect(targeted.status).toBe(403)
     })
   })
 

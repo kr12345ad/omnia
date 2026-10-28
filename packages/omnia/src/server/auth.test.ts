@@ -5,6 +5,7 @@ import { join } from "node:path"
 import { GITHUB_API_EMAILS, GITHUB_API_USER, GITHUB_OAUTH_TOKEN } from "../auth/github"
 import { GOOGLE_OAUTH_TOKEN, GOOGLE_OAUTH_USERINFO } from "../auth/google"
 import { createRemoteKeyPair, remoteAuthHeaders } from "../remote"
+import { REMOTE_REGISTRATION_PATH, remoteRegistrationBody, signRemoteRequest } from "../remote/signing"
 import { startOmniaServer } from "./server"
 
 function fakeGitHubFetch(googleEmail = "octocat@gmail.com"): typeof fetch {
@@ -416,11 +417,27 @@ test("re-registering with the same id and key reuses the runtime entry", async (
       method: "POST",
       headers: operatorAuth(server),
       body,
-    }).then((r) => r.json())) as { ok: boolean; computerId: string }
+    }).then((r) => r.json())) as { ok: boolean; computerId: string; challenge: string }
+    const timestampMs = Date.now()
     const second = (await fetch(`${server.url}/v1/computers/register`, {
       method: "POST",
       headers: operatorAuth(server),
-      body: JSON.stringify({ name: "App Runtime", platform: "linux", publicKey: keys.publicKey, computerId: first.computerId }),
+      body: JSON.stringify({
+        name: "App Runtime",
+        platform: "linux",
+        publicKey: keys.publicKey,
+        computerId: first.computerId,
+        registrationProof: {
+          challenge: first.challenge,
+          timestampMs,
+          signature: signRemoteRequest(keys.privateKey, {
+            method: "POST",
+            path: REMOTE_REGISTRATION_PATH,
+            timestampMs,
+            body: remoteRegistrationBody(first.computerId, first.challenge),
+          }),
+        },
+      }),
     }).then((r) => r.json())) as { ok: boolean; computerId: string }
     expect(second.ok).toBe(true)
     expect(second.computerId).toBe(first.computerId)

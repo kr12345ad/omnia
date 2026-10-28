@@ -9,6 +9,9 @@ export const PAIRING_TTL_MS = 10 * 60 * 1000
 export interface PairingOffer {
   readonly code: string
   readonly name?: string
+  // The signed-in profile that created the offer. A claimed computer inherits
+  // this owner instead of becoming globally addressable by every desktop.
+  readonly owner?: string
   readonly createdAt: number
   readonly expiresAt: number
 }
@@ -92,9 +95,11 @@ export class PairingManager {
       const code = typeof entry.code === "string" ? normalizePairingCode(entry.code) : ""
       if (code.length === 0 || typeof entry.createdAt !== "number" || typeof entry.expiresAt !== "number") continue
       const name = typeof entry.name === "string" && entry.name.length > 0 ? entry.name : undefined
+      const owner = typeof entry.owner === "string" && entry.owner.length > 0 ? entry.owner : undefined
       this.offers.set(code, {
         code,
         ...(name === undefined ? {} : { name }),
+        ...(owner === undefined ? {} : { owner }),
         createdAt: entry.createdAt,
         expiresAt: entry.expiresAt,
       })
@@ -115,7 +120,7 @@ export class PairingManager {
     }
   }
 
-  create(input: { name?: string } = {}): PairingOffer {
+  create(input: { name?: string; owner?: string } = {}): PairingOffer {
     this.prune()
     let code = formatCode(this.randomBytes(PAIRING_CODE_LENGTH))
     while (this.offers.has(code)) code = formatCode(this.randomBytes(PAIRING_CODE_LENGTH))
@@ -123,6 +128,7 @@ export class PairingManager {
     const offer: PairingOffer = {
       code,
       ...(input.name === undefined || input.name.length === 0 ? {} : { name: input.name }),
+      ...(input.owner === undefined || input.owner.length === 0 ? {} : { owner: input.owner }),
       createdAt,
       expiresAt: createdAt + this.ttlMs,
     }

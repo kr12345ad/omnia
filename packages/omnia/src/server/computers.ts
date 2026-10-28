@@ -149,6 +149,10 @@ export interface BrowserDownloadSummary {
   readonly finishedAt?: number
   readonly mimeType?: string
   readonly error?: string
+  // The tab that initiated the download. Absent for a guest that had no
+  // registered tab when Electron started it; restricted sessions never see an
+  // unattributed entry.
+  readonly tabId?: string
 }
 
 export interface BrowserAuthChallengeSummary {
@@ -156,11 +160,13 @@ export interface BrowserAuthChallengeSummary {
   readonly host: string
   readonly realm: string
   readonly isProxy: boolean
+  readonly tabId?: string
 }
 
 export interface BrowserAuthAnswer {
   readonly username: string
   readonly password: string
+  readonly tabId?: string
 }
 
 export interface BrowserController {
@@ -257,9 +263,11 @@ export interface BrowserController {
   pendingDialog?(tabId?: string, sessionId?: string): Promise<BrowserDialogSummary | null>
   handleDialog?(input: BrowserDialogAnswer): Promise<{ handled: boolean }>
   // Downloads and HTTP auth challenges. Optional so partial controllers can be
-  // injected; executeBrowser fails closed when a capability is missing.
-  downloads?(): Promise<BrowserDownloadSummary[]>
-  authRequired?(): Promise<BrowserAuthChallengeSummary | null>
+  // injected; executeBrowser fails closed when a capability is missing. Both
+  // accept the session's owned tab ids so a session cannot read another tab's
+  // download records or answer its challenge.
+  downloads?(tabIds?: readonly string[], sessionId?: string): Promise<BrowserDownloadSummary[]>
+  authRequired?(tabIds?: readonly string[], sessionId?: string): Promise<BrowserAuthChallengeSummary | null>
   answerAuth?(input: BrowserAuthAnswer): Promise<{ answered: boolean }>
   upload?(files: readonly string[], tabId?: string, sessionId?: string): Promise<{ files: string[] }>
   currentTab?(sessionId?: string): string | undefined
@@ -3988,6 +3996,9 @@ export class ComputerManager {
       sessions.set(browserSession, new Set())
     }
     const owned = browserSession === undefined ? undefined : sessions.get(browserSession)
+    // A restricted session names the tabs it owns; the operator session keeps
+    // the historical global view by passing undefined.
+    const ownedTabs = owned === undefined ? undefined : [...owned]
     const recordTab = (tabId: string | undefined): void => {
       if (browserSession === undefined || tabId === undefined || tabId.length === 0) return
       if (owned === undefined) return
@@ -4613,8 +4624,11 @@ export class ComputerManager {
           if (browser.downloads === undefined) {
             return fail("operation_unavailable", "This browser runtime cannot list downloads.", false)
           }
-          const downloads = await browser.downloads()
-          const items = downloads.map((entry) => ({
+          const downloads = await browser.downloads(ownedTabs, sessionId)
+          // Defense in depth for runtimes that predate the tab filter: a
+          // restricted session only sees records attributed to its own tabs.
+          const scoped = owned === undefined ? downloads : downloads.filter((entry) => entry.tabId !== undefined && owned.has(entry.tabId))
+          const items = scoped.map((entry) => ({
             id: entry.id,
             url: entry.url,
             filename: entry.filename,
@@ -4626,9 +4640,10 @@ export class ComputerManager {
             ...(entry.finishedAt === undefined ? {} : { finishedAt: entry.finishedAt }),
             ...(entry.mimeType === undefined ? {} : { mimeType: entry.mimeType }),
             ...(entry.error === undefined ? {} : { error: entry.error }),
+            ...(entry.tabId === undefined ? {} : { tabId: entry.tabId }),
           }))
-          const completed = downloads.filter((entry) => entry.state === "completed" && entry.receivedBytes > 0)
-          const failed = downloads.filter((entry) => entry.state === "interrupted" || entry.state === "cancelled")
+          const completed = scoped.filter((entry) => entry.state === "completed" && entry.receivedBytes > 0)
+          const failed = scoped.filter((entry) => entry.state === "interrupted" || entry.state === "cancelled")
           const verification: Verification =
             completed.length > 0
               ? {
@@ -4640,16 +4655,16 @@ export class ComputerManager {
                     value: JSON.stringify({ filename: entry.filename, path: entry.path, bytes: entry.receivedBytes }),
                   })),
                 }
-              : downloads.length === 0
+              : scoped.length === 0
                 ? unverified("No downloads have been started in this browser.", "browser-download-registry")
-                : failed.length === downloads.length
+                : failed.length === scoped.length
                   ? {
                       status: "failed" as const,
                       message: `${failed.length} download(s) failed or were cancelled.`,
                       method: "browser-download-registry",
                     }
                   : unverified("Downloads are still in progress.", "browser-download-registry")
-          return ok(`${downloads.length} download(s); ${completed.length} completed.`, { downloads: items }, verification)
+          return ok(`${scoped.length} download(s); ${completed.length} completed.`, { downloads: items }, verification)
         }
         case "browser_login": {
           const denied = requireOwnedTab(tab)
@@ -4890,9 +4905,18 @@ export class ComputerManager {
           if (browser.answerAuth === undefined || browser.authRequired === undefined) {
             return fail("operation_unavailable", "This browser runtime cannot answer authentication challenges.", false)
           }
-          const challenge = await browser.authRequired().catch(() => null)
+          const challenge = await browser.authRequired(ownedTabs, sessionId).catch(() => null)
           if (challenge === null) {
             return fail("no_auth_challenge", "No HTTP authentication challenge is pending.", true)
+          }
+          // An unattributable challenge could belong to another session's tab;
+          // only the operator session may answer one.
+          if (owned !== undefined && (challenge.tabId === undefined || !owned.has(challenge.tabId))) {
+            return fail(
+              "tab_not_owned",
+              "The pending authentication challenge does not belong to a tab this session owns.",
+              false,
+            )
           }
           if (request.expectedHost !== undefined && request.expectedHost !== challenge.host) {
             return fail(
@@ -4907,7 +4931,11 @@ export class ComputerManager {
           if (username === undefined || username.length === 0 || password === undefined) {
             return fail("invalid_action", "browser_auth needs a stored credential or explicit username and password.", false)
           }
-          await browser.answerAuth({ username, password })
+          await browser.answerAuth({
+            username,
+            password,
+            ...(challenge.tabId === undefined ? {} : { tabId: challenge.tabId }),
+          })
           const after = await readPage(tab)
           const verification: Verification =
             "page" in after && sameBrowserUrl(after.page.url, challenge.url)
