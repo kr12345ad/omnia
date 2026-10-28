@@ -1,0 +1,175 @@
+name: desktop-release
+run-name: "desktop ${{ inputs.version || 'current' }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Desktop version (defaults to packages/desktop/package.json)"
+        required: false
+        type: string
+      tag:
+        description: "Release tag (defaults to v<version>)"
+        required: false
+        type: string
+      draft:
+        description: "Create the release as a draft"
+        required: false
+        type: boolean
+        default: false
+
+concurrency: desktop-release-${{ github.ref }}-${{ inputs.version }}-${{ inputs.tag }}
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Resolve version and tag
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$REQUESTED_VERSION"
+          if [ -z "$version" ]; then
+            version=$(node -p "require('./packages/desktop/package.json').version")
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::invalid desktop version '$version'"
+            exit 1
+          fi
+          tag="$REQUESTED_TAG"
+          if [ -z "$tag" ]; then tag="v$version"; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "building desktop $version as $tag"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            target: aarch64-apple-darwin
+            platform_flag: --mac --arm64
+            artifact: omnia-desktop-macos-arm64
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+            platform_flag: --mac --x64
+            artifact: omnia-desktop-macos-x64
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            platform_flag: --win --x64
+            artifact: omnia-desktop-windows-x64
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            platform_flag: --linux --x64
+            artifact: omnia-desktop-linux-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      OPENCODE_CHANNEL: prod
+      OMNIA_DISABLE_UPDATES: "1"
+      # These are unsigned preview installers: no Apple certificate, notarization
+      # or Windows signing credentials exist on the fork.
+      OMNIA_SKIP_MAC_SIGNING: "1"
+      OMNIA_SKIP_WINDOWS_SIGNING: "1"
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Prepare
+        working-directory: packages/desktop
+        env:
+          OPENCODE_VERSION: ${{ needs.version.outputs.version }}
+          RUST_TARGET: ${{ matrix.target }}
+        run: bun ./scripts/prepare.ts
+
+      - name: Build
+        working-directory: packages/desktop
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+          OPENCODE_VERSION: ${{ needs.version.outputs.version }}
+        run: bun run build
+
+      - name: Package
+        working-directory: packages/desktop
+        timeout-minutes: 60
+        run: npx electron-builder ${{ matrix.platform_flag }} --publish never --config electron-builder.config.ts
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            packages/desktop/dist/*.dmg
+            packages/desktop/dist/*.zip
+            packages/desktop/dist/*.exe
+            packages/desktop/dist/*.AppImage
+            packages/desktop/dist/*.deb
+            packages/desktop/dist/*.rpm
+            packages/desktop/dist/*.blockmap
+            packages/desktop/dist/latest*.yml
+
+  release:
+    needs:
+      - version
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: omnia-desktop-*
+          path: release
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ needs.version.outputs.tag }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release/*)
+          if (( ${#files[@]} == 0 )); then
+            echo "::error::no desktop artifacts were downloaded"
+            exit 1
+          fi
+          notes=$(cat <<EOF
+          Omnia $VERSION desktop builds for macOS, Windows and Linux.
+
+          These installers are unsigned preview builds:
+          - macOS: right-click the app and choose Open, or run
+            \`xattr -dr com.apple.quarantine /Applications/Omnia.app\`.
+          - Windows: choose More info, then Run anyway in SmartScreen.
+          - Linux: mark the AppImage executable before running it.
+
+          The in-app updater is disabled in these builds.
+          EOF
+          )
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            args=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Omnia $VERSION" --notes "$notes")
+            if [ "$DRAFT" = "true" ]; then args+=(--draft); else args+=(--latest); fi
+            gh release create "$TAG" "${files[@]}" "${args[@]}"
+          fi
