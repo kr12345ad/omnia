@@ -7,13 +7,11 @@ const channel = arg === "dev" || arg === "beta" || arg === "prod" ? arg : resolv
 // application id instead of naming the public app.
 const tenantAppId = process.env.OMNIA_APP_ID?.trim()
 const tenantProductName = process.env.OMNIA_PRODUCT_NAME?.trim()
-const appId = tenantAppId ?? (channel === "prod" ? "ai.opencode.desktop" : `ai.opencode.desktop.${channel}`)
+const appId = tenantAppId ?? (channel === "prod" ? "io.omnia.desktop" : `io.omnia.desktop.${channel}`)
 const productName =
   tenantProductName ??
-  (channel === "prod" ? "OpenCode" : `OpenCode ${channel.charAt(0).toUpperCase() + channel.slice(1)}`)
-const summary = tenantProductName
-  ? `Managed ${tenantProductName} client`
-  : `Open source AI coding agent${channel !== "prod" ? ` (${channel})` : ""}`
+  (channel === "prod" ? "Omnia" : `Omnia ${channel.charAt(0).toUpperCase() + channel.slice(1)}`)
+const summary = tenantProductName ? `Managed ${tenantProductName} client` : "Universal AI computer environment"
 
 const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
@@ -31,7 +29,9 @@ const xml = `<?xml version="1.0" encoding="UTF-8"?>
 
   <description>
     <p>
-      OpenCode is an open source agent that helps you write and run code with any AI model.
+      Omnia is a universal AI computer environment. It gives reasoning models a structured,
+      semantic representation of a computer and a standardized action interface, so they can
+      operate software without any app-specific integration.
     </p>
   </description>
 
