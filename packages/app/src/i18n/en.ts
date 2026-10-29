@@ -1413,10 +1413,10 @@ export const dict = {
   "settings.general.row.editToolPartsExpanded.title": "Expand edit tool parts",
   "settings.general.row.editToolPartsExpanded.description":
     "Show edit, write, and patch tool parts expanded by default in the timeline",
-  "settings.general.row.newInterface.title": "New layout",
+  "settings.general.row.newInterface.title": "UI Refresh",
   "settings.general.row.newInterface.badge": "New",
   "settings.general.row.newInterface.description":
-    "Use the new tabs and home layout. Switch between layouts for a limited time.",
+    "Use the refreshed interface with the new tabs and home layout. Turn it off to return to the previous layout.",
   "settings.general.row.newInterfaceNotice.title": "You're now using new layout",
   "settings.general.row.newInterfaceNotice.description": "The previous layout is no longer available",
   "settings.general.row.newInterfaceNotice.dismiss": "Dismiss",

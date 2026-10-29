@@ -51,12 +51,13 @@ describe("layout transition", () => {
     expect(resolveNewLayoutDesigns(false, false, true)).toBe(false)
     expect(resolveNewLayoutDesigns(false, undefined, false)).toBe(false)
     expect(resolveNewLayoutDesigns(false, undefined, true)).toBe(true)
+    expect(resolveNewLayoutDesigns(true, false)).toBe(false)
+    expect(resolveNewLayoutDesigns(true, undefined)).toBe(true)
   })
 
-  test("sunset replaces the toggle with a dismissible notice", () => {
+  test("sunset replaces the transition toggle with a dismissible notice", () => {
     expect(layoutTransitionState(true, true, true, false)).toEqual({ available: false, notice: true })
     expect(layoutTransitionState(true, true, true, true)).toEqual({ available: false, notice: false })
-    expect(resolveNewLayoutDesigns(true, false)).toBe(true)
   })
 
   test("caps checks for sunsets beyond the browser timeout limit", () => {

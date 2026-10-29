@@ -15,7 +15,6 @@ import { useSettings } from "@/context/settings"
 import { ExternalLink } from "../external-link"
 import { SettingsListV2 } from "./parts/list"
 import { SettingsRowV2 } from "./parts/row"
-import { LayoutRetirementNotice, LayoutTransitionToggle } from "./interface-transition"
 import {
   createAppearanceSettingsController,
   createPermissionScopeController,
@@ -124,10 +123,23 @@ const ShellSetting: Component<{ controller: ShellSettingsController }> = (props)
 
 const AppearanceSection: Component<{ controller: AppearanceSettingsController }> = (props) => {
   const language = useLanguage()
+  const settings = useSettings()
   return (
     <div class="settings-v2-section">
       <h3 class="settings-v2-section-title">{language.t("settings.general.section.appearance")}</h3>
       <SettingsListV2>
+        <SettingsRowV2
+          title={language.t("settings.general.row.newInterface.title")}
+          description={language.t("settings.general.row.newInterface.description")}
+        >
+          <div data-action="settings-ui-refresh">
+            <Switch
+              checked={settings.general.newLayoutDesigns()}
+              onChange={(checked) => settings.general.setNewLayoutDesigns(checked)}
+            />
+          </div>
+        </SettingsRowV2>
+
         <SettingsRowV2
           title={language.t("settings.general.row.colorScheme.title")}
           description={language.t("settings.general.row.colorScheme.description")}
@@ -301,31 +313,6 @@ export const SettingsGeneralV2: Component<{
     if (!update) return
     void update.catch(() => setPinchZoom(!checked))
   }
-
-  const InterfaceSection = () => (
-    <LayoutTransitionToggle
-      title={language.t("settings.general.row.newInterface.title")}
-      badge={language.t("settings.general.row.newInterface.badge")}
-      description={language.t("settings.general.row.newInterface.description")}
-      checked={settings.general.newLayoutDesigns()}
-      onChange={(checked) => {
-        settings.general.setNewLayoutDesigns(checked)
-        if (checked) return
-        void import("@/components/dialog-settings").then((module) => {
-          void dialog.show(() => <module.DialogSettings />)
-        })
-      }}
-    />
-  )
-
-  const InterfaceNoticeSection = () => (
-    <LayoutRetirementNotice
-      title={language.t("settings.general.row.newInterfaceNotice.title")}
-      description={language.t("settings.general.row.newInterfaceNotice.description")}
-      dismiss={language.t("settings.general.row.newInterfaceNotice.dismiss")}
-      onDismiss={() => settings.general.dismissNewInterfaceNotice()}
-    />
-  )
 
   const GeneralSection = () => (
     <div class="settings-v2-section">
@@ -588,14 +575,6 @@ export const SettingsGeneralV2: Component<{
       </div>
 
       <div class="settings-v2-tab-body">
-        <Show when={settings.general.layoutTransitionAvailable()}>
-          <InterfaceSection />
-        </Show>
-
-        <Show when={settings.general.newInterfaceNoticeVisible()}>
-          <InterfaceNoticeSection />
-        </Show>
-
         <GeneralSection />
 
         <AppearanceSection controller={appearance} />

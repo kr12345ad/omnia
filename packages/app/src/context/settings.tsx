@@ -134,8 +134,9 @@ export function nextSunsetCheckDelay(sunset: number, now: number) {
 }
 
 export function resolveNewLayoutDesigns(retired: boolean, preference: boolean | undefined, fallback = true) {
+  if (preference !== undefined) return preference
   if (retired) return true
-  return preference ?? fallback
+  return fallback
 }
 
 const monoFallback =
@@ -352,12 +353,6 @@ export const { use: useSettings, provider: SettingsProvider } = createSimpleCont
     })
 
     createEffect(() => {
-      if (!ready() || !oldInterfaceRetired()) return
-      if (store.general?.newLayoutDesigns === true) return
-      setStore("general", "newLayoutDesigns", true)
-    })
-
-    createEffect(() => {
       if (typeof document === "undefined") return
       const root = document.documentElement
       root.style.setProperty("--font-family-mono", monoFontFamily(store.appearance?.mono))
@@ -485,7 +480,7 @@ export const { use: useSettings, provider: SettingsProvider } = createSimpleCont
         },
         newLayoutDesigns,
         setNewLayoutDesigns(value: boolean) {
-          const next = oldInterfaceRetired() ? true : value
+          const next = value
           if (newLayoutDesigns() === next) return
           setStore("general", "newLayoutDesigns", next)
           if (typeof window !== "undefined") setTimeout(() => window.location.reload())
