@@ -88,8 +88,9 @@ const windowsPublisherName = process.env.OMNIA_WINDOWS_PUBLISHER_NAME?.trim()
 // Portable builds ship as a self-contained AppImage with no publish provider:
 // nothing phones home and the in-app updater is compiled out.
 const portable = process.env.OMNIA_NO_PUBLISH === "1"
-// Unsigned CI builds still need a valid .app; disable the release identity and
-// notarization explicitly instead of letting electron-builder guess.
+// Unsigned CI builds still need a valid .app. Electron ships its binary signed,
+// but renaming and modifying the bundle invalidates that signature, so macOS
+// reports the app as damaged unless the whole bundle is re-signed ad-hoc.
 const skipMacSigning = process.env.OMNIA_SKIP_MAC_SIGNING === "1"
 // Lean by default: no model weights and only the CPU llama.cpp runtime. Set
 // OMNIA_INCLUDE_MODELS=1 or OMNIA_INCLUDE_ALL_LLAMA=1 for a full bundle.
@@ -224,7 +225,9 @@ const getBase = (appId: string): Configuration => ({
   mac: {
     category: "public.app-category.developer-tools",
     icon: `resources/icons/icon.icns`,
-    ...(skipMacSigning ? { identity: null, hardenedRuntime: false, notarize: false } : { hardenedRuntime: true, notarize: true }),
+    ...(skipMacSigning
+      ? { identity: "-", hardenedRuntime: false, notarize: false }
+      : { hardenedRuntime: true, notarize: true }),
     gatekeeperAssess: false,
     entitlements: "resources/entitlements.plist",
     entitlementsInherit: "resources/entitlements.plist",

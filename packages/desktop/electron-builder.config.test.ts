@@ -124,6 +124,28 @@ for (const [raw, appId, productName] of [
   })
 }
 
+// Without an Apple certificate the app still has to be re-signed after
+// electron-builder renames and modifies the Electron bundle; otherwise the
+// stale signature makes macOS report the installed app as damaged.
+test("preview macOS builds re-sign the app ad-hoc", async () => {
+  const previousChannel = process.env.OPENCODE_CHANNEL
+  const previousSigning = process.env.OMNIA_SKIP_MAC_SIGNING
+  process.env.OPENCODE_CHANNEL = "prod"
+  process.env.OMNIA_SKIP_MAC_SIGNING = "1"
+  try {
+    const module = await import("./electron-builder.config.ts?mac-adhoc")
+    const config = module.default as Configuration
+    expect(config.mac?.identity).toBe("-")
+    expect(config.mac?.hardenedRuntime).toBe(false)
+    expect(config.mac?.notarize).toBe(false)
+  } finally {
+    if (previousChannel === undefined) delete process.env.OPENCODE_CHANNEL
+    else process.env.OPENCODE_CHANNEL = previousChannel
+    if (previousSigning === undefined) delete process.env.OMNIA_SKIP_MAC_SIGNING
+    else process.env.OMNIA_SKIP_MAC_SIGNING = previousSigning
+  }
+})
+
 // A cross-build must bundle the llama.cpp runtimes for the artifact, not for the
 // host that happens to run electron-builder.
 test("the llama filter follows OMNIA_TARGET_PLATFORM/ARCH", async () => {

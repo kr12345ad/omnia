@@ -81,8 +81,8 @@ jobs:
     env:
       OPENCODE_CHANNEL: prod
       OMNIA_DISABLE_UPDATES: "1"
-      # These are unsigned preview installers: no Apple certificate, notarization
-      # or Windows signing credentials exist on the fork.
+      # These are ad-hoc signed but not notarized preview installers: no Apple
+      # distribution certificate or Windows signing credentials exist on the fork.
       OMNIA_SKIP_MAC_SIGNING: "1"
       OMNIA_SKIP_WINDOWS_SIGNING: "1"
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
@@ -113,6 +113,19 @@ jobs:
         working-directory: packages/desktop
         timeout-minutes: 60
         run: npx electron-builder ${{ matrix.platform_flag }} --publish never --config electron-builder.config.ts
+
+      - name: Verify macOS app and disk image
+        if: runner.os == 'macOS'
+        working-directory: packages/desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=$(find dist -maxdepth 2 -type d -name '*.app' | head -n 1)
+          test -n "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          for dmg in dist/*.dmg; do
+            hdiutil verify "$dmg"
+          done
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -161,7 +174,7 @@ jobs:
           notes=$(cat <<EOF
           Omnia $VERSION desktop builds for macOS, Windows and Linux.
 
-          These installers are unsigned preview builds:
+          These preview builds are ad-hoc signed but not notarized:
           - macOS: right-click the app and choose Open, or run
             \`xattr -dr com.apple.quarantine /Applications/Omnia.app\`.
           - Windows: choose More info, then Run anyway in SmartScreen.
