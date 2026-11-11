@@ -440,3 +440,33 @@ describe("remote session ceiling", () => {
     expect(seen.executed).toEqual([])
   })
 })
+
+describe("remote shell plan enforcement", () => {
+  for (const plan of [undefined, "free", "pro"] as const) {
+    test(`dispatch enforces ${plan ?? "unknown"} even with an ungated driver`, async () => {
+      let commands = 0
+      let polls = 0
+      const results: Array<{ ok: boolean; code?: string }> = []
+      const agent = new RemoteAgent({
+        serverUrl: "http://127.0.0.1:9999", computerId: "remote-1", token: "test", plan,
+        driver: { ...driver, runCommand: async () => {
+          commands += 1
+          return { success: true, status: "success" }
+        } },
+        fetch: fakeFetch(async (url, init) => {
+          if (String(url).includes("/results")) {
+            results.push(JSON.parse(String(init?.body)))
+            return Response.json({ ok: true })
+          }
+          if (++polls === 1) return Response.json({ command: { id: "cmd-1", method: "runCommand", params: { command: "echo test" } } })
+          return new Response("{}", { status: 401 })
+        }),
+      })
+      agent.start()
+      while (agent.running) await Bun.sleep(1)
+      expect(commands).toBe(plan === "pro" ? 1 : 0)
+      expect(results[0]?.ok).toBe(plan === "pro")
+      if (plan !== "pro") expect(results[0]?.code).toBe("capability_not_entitled")
+    })
+  }
+})

@@ -1608,10 +1608,15 @@ export class ComputerManager {
     // A browser_login fills a form with a stored secret, so it reads the vault.
     // The entitlement has to be settled BEFORE the read, otherwise the highest
     // value gate in the product runs after the credential is already in memory.
-    if (actionType.startsWith("browser_") && request.credential !== undefined) {
-      const capability = actionType === "browser_login" ? "vault_login" : "browser_automation"
-      const denied = await this.denyUnentitled(capability)
-      if (denied !== undefined) return denied
+    if (request.credential !== undefined && request.credential !== "none") {
+      if (["type", "browser_type", "browser_auth", "browser_login"].includes(actionType)) {
+        const denied = await this.denyUnentitled("vault_login")
+        if (denied !== undefined) return denied
+      }
+      if (actionType.startsWith("browser_") && actionType !== "browser_login") {
+        const denied = await this.denyUnentitled("browser_automation")
+        if (denied !== undefined) return denied
+      }
     }
     const typedCredential =
       actionType === "type" && request.credential !== undefined

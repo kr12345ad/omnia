@@ -10,7 +10,7 @@ import { enterpriseFeature, enterpriseGuard, enterpriseProfile, enterpriseServer
 import { createControlPlaneDriver } from "./control-plane-driver"
 import type { AgentActivityEvent } from "./agent-state"
 import { registerOmniaDriver, omniaDriverRegistry } from "./registry"
-import { createPlatformHostDriver } from "./server-host"
+import { createPlatformHostDriver, ensureFlatpakAccessibility } from "./server-host"
 
 export interface RemoteAgentConfig {
   serverUrl: string
@@ -248,14 +248,19 @@ export function resolveJoinServer(
   return { code, ...(controlPlaneUrl === undefined ? {} : { serverUrl: controlPlaneUrl }) }
 }
 
-function start(
+async function start(
   next: RemoteAgentConfig,
   options: {
     driver?: ReturnType<typeof createPlatformHostDriver>
     keys?: Remote.RemoteKeyPair
     browser?: Remote.RemoteBrowserHandler
   } = {},
-): boolean {
+): Promise<boolean> {
+  if (options.driver === undefined) {
+    await ensureFlatpakAccessibility()
+    // The operator may have unpaired or changed hosts during preparation.
+    if (config !== next) return false
+  }
   const driver = options.driver ?? createPlatformHostDriver()
   if (driver === undefined) return false
   // Resolve the bridge handler per call: registration can run before the
@@ -628,6 +633,7 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
   if (auth === undefined) {
     throw new Error("Sign in to Omnia and configure the control plane before registering this computer.")
   }
+  await ensureFlatpakAccessibility()
   const driver = createPlatformHostDriver()
   if (driver === undefined) throw new Error("No computer runtime is available on this machine.")
   const keys = await Remote.loadOrCreateRemoteKeyPair(remoteKeyStorage())
@@ -670,7 +676,7 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
   stopControlPlaneRuntime()
   controlPlane = { computerId: body.computerId, serverUrl: auth.url }
   writeRegisteredComputerId(body.computerId)
-  if (!start({ serverUrl: auth.url, computerId: body.computerId, token: body.token }, { driver, keys })) {
+  if (!(await start({ serverUrl: auth.url, computerId: body.computerId, token: body.token }, { driver, keys }))) {
     controlPlane = undefined
     throw new Error("Registered with the control plane, but no computer runtime is available on this machine.")
   }
@@ -715,7 +721,7 @@ export function registerRemoteAgentIpcHandlers(): void {
   if (config !== undefined) {
     // Re-persist on load so plaintext tokens from older versions are encrypted.
     persistRemoteAgentConfig(config)
-    start(config)
+    void start(config).catch(() => undefined)
   } else {
     void syncControlPlaneRegistration()
     const timer = setInterval(() => void syncControlPlaneRegistration(), 5000)
@@ -748,6 +754,7 @@ export function registerRemoteAgentIpcHandlers(): void {
         "No computer on this network is offering that pairing code. Keep the pairing dialog open on the other computer and try again.",
       )
     }
+    await ensureFlatpakAccessibility()
     const driver = createPlatformHostDriver()
     if (driver === undefined) throw new Error("No computer runtime is available on this machine.")
     const info = await driver.getInfo()
@@ -780,13 +787,13 @@ export function registerRemoteAgentIpcHandlers(): void {
     stopControlPlaneRuntime()
     config = { serverUrl, computerId: body.computerId, token: body.token }
     persistRemoteAgentConfig(config)
-    if (!start(config, { driver, keys })) {
+    if (!(await start(config, { driver, keys }))) {
       // The claim is already consumed, but the token is persisted above, so a
       // second code must never be needed: retry once with a fresh driver
       // before failing. A restart also resumes from the stored config.
       await new Promise((resolve) => setTimeout(resolve, 2000))
       const retryDriver = createPlatformHostDriver()
-      if (retryDriver !== undefined && start(config, { driver: retryDriver, keys })) {
+      if (retryDriver !== undefined && await start(config, { driver: retryDriver, keys })) {
         return { computerId: config.computerId, serverUrl: config.serverUrl, name: hostname() }
       }
       throw new Error("Paired, but the computer runtime did not start. Restart the app to resume the pairing.")

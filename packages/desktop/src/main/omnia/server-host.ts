@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process"
+import { execFile } from "node:child_process"
 import { systemPreferences } from "electron"
 import { Cua, Daemon } from "@opencode-ai/omnia"
 
@@ -76,7 +76,6 @@ function platformFallbacks(driver: Daemon.HostDriver, platform: "darwin" | "win3
 // computer-control commands through the signed remote channel.
 let accessibilityPromptShown = false
 export function createPlatformHostDriver(platform: NodeJS.Platform = process.platform): Daemon.HostDriver | undefined {
-  if (platform === "linux") ensureFlatpakAccessibility()
   if (platform === "darwin") {
     // Trigger the macOS Accessibility prompt so the installed app registers in
     // System Settings > Privacy & Security > Accessibility and can be enabled.
@@ -105,17 +104,15 @@ export function createPlatformHostDriver(platform: NodeJS.Platform = process.pla
 // Flatpak sandboxes LibreOffice away from the accessibility bus, which hides
 // its entire UI tree. Grant the narrow a11y bus permission once so the runtime
 // can see the app's controls.
-export function ensureFlatpakAccessibility(): void {
-  const info = spawnSync("flatpak", ["info", "org.libreoffice.LibreOffice"], { stdio: "ignore", timeout: 5000 })
-  if (info.status !== 0) return
-  const permissions = spawnSync("flatpak", ["info", "--show-permissions", "org.libreoffice.LibreOffice"], {
-    encoding: "utf8",
-    timeout: 5000,
+export async function ensureFlatpakAccessibility(): Promise<void> {
+  if (process.platform !== "linux") return
+  const run = (args: string[]) => new Promise<string | undefined>((resolve) => {
+    execFile("flatpak", args, { timeout: 5000, killSignal: "SIGKILL", windowsHide: true }, (error, stdout) => {
+      resolve(error ? undefined : stdout)
+    })
   })
-  if (permissions.stdout?.includes("org.a11y.Bus=talk")) return
-  spawnSync(
-    "flatpak",
-    ["override", "--user", "--talk-name=org.a11y.Bus", "--env=NO_AT_BRIDGE=0", "org.libreoffice.LibreOffice"],
-    { stdio: "ignore", timeout: 5000 },
-  )
+  if (await run(["info", "org.libreoffice.LibreOffice"]) === undefined) return
+  const permissions = await run(["info", "--show-permissions", "org.libreoffice.LibreOffice"])
+  if (permissions?.includes("org.a11y.Bus=talk")) return
+  await run(["override", "--user", "--talk-name=org.a11y.Bus", "--env=NO_AT_BRIDGE=0", "org.libreoffice.LibreOffice"])
 }

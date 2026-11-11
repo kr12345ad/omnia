@@ -45,3 +45,20 @@ describe("daemon process helpers", () => {
     expect(result.success).toBe(true)
   })
 })
+
+test("times out a shell whose descendants retain the output pipes", async () => {
+  const started = Date.now()
+  const result = await executeShellCommand(
+    { command: "sleep 20 & wait", timeoutMs: 1000 },
+    { file: "/bin/sh", args: (command) => ["-c", command] },
+  )
+  expect(result.command?.timedOut).toBe(true)
+  expect(Date.now() - started).toBeLessThan(5000)
+}, 7000)
+
+test("input helper terminates descendant processes on timeout", async () => {
+  const started = Date.now()
+  const result = await runProcessWithInput("/bin/sh", ["-c", "sleep 20 & wait"], "", 100)
+  expect(result.timedOut).toBe(true)
+  expect(Date.now() - started).toBeLessThan(4000)
+}, 6000)

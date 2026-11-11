@@ -44,3 +44,19 @@ describe("createRefreshQueue", () => {
     queue.dispose()
   })
 })
+
+test("disposal stops a suspended refresh and rejects further queued work", async () => {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const calls: string[] = []
+  const queue = createRefreshQueue({ paused: () => false, bootstrap: () => gate, bootstrapInstance: (dir) => { calls.push(dir) } })
+  queue.refresh()
+  await tick()
+  queue.push("before")
+  queue.dispose()
+  queue.push("after")
+  queue.refresh()
+  release()
+  await tick()
+  expect(calls).toEqual([])
+})

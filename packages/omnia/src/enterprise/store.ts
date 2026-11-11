@@ -1423,26 +1423,39 @@ export class EnterpriseStore {
   }
 
   appendUsage(input: Omit<UsageEvent, "id" | "at"> & { at?: number }): UsageEvent {
-    const at = input.at ?? this.now()
-    const event: UsageEvent = {
-      id: `usev_${randomBytes(8).toString("hex")}`,
-      at,
-      userId: input.userId,
-      model: sanitizeText(input.model, 160) || "unknown",
-      ...(input.provider === undefined ? {} : { provider: sanitizeText(input.provider, 64) }),
-      inputTokens: clampCount(input.inputTokens),
-      outputTokens: clampCount(input.outputTokens),
-      costUsd: clampCost(input.costUsd),
-      ...(input.tool === undefined ? {} : { tool: sanitizeText(input.tool, 64) }),
-      ...(input.computerId === undefined ? {} : { computerId: sanitizeText(input.computerId, 128) }),
-      ...(input.sessionId === undefined ? {} : { sessionId: sanitizeText(input.sessionId, 128) }),
-      ...(input.durationMs === undefined ? {} : { durationMs: clampCount(input.durationMs) }),
-      ...(input.distributionId === undefined ? {} : { distributionId: sanitizeText(input.distributionId, 128) }),
+    return this.appendUsageBatch([input])[0]!
+  }
+
+  appendUsageBatch(inputs: readonly (Omit<UsageEvent, "id" | "at"> & { at?: number })[]): UsageEvent[] {
+    if (inputs.length === 0) return []
+    const events = inputs.map((input) => {
+      const at = input.at ?? this.now()
+      const event: UsageEvent = {
+        id: `usev_${randomBytes(8).toString("hex")}`,
+        at,
+        userId: input.userId,
+        model: sanitizeText(input.model, 160) || "unknown",
+        ...(input.provider === undefined ? {} : { provider: sanitizeText(input.provider, 64) }),
+        inputTokens: clampCount(input.inputTokens),
+        outputTokens: clampCount(input.outputTokens),
+        costUsd: clampCost(input.costUsd),
+        ...(input.tool === undefined ? {} : { tool: sanitizeText(input.tool, 64) }),
+        ...(input.computerId === undefined ? {} : { computerId: sanitizeText(input.computerId, 128) }),
+        ...(input.sessionId === undefined ? {} : { sessionId: sanitizeText(input.sessionId, 128) }),
+        ...(input.durationMs === undefined ? {} : { durationMs: clampCount(input.durationMs) }),
+        ...(input.distributionId === undefined ? {} : { distributionId: sanitizeText(input.distributionId, 128) }),
+      }
+      return event
+    })
+    const previous = this.state.usage
+    this.state.usage = [...previous, ...events].slice(-MAX_USAGE)
+    try {
+      this.save()
+    } catch (error) {
+      this.state.usage = previous
+      throw error
     }
-    this.state.usage.push(event)
-    if (this.state.usage.length > MAX_USAGE) this.state.usage = this.state.usage.slice(-MAX_USAGE)
-    this.save()
-    return structuredClone(event)
+    return structuredClone(events)
   }
 
   // ── Internals ────────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ import { activateTestUserData, useTestUserData } from "../../../test-support/use
 // real module and this suite agree on where its files live.
 const userData = useTestUserData("omnia-remote-agent-")
 mock.module("./server-host", () => ({
+  ensureFlatpakAccessibility: async () => {},
   createPlatformHostDriver: () => ({
     id: "test-host",
     backend: "test",

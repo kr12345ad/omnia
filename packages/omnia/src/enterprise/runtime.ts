@@ -685,11 +685,10 @@ export class EnterpriseRuntime {
         const body = await readJson(request, response)
         if (body === undefined) return true
         const events = Array.isArray(body.events) ? body.events.slice(0, 100) : []
-        let accepted = 0
-        for (const entry of events) {
-          if (typeof entry !== "object" || entry === null) continue
+        const inputs = events.flatMap((entry) => {
+          if (typeof entry !== "object" || entry === null) return []
           const record = entry as Record<string, unknown>
-          this.store.appendUsage({
+          return [{
             userId: session.user.id,
             model: typeof record.model === "string" ? record.model : "unknown",
             ...(typeof record.provider === "string" ? { provider: record.provider } : {}),
@@ -701,9 +700,9 @@ export class EnterpriseRuntime {
             ...(typeof record.computerId === "string" ? { computerId: record.computerId } : {}),
             ...(typeof record.sessionId === "string" ? { sessionId: record.sessionId } : {}),
             distributionId: distribution.id,
-          })
-          accepted += 1
-        }
+          }]
+        })
+        const accepted = this.store.appendUsageBatch(inputs).length
         json(response, 200, { ok: true, accepted })
         return true
       }

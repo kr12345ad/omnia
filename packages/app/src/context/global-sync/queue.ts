@@ -9,6 +9,7 @@ export function createRefreshQueue(input: QueueInput) {
   const queued = new Map<string, string>()
   let root = false
   let running = false
+  let disposed = false
   let timer: ReturnType<typeof setTimeout> | undefined
 
   const key = input.key ?? ((directory: string) => directory)
@@ -27,7 +28,7 @@ export function createRefreshQueue(input: QueueInput) {
   }
 
   const schedule = () => {
-    if (timer) return
+    if (disposed || timer) return
     timer = setTimeout(() => {
       timer = undefined
       void drain()
@@ -35,24 +36,25 @@ export function createRefreshQueue(input: QueueInput) {
   }
 
   const push = (directory: string) => {
-    if (!directory) return
+    if (disposed || !directory) return
     queued.set(key(directory), directory)
-    if (input.paused()) return
+    if (disposed || input.paused()) return
     schedule()
   }
 
   const refresh = () => {
+    if (disposed) return
     root = true
-    if (input.paused()) return
+    if (disposed || input.paused()) return
     schedule()
   }
 
   async function drain() {
-    if (running) return
+    if (disposed || running) return
     running = true
     try {
       while (true) {
-        if (input.paused()) return
+        if (disposed || input.paused()) return
         if (root) {
           root = false
           await input.bootstrap()
@@ -67,7 +69,7 @@ export function createRefreshQueue(input: QueueInput) {
     } finally {
       running = false
       // oxlint-disable-next-line no-unsafe-finally -- intentional: early return skips schedule() when paused
-      if (input.paused()) return
+      if (disposed || input.paused()) return
       if (root || queued.size) schedule()
     }
   }
@@ -79,6 +81,9 @@ export function createRefreshQueue(input: QueueInput) {
       queued.delete(key(directory))
     },
     dispose() {
+      disposed = true
+      root = false
+      queued.clear()
       if (!timer) return
       clearTimeout(timer)
       timer = undefined
