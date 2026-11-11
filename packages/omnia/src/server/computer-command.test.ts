@@ -574,3 +574,27 @@ describe("read_value and wait", () => {
     })
   })
 })
+
+
+for (const selector of [undefined, "auto"] as const) {
+test(`shell approval confirms and binds the resolved credential (${selector ?? "omitted"})`, async () => {
+  const harness = createCommandDriver()
+  await withCommandServer(harness, async (_server, call) => {
+    await call("/v1/computers/local/credentials", { name: "first", secret: "first-secret", rules: [{ kind: "command", match: "whoami" }] })
+    const operation = { action: "run_command", resources: ["whoami"], command: "whoami", computerId: "local", maxUses: 3, ...(selector === undefined ? {} : { credential: selector }) }
+    const preview = await call("/v1/permissions/approve", operation)
+    expect(preview.status).toBe(428)
+    expect(JSON.stringify(preview.body)).not.toContain("first-secret")
+    const issued = await call("/v1/permissions/approve", { ...operation, resolvedCredential: preview.body.credential })
+    expect(issued.status).toBe(200)
+    const fingerprint = (issued.body.approval as { fingerprint: string }).fingerprint
+    // A bound operator approval intentionally overrides the denied SECRETS scope.
+    const approved = await call("/v1/computers/local/actions", { action: "run_command", command: "whoami", ...(selector === undefined ? {} : { credential: selector }), approvalFingerprint: fingerprint })
+    expect(approved.status).toBe(200)
+    await call("/v1/computers/local/credentials", { name: "second", secret: "second-secret", rules: [{ kind: "command", match: "whoami" }] })
+    const denied = await call("/v1/computers/local/actions", { action: "run_command", command: "whoami", ...(selector === undefined ? {} : { credential: selector }), approvalFingerprint: fingerprint })
+    expect(denied.status).toBe(403)
+    expect(harness.commands).toHaveLength(1)
+  })
+})
+}

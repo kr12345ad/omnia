@@ -1,5 +1,6 @@
+import { Remote } from "@opencode-ai/omnia"
 import { recordGrabSubscription } from "./host-grab"
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test"
+import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { existsSync, lstatSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { handlers, setEncryptionAvailable } from "../../../test-support/electron"
@@ -336,6 +337,33 @@ describe("control-plane registration", () => {
       globalThis.fetch = originalFetch
     }
   })
+
+  for (const plan of ["pro", undefined] as const) {
+    test(`passes the confirmed owner plan to the agent (${plan ?? "unavailable"})`, async () => {
+      process.env.OMNIA_CONTROL_PLANE_URL = "https://cp.example.com"
+      writeFileSync(sessionPath, JSON.stringify({ url: "https://cp.example.com", clientToken: "client-token", profile: { id: 123, login: "owner" } }))
+      const originalFetch = globalThis.fetch
+      const fallback = captureFetch([])
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).endsWith("/v1/billing/entitlement")) {
+          return new Response(JSON.stringify(plan === undefined ? { error: "unavailable" } : { ok: true, plan }), { status: plan === undefined ? 503 : 200 })
+        }
+        return fallback(input, init)
+      }) as typeof fetch
+      const plans: unknown[] = []
+      const start = spyOn(Remote.RemoteAgent.prototype, "start").mockImplementation(function(this: Remote.RemoteAgent) {
+        plans.push((this as unknown as { plan: unknown }).plan)
+      })
+      try {
+        await remoteAgent.registerWithControlPlane()
+        expect(plans).toEqual([plan ?? "free"])
+      } finally {
+        start.mockRestore()
+        globalThis.fetch = originalFetch
+        delete process.env.OMNIA_CONTROL_PLANE_URL
+      }
+    })
+  }
 
   test("stops the registered agent after sign-out", async () => {
     process.env.OMNIA_CONTROL_PLANE_URL = "https://cp.example.com"

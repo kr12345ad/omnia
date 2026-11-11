@@ -223,6 +223,7 @@ describe("computer pairing", () => {
         computerId: claim.computerId,
         token: claim.token,
         driver: remoteHost.driver,
+        plan: "pro",
         keys,
       })
       agent.start()

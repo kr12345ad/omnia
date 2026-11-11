@@ -1361,3 +1361,22 @@ test("refresh does not reuse a capture started before invalidation", async () =>
   expect(first.id).toBe(second.id)
   expect(engine.latestSnapshot()?.id).toBe(second.id)
 })
+
+
+test("repeated invalidation bounds snapshot and find without caching stale captures", async () => {
+  const backend = new FakeBackend()
+  const engine = new CuaEngine({ backend })
+  let captures = 0
+  backend.snapshot = async () => {
+    captures++
+    engine.invalidate()
+    return snapshot("invalidated", captures)
+  }
+  await expect(engine.snapshot()).rejects.toThrow("repeatedly invalidated")
+  expect(captures).toBe(4)
+  await expect(engine.find({ name: "Save" })).rejects.toThrow("repeatedly invalidated")
+  expect(captures).toBe(8)
+  expect(engine.latestSnapshot()).toBeUndefined()
+  backend.snapshot = async () => snapshot("stable", 9)
+  expect((await engine.snapshot()).id).toBe("stable")
+})

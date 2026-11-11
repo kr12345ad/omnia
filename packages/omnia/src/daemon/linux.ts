@@ -747,11 +747,13 @@ export class LinuxHostDriver {
   private atspiFailures = 0
   private atspiRetryAt = 0
   private disposed = false
+  private readonly injectedRunner: boolean
   private readonly probeDisplay: boolean
   private readonly access: DriverAccess
   windowListTruncated = false
 
   constructor(options: LinuxDriverOptions = {}) {
+    this.injectedRunner = options.runner !== undefined
     this.runner = options.runner ?? defaultRunner
     this.display = options.display ?? process.env.DISPLAY
     this.maxApps = options.maxApps ?? 25
@@ -765,7 +767,7 @@ export class LinuxHostDriver {
   }
 
   get available(): boolean {
-    if (process.platform !== "linux") return false
+    if (process.platform !== "linux" && !this.injectedRunner) return false
     const display = this.display
     const wayland = process.env.WAYLAND_DISPLAY
     const hasEnv =

@@ -128,3 +128,19 @@ test("non-owner cannot obtain an owner's password reset token", async () => {
   expect((await post(token, false, `users/${owner.id}/reset`, {})).status).toBe(403)
   expect(runtime.store.invites()).toHaveLength(0)
 })
+
+
+test("all concurrent invalid passwords are counted and audited after lockout", async () => {
+  const s = store()
+  const user = await s.createUser({ email: "lock@acme.test", name: "Lock", role: "member", password })
+  const results = await Promise.all(Array.from({ length: 12 }, () => s.login(user.email, "wrong password")))
+  expect(results.every((result) => !result.ok)).toBe(true)
+  expect(s.user(user.id)?.failedLogins).toBe(12)
+  expect(s.auditAll().filter((event) => event.action === "user.login_failed")).toHaveLength(12)
+  const lock = s.user(user.id)?.lockedUntil
+  expect(lock).toBeGreaterThan(Date.now())
+  const valid = await s.login(user.email, password)
+  expect(valid.ok).toBe(false)
+  if (!valid.ok) expect(valid.retryAfter).toBeGreaterThan(0)
+  expect(s.user(user.id)?.lockedUntil).toBe(lock)
+})

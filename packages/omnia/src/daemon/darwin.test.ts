@@ -198,6 +198,8 @@ describeShell("macOS command execution", () => {
 describeShell("macOS native input failures", () => {
   test("press_keys reports native command failure", async () => {
     const host = new DarwinHostDriver({ osascript: "/bin/false", ioreg: "/bin/true" })
-    expect((await host.execute({ type: "press_keys", keys: "cmd+a" })).success).toBe(false)
+    const result = await host.execute({ type: "press_keys", keys: "cmd+a" })
+    expect(result.success).toBe(false)
+    expect(result.status).toBe("failed")
   })
 })

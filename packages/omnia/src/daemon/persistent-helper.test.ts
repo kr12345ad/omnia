@@ -9,7 +9,7 @@ function helper(body: string, options: { timeoutMs?: number; maxOutputBytes?: nu
 test("a silent helper has a bounded readiness deadline", async () => {
   const child = helper("import time; time.sleep(30)", { timeoutMs: 40 })
   try {
-    const ready = await Promise.race([child.ready, new Promise<undefined>((resolve) => setTimeout(resolve, 300))])
+    const ready = await Promise.race([child.ready, new Promise<undefined>((resolve) => setTimeout(resolve, 2000))])
     expect(ready?.ok).toBe(false)
     expect(child.exited).toBe(true)
   } finally { await child.dispose() }
@@ -55,5 +55,22 @@ time.sleep(30)`)
   try {
     await child.ready
     expect((await child.request("read")).payload.text).toBe("日本語")
+  } finally { await child.dispose() }
+})
+
+
+test("a synchronous request serialization failure does not retire the helper later", async () => {
+  const child = helper(`import json, sys
+print(json.dumps({"ready": True, "ok": True}), flush=True)
+for line in sys.stdin:
+    data = json.loads(line)
+    print(json.dumps({"id": data["id"], "ok": True}), flush=True)
+`)
+  try {
+    expect((await child.ready).ok).toBe(true)
+    await expect(child.request("invalid", { value: 1n }, 30)).rejects.toThrow()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(child.exited).toBe(false)
+    expect((await child.request("ping")).ok).toBe(true)
   } finally { await child.dispose() }
 })

@@ -5,6 +5,7 @@ import { app, ipcMain } from "electron"
 import { decryptString, encryptString, writeSecretFile } from "./secret-storage"
 import { Browser, Daemon, Pairing, Remote } from "@opencode-ai/omnia"
 import { controlPlaneAuth, controlPlaneFingerprint, fetchControlPlane } from "./control-plane"
+import { readBillingEntitlement } from "./billing"
 import { readAuthSession } from "./auth-session"
 import { enterpriseFeature, enterpriseGuard, enterpriseProfile, enterpriseServerUrl } from "./enterprise"
 import { createControlPlaneDriver } from "./control-plane-driver"
@@ -261,6 +262,10 @@ async function start(
     // The operator may have unpaired or changed hosts during preparation.
     if (config !== next) return false
   }
+  const expectedConfig = config
+  const expectedControlPlane = controlPlane
+  const entitlement = await readBillingEntitlement().catch(() => undefined)
+  if (config !== expectedConfig || controlPlane !== expectedControlPlane) return false
   const driver = options.driver ?? createPlatformHostDriver()
   if (driver === undefined) return false
   // Resolve the bridge handler per call: registration can run before the
@@ -286,6 +291,7 @@ async function start(
     serverUrl: next.serverUrl,
     computerId: next.computerId,
     token: next.token,
+    plan: entitlement?.plan ?? "free",
     driver: tracked,
     browser,
     keyStorage: remoteKeyStorage(),

@@ -355,29 +355,37 @@ export class CredentialStore {
   }
 
   match(query: CredentialQuery): CredentialMatch | undefined {
-    const candidates = this.credentials.flatMap((credential) => {
-      if (!credential.enabled) return []
-      if (credential.computerId === "*") {
-        if (process.env.OMNIA_ALLOW_WILDCARD_CREDENTIALS !== "1") return []
-      } else if (credential.computerId !== query.computerId) {
-        return []
-      }
-      return credential.rules.flatMap((rule): CredentialMatch[] => {
-        const score = ruleScore(rule, query)
-        return score === undefined ? [] : [{ credential, rule, score }]
-      })
-    })
-    // Rule kind is the specificity signal (an explicit command beats a
-    // window title beats a page URL), so it ranks before match length. A long
-    // unrelated url rule must never outrank a short exact application rule.
-    candidates.sort(
-      (a, b) =>
-        kindRank(a.rule.kind) - kindRank(b.rule.kind) ||
-        b.score - a.score ||
-        b.credential.updatedAt - a.credential.updatedAt,
-    )
-    return candidates[0]
+    return matchCredential(this.list(query.computerId), query)
   }
+
+  matchSummary(query: CredentialQuery) {
+    return matchCredential(this.summaries(query.computerId), query)
+  }
+}
+
+function matchCredential<T extends ComputerCredential | ComputerCredentialSummary>(credentials: readonly T[], query: CredentialQuery) {
+  const candidates = credentials.flatMap((credential) => {
+    if (!credential.enabled) return []
+    if (credential.computerId === "*") {
+      if (process.env.OMNIA_ALLOW_WILDCARD_CREDENTIALS !== "1") return []
+    } else if (credential.computerId !== query.computerId) {
+      return []
+    }
+    return credential.rules.flatMap((rule): Array<{ credential: T; rule: CredentialRule; score: number }> => {
+      const score = ruleScore(rule, query)
+      return score === undefined ? [] : [{ credential, rule, score }]
+    })
+  })
+  // Rule kind is the specificity signal (an explicit command beats a
+  // window title beats a page URL), so it ranks before match length. A long
+  // unrelated url rule must never outrank a short exact application rule.
+  candidates.sort(
+    (a, b) =>
+      kindRank(a.rule.kind) - kindRank(b.rule.kind) ||
+      b.score - a.score ||
+      b.credential.updatedAt - a.credential.updatedAt,
+  )
+  return candidates[0]
 }
 
 // The rename that swapped the vault in is only durable once the directory

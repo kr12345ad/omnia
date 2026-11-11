@@ -508,14 +508,15 @@ export class EnterpriseStore {
     const userId = user.id
     const current = this.state.users.find((entry) => entry.id === userId)
     if (current === undefined || current.status !== "active" || current.passwordHash !== user.passwordHash ||
-      this.legalDecision({ email: current.email }).banned ||
-      (current.lockedUntil !== undefined && current.lockedUntil > this.now())) {
+      this.legalDecision({ email: current.email }).banned) {
       return { ok: false, reason: "The account changed during sign-in. Try again." }
     }
     user = current
     if (!valid) {
       const failures = (user.failedLogins ?? 0) + 1
-      const lockedUntil = failures >= LOGIN_FAILURE_LIMIT ? at + LOGIN_LOCKOUT_MS : undefined
+      const lockedUntil = user.lockedUntil !== undefined && user.lockedUntil > this.now()
+        ? user.lockedUntil
+        : failures >= LOGIN_FAILURE_LIMIT ? this.now() + LOGIN_LOCKOUT_MS : undefined
       this.state.users = this.state.users.map((entry) =>
         entry.id === user.id ? { ...entry, failedLogins: failures, ...(lockedUntil === undefined ? {} : { lockedUntil }) } : entry,
       )
@@ -523,8 +524,11 @@ export class EnterpriseStore {
       return {
         ok: false,
         reason: "The email address or password is incorrect.",
-        ...(lockedUntil === undefined ? {} : { retryAfter: Math.ceil(LOGIN_LOCKOUT_MS / 1000) }),
+        ...(lockedUntil === undefined ? {} : { retryAfter: Math.max(0, Math.ceil((lockedUntil - this.now()) / 1000)) }),
       }
+    }
+    if (user.lockedUntil !== undefined && user.lockedUntil > this.now()) {
+      return { ok: false, reason: "Too many failed attempts. Try again shortly.", retryAfter: Math.ceil((user.lockedUntil - this.now()) / 1000) }
     }
     const updated: EnterpriseUser = {
       ...user,

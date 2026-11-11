@@ -62,3 +62,22 @@ test("input helper terminates descendant processes on timeout", async () => {
   expect(result.timedOut).toBe(true)
   expect(Date.now() - started).toBeLessThan(4000)
 }, 6000)
+
+
+test("Windows skips exited children while POSIX still signals their process groups", () => {
+  const script = `
+    Object.defineProperty(process, "platform", { value: "win32" })
+    const { terminateProcessTree } = await import(${JSON.stringify(new URL("./process.ts", import.meta.url).href)})
+    for (const state of [{ exitCode: 0, signalCode: null }, { exitCode: null, signalCode: "SIGTERM" }]) {
+      terminateProcessTree({ pid: 999, ...state, kill() { throw new Error("an exited Windows PID was targeted") } }, "SIGKILL")
+    }
+    Object.defineProperty(process, "platform", { value: "linux" })
+    let group
+    process.kill = (pid) => { group = pid; return true }
+    terminateProcessTree({ pid: 999, exitCode: 0, signalCode: null }, "SIGKILL")
+    if (group !== -999) throw new Error("an exited POSIX group leader suppressed descendant cleanup")
+    await Bun.sleep(50)
+  `
+  const result = Bun.spawnSync([process.execPath, "--eval", script], { stdout: "pipe", stderr: "pipe" })
+  expect(result.exitCode, result.stderr.toString()).toBe(0)
+})

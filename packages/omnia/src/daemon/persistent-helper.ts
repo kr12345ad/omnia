@@ -184,7 +184,13 @@ export function createJsonLineHelper(options: PersistentHelperOptions): Persiste
         }, requestTimeoutMs)
         timer.unref?.()
         pending.set(id, { resolve, reject, timer })
-        child.stdin.write(`${JSON.stringify({ id, command, params })}\n`)
+        try {
+          child.stdin.write(`${JSON.stringify({ id, command, params })}\n`)
+        } catch (error) {
+          pending.delete(id)
+          clearTimeout(timer)
+          reject(error)
+        }
       })
     },
     async dispose() {

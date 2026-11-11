@@ -16,6 +16,7 @@ const SIGKILL_ESCALATION_MS = 2000
 export function terminateProcessTree(child: ChildProcess, signal: "SIGTERM" | "SIGKILL"): void {
   if (child.pid === undefined) return
   if (process.platform === "win32") {
+    if (child.exitCode !== null || child.signalCode !== null) return
     const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 2000 })
     killer.on("error", () => child.kill(signal))
     killer.unref()

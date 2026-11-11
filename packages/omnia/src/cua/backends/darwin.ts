@@ -1207,6 +1207,9 @@ class DarwinCuaBackend implements CuaBackend {
   // preferred whenever swiftc is available; the JXA scripts stay as fallback.
   private ensureAxHelper(): Promise<string | undefined> {
     if (this.nativeHelper !== undefined) return Promise.resolve(this.nativeHelper)
+    // An injected runner owns the command boundary; do not compile or invoke
+    // the real host helper behind that boundary.
+    if (this.injectedRunner) return Promise.resolve(undefined)
     if (process.platform !== "darwin") return Promise.resolve(undefined)
     if (this.nativeHelperPromise === undefined) {
       this.nativeHelperPromise = (async () => {

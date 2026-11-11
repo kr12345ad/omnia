@@ -93,18 +93,17 @@ describe("server resource caps", () => {
       for (let index = 0; index < 5000; index += 1) {
         server.events.emit("computer.capabilities", { data: { index, filler: "x".repeat(200) } })
       }
-      let closed = false
-      try {
-        for (let attempt = 0; attempt < 20 && !closed; attempt += 1) {
-          const result = await Promise.race([
-            reader.read(),
-            new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 100)),
-          ])
-          closed = result !== undefined && result.done === true
-        }
-      } catch {
-        closed = true
-      }
+      let deadline: ReturnType<typeof setTimeout> | undefined
+      const closed = await Promise.race([
+        (async () => {
+          // Network chunk sizes vary across platforms. Drain every queued
+          // frame before expecting EOF rather than assuming twenty reads.
+          while (!(await reader.read()).done) {}
+          return true
+        })().catch(() => true),
+        new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), 2000) }),
+      ])
+      clearTimeout(deadline)
       expect(closed).toBe(true)
     } finally {
       controller.abort()

@@ -88,7 +88,7 @@ export class CuaEngine {
   private generation = 0
   private latest: CuaSnapshot | undefined
   private latestOptions: CuaSnapshotOptions = {}
-  private snapshotPending: { epoch: number; options: CuaSnapshotOptions; promise: Promise<CuaSnapshot> } | undefined
+  private snapshotPending: { epoch: number; options: CuaSnapshotOptions; promise: Promise<CuaSnapshot | undefined> } | undefined
   private actionQueue: Promise<unknown> = Promise.resolve()
   // Observations stay addressable by id so a ref paired with an observation can
   // be resolved against exactly that observation.
@@ -137,24 +137,33 @@ export class CuaEngine {
   // lands mid-action can observe a transient state, so verification never uses
   // a concurrent read as evidence and always captures its own post-action read
   // inside the serialized action path.
-  private capture(options: CuaSnapshotOptions): Promise<CuaSnapshot> {
-    const pending = this.snapshotPending
-    if (pending !== undefined && pending.epoch === this.captureEpoch && snapshotOptionsSupersetOf(pending.options, options, this.defaultMaxElements())) {
-      return pending.promise.then((shared) => {
-        const covered = snapshotForOptions(shared, pending.options, options, this.defaultMaxElements())
-        return covered ?? this.startCapture(options)
-      })
+  private async capture(options: CuaSnapshotOptions): Promise<CuaSnapshot> {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      this.assertActive()
+      const cached = this.reuse(options)
+      if (cached !== undefined) return cached
+      const pending = this.snapshotPending
+      if (pending !== undefined && pending.epoch === this.captureEpoch && snapshotOptionsSupersetOf(pending.options, options, this.defaultMaxElements())) {
+        const shared = await pending.promise
+        if (shared !== undefined && pending.epoch === this.captureEpoch) {
+          const covered = snapshotForOptions(shared, pending.options, options, this.defaultMaxElements())
+          if (covered !== undefined) return covered
+        }
+      } else {
+        const fresh = await this.startCapture(options)
+        if (fresh !== undefined) return fresh
+      }
     }
-    return this.startCapture(options)
+    throw new Error("Computer capture was repeatedly invalidated; try again once the desktop is stable.")
   }
 
-  private startCapture(options: CuaSnapshotOptions): Promise<CuaSnapshot> {
+  private startCapture(options: CuaSnapshotOptions): Promise<CuaSnapshot | undefined> {
     this.assertActive()
     const epoch = this.captureEpoch
     const promise = this.backend.snapshot(options).then((fresh) => {
       this.assertActive()
       // A pre-action capture must never refill the post-action cache.
-      return epoch === this.captureEpoch ? this.acceptSnapshot(fresh, options) : this.snapshot(options)
+      return epoch === this.captureEpoch ? this.acceptSnapshot(fresh, options) : undefined
     })
     const entry = { epoch, options, promise }
     this.snapshotPending = entry
@@ -244,6 +253,11 @@ export class CuaEngine {
     return this.backend.find(query, snapshot)
   }
 
+  /**
+   * Disposal can reject an in-flight action after the backend received it.
+   * Such a rejection means delivery is unknown; callers must observe the
+   * desktop before retrying and must not infer that the action did not run.
+   */
   async execute(action: CuaAction): Promise<CuaActionResult> {
     // Actions run one at a time: interleaved before/after snapshots would
     // misattribute another action's changes to this one.

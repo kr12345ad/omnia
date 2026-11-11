@@ -2418,14 +2418,30 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       json(response, 400, { ok: false, error: "Shell approvals require a computerId." })
       return true
     }
+    let shellApproval: ReturnType<typeof context.computers.commandApproval> | undefined
+    if (body.action === "run_command") {
+      try {
+        shellApproval = context.computers.commandApproval(String(body.computerId), {
+          action: "run_command",
+          ...(typeof body.command === "string" ? { command: body.command } : {}),
+          ...(typeof body.cwd === "string" ? { cwd: body.cwd } : {}),
+          ...(typeof body.credential === "string" ? { credential: body.credential } : {}),
+        })
+      } catch (error) {
+        json(response, 400, { ok: false, error: error instanceof Error ? error.message : "Credential selection failed." })
+        return true
+      }
+      const selected = shellApproval.credential
+      if (selected !== null && (!isRecord(body.resolvedCredential) ||
+        body.resolvedCredential.id !== selected.id || body.resolvedCredential.updatedAt !== selected.updatedAt)) {
+        json(response, 428, { ok: false, error: "Confirm the resolved credential before approving this command.", credential: selected })
+        return true
+      }
+    }
     const operation: OperationInput = {
       action: body.action,
       resources,
-      ...(body.action === "run_command" ? { metadata: {
-        computerId: body.computerId,
-        cwd: typeof body.cwd === "string" ? body.cwd : null,
-        credential: typeof body.credential === "string" ? body.credential : null,
-      } } : {}),
+      ...(shellApproval === undefined ? {} : { metadata: shellApproval.operation.metadata }),
       ...(typeof body.command === "string" ? { command: body.command } : {}),
     }
     try {

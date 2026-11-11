@@ -32,7 +32,7 @@ import {
 import { operationFingerprint } from "../security/approval"
 import type { OperationInput } from "../security/types"
 import type { EventBus } from "./events"
-import type { ComputerCredential, CredentialMatch, CredentialStore } from "../credentials"
+import type { ComputerCredential, ComputerCredentialSummary, CredentialMatch, CredentialStore, CredentialQuery } from "../credentials"
 import { credentialEnv, redactSecrets } from "../credentials"
 import { CdpError } from "../browser/cdp"
 import { browserFailure } from "../browser/errors"
@@ -47,6 +47,13 @@ import {
   verifyWindowState,
   type KWinShellRunner,
 } from "./kwin-verify"
+
+type CredentialResolution<T> = {
+  readonly credential?: T
+  readonly match?: { readonly credential: T; readonly rule: CredentialMatch["rule"]; readonly score: number }
+  readonly required: readonly OmniaScope[]
+  readonly failure?: ExecuteOutcome
+}
 
 export type { CommandRequest, CommandResult } from "../protocol"
 
@@ -1545,6 +1552,17 @@ export class ComputerManager {
     }
   }
 
+  commandApproval(id: string, request: ServerActionRequest) {
+    const computer = this.computers.get(id)
+    const resolution = computer === undefined ? undefined : this.resolveCredential(computer, request, "run_command", true)
+    if (resolution?.failure !== undefined) throw new Error(resolution.failure.result.message ?? "Credential selection failed.")
+    const credential = resolution?.credential
+    return {
+      operation: this.actionOperation("run_command", id, request),
+      credential: credential === undefined ? null : { id: credential.id, name: credential.name, updatedAt: credential.updatedAt },
+    }
+  }
+
   private actionOperation(actionType: string, id: string, request: ServerActionRequest): OperationInput {
     const command = actionType === "run_command" ? (request.command ?? request.text ?? "").trim() : request.command
     const resource =
@@ -1562,6 +1580,11 @@ export class ComputerManager {
       resources: [resource],
       ...(actionType === "run_command" ? { metadata: {
         computerId: id, cwd: request.cwd ?? null, credential: request.credential ?? null,
+        resolvedCredential: (() => {
+          const computer = this.computers.get(id)
+          const credential = computer === undefined ? undefined : this.resolveCredential(computer, request, actionType, true).credential
+          return credential === undefined ? null : { id: credential.id, updatedAt: credential.updatedAt }
+        })(),
       } } : {}),
       ...(command === undefined ? {} : { command }),
     }
@@ -1610,7 +1633,7 @@ export class ComputerManager {
     // value gate in the product runs after the credential is already in memory.
     if (request.credential !== undefined && request.credential !== "none") {
       if (["type", "browser_type", "browser_auth", "browser_login"].includes(actionType)) {
-        const denied = await this.denyUnentitled("vault_login")
+        const denied = await this.denyUnentitled("vault_login", false)
         if (denied !== undefined) return denied
       }
       if (actionType.startsWith("browser_") && actionType !== "browser_login") {
@@ -1678,6 +1701,10 @@ export class ComputerManager {
             },
           },
         }
+      }
+      if (typedCredential?.credential !== undefined) {
+        const denied = await this.denyUnentitled("vault_login")
+        if (denied !== undefined) return denied
       }
       if (request.approve === true) {
         this.events.emit("permission.decided", {
@@ -1768,6 +1795,10 @@ export class ComputerManager {
             data: { action: actionType, approvedBy: request.approvedBy ?? (request.origin === "agent" ? "agent" : "session"), scopes: required },
           })
         }
+      }
+      if (browserCredential?.credential !== undefined) {
+        const denied = await this.denyUnentitled("vault_login")
+        if (denied !== undefined) return denied
       }
       return this.executeBrowser(request, id, browserCredential)
     }
@@ -2617,31 +2648,34 @@ export class ComputerManager {
   // Shared credential selection. run_command matches rules even when the
   // caller omits the selector; type and browser_type resolve only when the
   // caller asks explicitly, so ordinary text is never replaced by a secret.
+  private resolveCredential(computer: ManagedComputer, request: ServerActionRequest, action: string): CredentialResolution<ComputerCredential>
+  private resolveCredential(computer: ManagedComputer, request: ServerActionRequest, action: string, metadataOnly: true): CredentialResolution<ComputerCredentialSummary>
   private resolveCredential(
     computer: ManagedComputer,
     request: ServerActionRequest,
     action: string,
-  ): {
-    readonly credential?: ComputerCredential
-    readonly match?: CredentialMatch
-    readonly required: readonly OmniaScope[]
-    readonly failure?: ExecuteOutcome
-  } {
+    metadataOnly = false,
+  ): CredentialResolution<ComputerCredential | ComputerCredentialSummary> {
     const baseScopes = requiredScopesForAction(action)
     const selector = request.credential
+    const matchCredential = () => metadataOnly
+      ? this.credentials?.matchSummary(this.credentialQuery(computer, request, action))
+      : this.credentials?.match(this.credentialQuery(computer, request, action))
     if (selector === "none" || (selector === undefined && action !== "run_command")) {
       return {
-        ...(action === "run_command" ? { match: this.credentialMatch(computer, request, action) } : {}),
+        ...(action === "run_command" ? { match: matchCredential() } : {}),
         required: baseScopes,
       }
     }
-    const match = this.credentialMatch(computer, request, action)
+    const match = matchCredential()
     if (selector === undefined || selector === "auto") {
       const credential = match?.credential
       return { credential, match, required: credential === undefined ? baseScopes : [...baseScopes, "SECRETS"] }
     }
     const candidate =
-      this.credentials?.get(selector) ?? this.credentials?.list(computer.id).find((entry) => entry.name === selector)
+      metadataOnly
+        ? this.credentials?.summaries().find((entry) => entry.id === selector) ?? this.credentials?.summaries(computer.id).find((entry) => entry.name === selector)
+        : this.credentials?.get(selector) ?? this.credentials?.list(computer.id).find((entry) => entry.name === selector)
     if (candidate !== undefined && candidate.computerId !== computer.id && candidate.computerId !== "*") {
       const message = `Credential ${selector} is not stored for ${computer.id}.`
       return {
@@ -2677,23 +2711,23 @@ export class ComputerManager {
     return { credential: candidate, match, required: [...baseScopes, "SECRETS"] }
   }
 
-  private credentialMatch(computer: ManagedComputer, request: ServerActionRequest, action: string): CredentialMatch | undefined {
+  private credentialQuery(computer: ManagedComputer, request: ServerActionRequest, action: string): CredentialQuery {
     if (action === "run_command") {
-      return this.credentials?.match({ computerId: computer.id, command: (request.command ?? request.text ?? "").trim() })
+      return { computerId: computer.id, command: (request.command ?? request.text ?? "").trim() }
     }
     if (action === "browser_type" || action === "browser_login") {
       // Login selects a credential the same way typing does, by the page it is
       // for: `url` only picks the credential, it is never typed anywhere.
-      return this.credentials?.match({
+      return {
         computerId: computer.id,
         ...(request.url === undefined ? {} : { url: request.url }),
         ...(request.app === undefined ? {} : { application: request.app }),
-      })
+      }
     }
-    return this.credentials?.match({
+    return {
       computerId: computer.id,
       ...(request.app === undefined ? {} : { application: request.app }),
-    })
+    }
   }
 
   // Resolves the credential plus the exact field value a type action should
@@ -2708,6 +2742,7 @@ export class ComputerManager {
    */
   private async denyUnentitled(
     capability: "vault_login" | "browser_automation",
+    consume = true,
   ): Promise<{ readonly httpStatus: number; readonly result: ActionResult } | undefined> {
     const base = this.controlPlaneUrl()
     const token = this.controlPlaneToken()
@@ -2722,7 +2757,7 @@ export class ComputerManager {
       const response = await fetch(`${base}/v1/billing/check`, {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify({ capability }),
+        body: JSON.stringify({ capability, consume }),
         // Without a deadline a hung control plane hung the action forever, which
         // reads to the user as Omnia being broken rather than billing being slow.
         signal: AbortSignal.timeout(5_000),
@@ -2881,6 +2916,12 @@ export class ComputerManager {
         },
       }
     }
+    const selected = this.resolveCredential(computer, request, "run_command", true)
+    if (selected.failure !== undefined) return selected.failure
+    if (selected.credential !== undefined) {
+      const denied = await this.denyUnentitled("vault_login", false)
+      if (denied !== undefined) return denied
+    }
     const resolution = this.resolveCredential(computer, request, "run_command")
     if (resolution.failure !== undefined) return resolution.failure
     const credential = resolution.credential
@@ -2953,6 +2994,14 @@ export class ComputerManager {
       })
     }
 
+    if (credential !== undefined) {
+      const denied = await this.denyUnentitled("vault_login")
+      if (denied !== undefined) return denied
+      const current = this.resolveCredential(computer, request, "run_command", true).credential
+      if (current?.id !== credential.id || current.updatedAt !== credential.updatedAt) {
+        return { httpStatus: 409, result: { success: false, status: "rejected", message: "The selected credential changed. Request approval again." } }
+      }
+    }
     const usesStoredSecret =
       credential !== undefined && /(^|[\s;&|])(sudo|doas|pkexec)(\s|$)/.test(command)
     const env = credential === undefined ? undefined : credentialEnv(credential)
