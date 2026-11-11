@@ -239,3 +239,18 @@ describe("release farm", () => {
     expect(release.log.join("\n")).toContain("missing toolchain")
   })
 })
+
+test("build steps have a bounded wait even with inherited output pipes", async () => {
+  const { stream } = await import("./releases")
+  const started = Date.now()
+  await expect(stream("/bin/sh", ["-c", "sleep 20 & wait"], tmpdir(), {}, () => {}, 100)).rejects.toThrow("timed out")
+  expect(Date.now() - started).toBeLessThan(3000)
+})
+
+test("streamed artifact hash preserves bytes and digest", async () => {
+  const { hashFile } = await import("./releases")
+  const directory = workspace()
+  const file = join(directory, "artifact.bin")
+  writeFileSync(file, "abc")
+  expect(await hashFile(file)).toEqual({ file, bytes: 3, sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" })
+})

@@ -142,6 +142,7 @@ async function executeAction(driver: HostDriver, body: DaemonExecuteBody): Promi
 }
 
 export async function startDaemon(driver: HostDriver, token = randomBytes(32).toString("hex")): Promise<DaemonHandle> {
+  if (token.trim().length === 0) throw new Error("Daemon authentication requires a non-empty token.")
   const server = createServer(async (request, response) => {
     try {
       const header = request.headers.authorization ?? ""

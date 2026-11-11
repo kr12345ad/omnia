@@ -585,3 +585,51 @@ describe("browser_login with a stored credential", () => {
     ])
   })
 })
+
+
+test("vault preview precedes automatic shell secret access and refusals never consume", async () => {
+  const { driver, actions } = baseDriver({ runCommand: async () => ({ success: true, status: "success", message: "ran" }) })
+  const { manager, credentials } = createManager(driver)
+  const credential = credentials.save({ computerId: "local", name: "shell", secret: SECRET, rules: [{ kind: "command", match: "whoami" }] })
+  const previousUrl = process.env.OMNIA_SERVER_URL
+  const previousToken = process.env.OMNIA_SERVER_TOKEN
+  const previousFetch = globalThis.fetch
+  const checks: Array<{ capability: string; consume: boolean }> = []
+  let refuse = false
+  globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    checks.push(JSON.parse(String(init?.body)))
+    return new Response(JSON.stringify({ allowed: !refuse, capability: "vault_login", plan: "free" }), { status: refuse ? 402 : 200 })
+  }) as typeof fetch
+  process.env.OMNIA_SERVER_URL = "http://127.0.0.1:4200"
+  process.env.OMNIA_SERVER_TOKEN = "synthetic-test-token"
+  try {
+    for (const request of [
+      { action: "type", credential: credential.id, field: "invalid" },
+      { action: "type", credential: "missing" },
+      { action: "type", credential: credential.id },
+    ]) {
+      expect((await manager.execute("local", request)).result.success).toBe(false)
+    }
+    expect(checks.every((check) => check.consume === false)).toBe(true)
+    expect(actions).toHaveLength(0)
+    checks.length = 0
+    refuse = true
+    for (const selector of [undefined, "auto", credential.id]) {
+      const result = await manager.execute("local", { action: "run_command", command: "whoami", ...(selector === undefined ? {} : { credential: selector }), ...approval, approvedScopes: ["PROCESS_EXECUTE", "SECRETS"] })
+      expect(result.httpStatus).toBe(402)
+    }
+    expect(checks).toHaveLength(3)
+    expect(checks.every((check) => check.consume === false)).toBe(true)
+    checks.length = 0
+    refuse = false
+    const allowed = await manager.execute("local", { action: "type", credential: credential.id, ...approval })
+    expect(allowed.result.success).toBe(true)
+    expect(checks.map((check) => check.consume)).toEqual([false, true])
+  } finally {
+    globalThis.fetch = previousFetch
+    if (previousUrl === undefined) delete process.env.OMNIA_SERVER_URL
+    else process.env.OMNIA_SERVER_URL = previousUrl
+    if (previousToken === undefined) delete process.env.OMNIA_SERVER_TOKEN
+    else process.env.OMNIA_SERVER_TOKEN = previousToken
+  }
+})

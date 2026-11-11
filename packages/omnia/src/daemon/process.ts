@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process"
+import { execFile, spawn, type ChildProcess } from "node:child_process"
 import type { ActionResult, CommandRequest, CommandResult } from "../protocol"
 
 export interface ProcessResult {
@@ -10,6 +10,24 @@ export interface ProcessResult {
 }
 
 const SIGKILL_ESCALATION_MS = 2000
+
+// POSIX children are spawned in their own group so descendants cannot retain
+// output pipes after the shell is terminated. Windows uses taskkill's tree mode.
+export function terminateProcessTree(child: ChildProcess, signal: "SIGTERM" | "SIGKILL"): void {
+  if (child.pid === undefined) return
+  if (process.platform === "win32") {
+    if (child.exitCode !== null || child.signalCode !== null) return
+    const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, timeout: 2000 })
+    killer.on("error", () => child.kill(signal))
+    killer.unref()
+    return
+  }
+  try {
+    process.kill(-child.pid, signal)
+  } catch {
+    child.kill(signal)
+  }
+}
 
 export function runProcess(
   file: string,
@@ -48,7 +66,7 @@ export function runProcessWithInput(
   maxOutputBytes = 1024 * 1024,
 ): Promise<ProcessResult> {
   return new Promise((resolve) => {
-    const child = spawn(file, [...args], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true })
+    const child = spawn(file, [...args], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, detached: process.platform !== "win32" })
     let stdout = ""
     let stderr = ""
     let truncated = false
@@ -72,12 +90,19 @@ export function runProcessWithInput(
       settled = true
       clearTimeout(timer)
       if (killTimer !== undefined) clearTimeout(killTimer)
+      if (timedOut) terminateProcessTree(child, "SIGKILL")
       resolve({ stdout, stderr, code, truncated, timedOut })
     }
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill("SIGTERM")
-      killTimer = setTimeout(() => child.kill("SIGKILL"), SIGKILL_ESCALATION_MS)
+      terminateProcessTree(child, "SIGTERM")
+      killTimer = setTimeout(() => {
+        terminateProcessTree(child, "SIGKILL")
+        child.stdin.destroy()
+        child.stdout.destroy()
+        child.stderr.destroy()
+        finish(null)
+      }, SIGKILL_ESCALATION_MS)
     }, timeoutMs)
     child.stdout.on("data", (chunk: Buffer) => {
       stdout = append(stdout, chunk)
@@ -103,6 +128,7 @@ export async function executeShellCommand(
   const startedAt = Date.now()
   return new Promise((resolve) => {
     const child = spawn(shell.file, [...shell.args(request.command)], {
+      detached: process.platform !== "win32",
       cwd: request.cwd,
       env: { ...process.env, ...(request.env ?? {}) },
       stdio: ["pipe", "pipe", "pipe"],
@@ -133,8 +159,14 @@ export async function executeShellCommand(
     })
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill("SIGTERM")
-      killTimer = setTimeout(() => child.kill("SIGKILL"), SIGKILL_ESCALATION_MS)
+      terminateProcessTree(child, "SIGTERM")
+      killTimer = setTimeout(() => {
+        terminateProcessTree(child, "SIGKILL")
+        child.stdin.destroy()
+        child.stdout.destroy()
+        child.stderr.destroy()
+        finish(null)
+      }, SIGKILL_ESCALATION_MS)
     }, timeoutMs)
     let killTimer: ReturnType<typeof setTimeout> | undefined
     const finish = (exitCode: number | null, error?: string) => {
@@ -142,6 +174,7 @@ export async function executeShellCommand(
       settled = true
       clearTimeout(timer)
       if (killTimer !== undefined) clearTimeout(killTimer)
+      if (timedOut) terminateProcessTree(child, "SIGKILL")
       const command: CommandResult = {
         exitCode,
         stdout,

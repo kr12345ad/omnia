@@ -1,5 +1,5 @@
 import type { CommandRequest, ComputerAction, ElementReference, FindRequest, ObservationRequest } from "../protocol"
-import type { PlanId } from "../billing/plans"
+import { planFor, type PlanId } from "../billing/plans"
 import type { HostDriver } from "../daemon/host-driver"
 import type { RemoteCommand, RemoteResultMessage } from "../server/remote"
 import { REMOTE_SESSION_LIMIT_CODE, remoteSessionLimit, type RemoteSessionLimit } from "./entitlement"
@@ -311,6 +311,15 @@ export class RemoteAgent {
           }
         }
         case "runCommand": {
+          // Every remote driver must enforce the owner's plan, including local
+          // or plugin drivers that have no billing gate of their own.
+          const plan = planFor(this.plan)
+          if (plan.capabilities.remote_shell.limit === 0) {
+            return {
+              id: command.id, ok: false, code: "capability_not_entitled",
+              error: `remote_shell is not included in the ${plan.id} plan.`,
+            }
+          }
           if (this.driver.runCommand === undefined) return unavailable(command.id, "shell commands")
           return { id: command.id, ok: true, result: await this.driver.runCommand(command.params as CommandRequest) }
         }

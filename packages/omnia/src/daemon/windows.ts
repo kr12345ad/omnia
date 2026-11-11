@@ -673,19 +673,22 @@ export class WindowsHostDriver {
       if (script === undefined) {
         return { success: false, status: "rejected", message: `The key ${keys} is not supported on Windows.` }
       }
-      await this.script(script)
+      const result = await this.script(script)
+      if (result.code !== 0) return { success: false, status: "failed", message: result.stderr.trim() || "Windows key event failed." }
       return { success: true, status: "success", message: `Pressed ${keys}.` }
     }
     if (action.type === "press_keys" || action.type === "press") {
       const script = keyboardScript(action.keys)
       if (script === undefined) return { success: false, status: "rejected", message: "The key combination is not supported." }
-      await this.script(script)
+      const result = await this.script(script)
+      if (result.code !== 0) return { success: false, status: "failed", message: result.stderr.trim() || "Windows key event failed." }
       return { success: true, status: "success", message: `Pressed ${action.keys}.` }
     }
     if (action.type === "type") {
       const target = action.target
       if (target !== undefined && typeof target === "object" && target.kind === "element") {
-        await this.elementAction(target.elementId, "focus")
+        const focused = await this.elementAction(target.elementId, "focus")
+        if (!focused.success) return focused
       }
       const result = await this.scriptWithInput(typeScript(), action.text)
       if (result.code !== 0) {

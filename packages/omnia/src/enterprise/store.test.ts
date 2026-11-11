@@ -264,3 +264,16 @@ describe("distribution manifest", () => {
     expect(instance.publishDistribution(traced.id, "1.0.0", "").status).toBe("published")
   })
 })
+
+test("usage batches are durable and survive reopening", () => {
+  const target = store()
+  const events = target.appendUsageBatch([
+    { userId: "synthetic", model: "one", inputTokens: 1, outputTokens: 2, costUsd: 0 },
+    { userId: "synthetic", model: "two", inputTokens: 3, outputTokens: 4, costUsd: 0 },
+  ])
+  expect(events).toHaveLength(2)
+  expect(events[0]?.id).not.toBe(events[1]?.id)
+  const reopened = openEnterpriseStore({ file: target.file })
+  expect(JSON.stringify(reopened)).toContain(events[0]!.id)
+  expect(JSON.stringify(reopened)).toContain(events[1]!.id)
+})

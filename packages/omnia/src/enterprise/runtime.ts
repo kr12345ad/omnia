@@ -685,11 +685,10 @@ export class EnterpriseRuntime {
         const body = await readJson(request, response)
         if (body === undefined) return true
         const events = Array.isArray(body.events) ? body.events.slice(0, 100) : []
-        let accepted = 0
-        for (const entry of events) {
-          if (typeof entry !== "object" || entry === null) continue
+        const inputs = events.flatMap((entry) => {
+          if (typeof entry !== "object" || entry === null) return []
           const record = entry as Record<string, unknown>
-          this.store.appendUsage({
+          return [{
             userId: session.user.id,
             model: typeof record.model === "string" ? record.model : "unknown",
             ...(typeof record.provider === "string" ? { provider: record.provider } : {}),
@@ -701,9 +700,9 @@ export class EnterpriseRuntime {
             ...(typeof record.computerId === "string" ? { computerId: record.computerId } : {}),
             ...(typeof record.sessionId === "string" ? { sessionId: record.sessionId } : {}),
             distributionId: distribution.id,
-          })
-          accepted += 1
-        }
+          }]
+        })
+        const accepted = this.store.appendUsageBatch(inputs).length
         json(response, 200, { ok: true, accepted })
         return true
       }
@@ -938,13 +937,19 @@ export class EnterpriseRuntime {
       json(response, 200, { ok: true, user: publicUser(user) })
       return true
     }
-    if (segments.length === 1 && segments[0] !== undefined) {
+    if ((segments.length === 1 || (segments.length === 2 && segments[1] === "reset")) && segments[0] !== undefined) {
       const target = this.store.user(segments[0])
       if (target === undefined) {
         json(response, 404, { ok: false, error: "Unknown user." })
         return true
       }
-      if (method === "PATCH") {
+      // Resetting an owner's password transfers control of the organization
+      // just as granting the owner role does.
+      if (target.role === "owner" && actor.role !== "owner" && ["PATCH", "DELETE", "POST"].includes(method)) {
+        json(response, 403, { ok: false, error: "Only an owner can modify another owner." })
+        return true
+      }
+      if (method === "PATCH" && segments.length === 1) {
         this.require(actor, response, "users:write")
         this.requireCsrf(request, response)
         const body = await readJson(request, response)
@@ -970,7 +975,7 @@ export class EnterpriseRuntime {
         json(response, 200, { ok: true, user: publicUser(updated) })
         return true
       }
-      if (method === "DELETE") {
+      if (method === "DELETE" && segments.length === 1) {
         this.require(actor, response, "users:write")
         this.requireCsrf(request, response)
         if (target.id === actor.id) {
@@ -1582,14 +1587,14 @@ export class EnterpriseRuntime {
     return result
   }
 
-  private require(user: EnterpriseUser, response: ServerResponse, capability: Capability): boolean {
-    if (this.store.permits(user, capability)) return true
+  private require(user: EnterpriseUser, response: ServerResponse, capability: Capability): void {
+    if (this.store.permits(user, capability)) return
     json(response, 403, { ok: false, error: `Your role (${user.role}) cannot ${capability.replace(":", " ")}.` })
-    return false
+    throw new Error("Enterprise capability denied.")
   }
 
-  private requireCsrf(request: IncomingMessage, response: ServerResponse): boolean {
-    if (bearer(request) !== undefined && this.cookieToken(request) === undefined) return true
+  private requireCsrf(request: IncomingMessage, response: ServerResponse): void {
+    if (bearer(request) !== undefined && this.cookieToken(request) === undefined) return
     const origin = typeof request.headers.origin === "string" ? request.headers.origin : undefined
     const referer = typeof request.headers.referer === "string" ? request.headers.referer : undefined
     let candidate = origin
@@ -1600,9 +1605,9 @@ export class EnterpriseRuntime {
         candidate = undefined
       }
     }
-    if (candidate !== undefined && this.allowedOrigin(candidate, request)) return true
+    if (candidate !== undefined && this.allowedOrigin(candidate, request)) return
     json(response, 403, { ok: false, error: "This request did not come from the enterprise console." })
-    return false
+    throw new Error("Enterprise CSRF check denied.")
   }
 
   private originAllowed(request: IncomingMessage): boolean {

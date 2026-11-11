@@ -6,9 +6,9 @@ import { DarwinHostDriver } from "./darwin"
 
 // The shipped shell is /bin/zsh, which does not exist off macOS. The driver
 // accepts a shell override so the command boundary can be exercised on POSIX
-// CI with /bin/sh; the guard branches never spawn anything.
+// CI with /bin/bash (dash cannot load the sandbox login profile); the guard branches never spawn anything.
 function testDriver() {
-  return new DarwinHostDriver({ shell: "/bin/sh" })
+  return new DarwinHostDriver({ shell: "/bin/bash" })
 }
 
 describe("macOS command boundary", () => {
@@ -69,7 +69,7 @@ describe("macOS paid primitive enforcement", () => {
   // Nothing here spawns: on a free paired computer the refusal replaces the
   // dispatch, so there is no /bin/zsh and no pbpaste/pbcopy to observe.
   test("refuses remote_shell and the clipboard on a free paired computer", async () => {
-    const host = new DarwinHostDriver({ shell: "/bin/sh", access: { surface: "paired", plan: "free" } })
+    const host = new DarwinHostDriver({ shell: "/bin/bash", access: { surface: "paired", plan: "free" } })
     const command = await host.runCommand({ command: "printf never" })
     expect(command.success).toBe(false)
     expect(command.command).toBeUndefined()
@@ -83,7 +83,7 @@ describe("macOS paid primitive enforcement", () => {
   // above stays platform-independent because it never spawns anything.
   describeShell("macOS free clipboard", () => {
     test("the clipboard is free on a paired computer", async () => {
-      const host = new DarwinHostDriver({ shell: "/bin/sh", access: { surface: "paired", plan: "free" } })
+      const host = new DarwinHostDriver({ shell: "/bin/bash", access: { surface: "paired", plan: "free" } })
       const read = await host.readClipboard()
       expect(read.success).toBe(true)
       expect(read.error).toBeUndefined()
@@ -111,7 +111,7 @@ describeShell("macOS screen info", () => {
     const directory = mkdtempSync(join(tmpdir(), "omnia-darwin-screen-"))
     try {
       const driver = new DarwinHostDriver({
-        shell: "/bin/sh",
+        shell: "/bin/bash",
         osascript: fakeExecutable(directory, "osascript", '#!/bin/sh\necho \'{"width":1512,"height":944}\'\n'),
       })
       const info = await driver.info()
@@ -125,7 +125,7 @@ describeShell("macOS screen info", () => {
     const directory = mkdtempSync(join(tmpdir(), "omnia-darwin-screen-"))
     try {
       const driver = new DarwinHostDriver({
-        shell: "/bin/sh",
+        shell: "/bin/bash",
         osascript: fakeExecutable(directory, "osascript", "#!/bin/sh\nexit 1\n"),
       })
       const info = await driver.info()
@@ -193,4 +193,13 @@ describeShell("macOS command execution", () => {
     expect(result.success).toBe(true)
     expect(result.command?.stdinError).toContain("EPIPE")
   }, 10000)
+})
+
+describeShell("macOS native input failures", () => {
+  test("press_keys reports native command failure", async () => {
+    const host = new DarwinHostDriver({ osascript: "/bin/false", ioreg: "/bin/true" })
+    const result = await host.execute({ type: "press_keys", keys: "cmd+a" })
+    expect(result.success).toBe(false)
+    expect(result.status).toBe("failed")
+  })
 })

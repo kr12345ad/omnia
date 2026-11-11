@@ -283,8 +283,9 @@ export function isPublicApiRoute(method: string, pathname: string): boolean {
 export function presentsServerToken(context: Pick<ApiContext, "token">, request: IncomingMessage): boolean {
   const presented = bearerToken(request)
   if (presented === undefined || context.token.length === 0) return false
-  if (presented.length !== context.token.length) return false
-  return timingSafeEqual(Buffer.from(presented), Buffer.from(context.token))
+  const actual = Buffer.from(presented)
+  const expected = Buffer.from(context.token)
+  return actual.length === expected.length && timingSafeEqual(actual, expected)
 }
 
 export class RequestBodyTooLargeError extends Error {
@@ -545,7 +546,7 @@ export function checkSessionBinding(
   const proofHeader = request.headers["x-omnia-session-proof"]
   const presented = typeof proofHeader === "string" ? proofHeader.trim().toLowerCase() : ""
   const expected = sessionProof(bearerToken(request) ?? context.token, sessionId)
-  if (presented.length !== expected.length || !timingSafeEqual(Buffer.from(presented), Buffer.from(expected))) {
+  if (!/^[a-f0-9]{64}$/.test(presented) || !timingSafeEqual(Buffer.from(presented), Buffer.from(expected))) {
     throw new SessionUnboundError(sessionId)
   }
   const principal = createHash("sha256").update(bearerToken(request) ?? context.token).digest("hex")
@@ -2413,9 +2414,34 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       json(response, 400, { ok: false, error: "Approval resources are required." })
       return true
     }
+    if (body.action === "run_command" && (typeof body.computerId !== "string" || body.computerId.length === 0)) {
+      json(response, 400, { ok: false, error: "Shell approvals require a computerId." })
+      return true
+    }
+    let shellApproval: ReturnType<typeof context.computers.commandApproval> | undefined
+    if (body.action === "run_command") {
+      try {
+        shellApproval = context.computers.commandApproval(String(body.computerId), {
+          action: "run_command",
+          ...(typeof body.command === "string" ? { command: body.command } : {}),
+          ...(typeof body.cwd === "string" ? { cwd: body.cwd } : {}),
+          ...(typeof body.credential === "string" ? { credential: body.credential } : {}),
+        })
+      } catch (error) {
+        json(response, 400, { ok: false, error: error instanceof Error ? error.message : "Credential selection failed." })
+        return true
+      }
+      const selected = shellApproval.credential
+      if (selected !== null && (!isRecord(body.resolvedCredential) ||
+        body.resolvedCredential.id !== selected.id || body.resolvedCredential.updatedAt !== selected.updatedAt)) {
+        json(response, 428, { ok: false, error: "Confirm the resolved credential before approving this command.", credential: selected })
+        return true
+      }
+    }
     const operation: OperationInput = {
       action: body.action,
       resources,
+      ...(shellApproval === undefined ? {} : { metadata: shellApproval.operation.metadata }),
       ...(typeof body.command === "string" ? { command: body.command } : {}),
     }
     try {

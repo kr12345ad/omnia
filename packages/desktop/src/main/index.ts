@@ -312,7 +312,7 @@ const main = Effect.gen(function* () {
     return
   }
 
-  const shellEnv = preferAppEnv(app.getPath("userData"))
+  const shellEnv = yield* Effect.promise(() => preferAppEnv(app.getPath("userData")))
 
   app.on("second-instance", (_event: Event, argv: string[]) => {
     const urls = argv.filter((arg: string) => arg.startsWith("omnia://") || arg.startsWith("opencode://"))

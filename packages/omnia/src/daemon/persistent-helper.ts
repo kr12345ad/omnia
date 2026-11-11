@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { StringDecoder } from "node:string_decoder"
+import { terminateProcessTree } from "./process"
 
 export interface PersistentHelperLine {
   id?: string
@@ -70,6 +72,7 @@ export function createJsonLineHelper(options: PersistentHelperOptions): Persiste
     ["-c", options.script],
     {
       stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
       env: {
         ...process.env,
         ...(options.env ?? {}),
@@ -79,6 +82,7 @@ export function createJsonLineHelper(options: PersistentHelperOptions): Persiste
   )
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES
+  const decoder = new StringDecoder("utf8")
   let buffer = ""
   let stderr = ""
   let disposed = false
@@ -94,6 +98,7 @@ export function createJsonLineHelper(options: PersistentHelperOptions): Persiste
   const settle = (line: PersistentHelperLine) => {
     if (readySettled) return
     readySettled = true
+    clearTimeout(startupTimer)
     settleReady(line)
   }
   const failPending = (error: Error) => {
@@ -104,16 +109,27 @@ export function createJsonLineHelper(options: PersistentHelperOptions): Persiste
     pending.clear()
   }
 
+  // A timed-out input may still be queued inside a blocked helper. Retire the
+  // whole process so it cannot deliver delayed clicks/typing after recovery.
+  const stop = (error: Error) => {
+    exited = true
+    settle({ ok: false, error: error.message, payload: {} })
+    failPending(error)
+    buffer = ""
+    terminateProcessTree(child, "SIGKILL")
+  }
+  const startupTimer = setTimeout(() => stop(new Error(`${options.label} timed out starting.`)), timeoutMs)
+  startupTimer.unref?.()
+
   child.stdout.on("data", (chunk: Buffer) => {
-    if (buffer.length + chunk.length > maxOutputBytes) {
-      // A helper that emits an unbounded line is broken; fail the protocol
-      // instead of growing the parent buffer without limit.
-      failPending(new Error(`${options.label} produced an oversized response.`))
-      return
-    }
-    buffer += chunk.toString("utf8")
+    if (exited || disposed) return
+    buffer += decoder.write(chunk)
     const lines = buffer.split("\n")
     buffer = lines.pop() ?? ""
+    if (Buffer.byteLength(buffer, "utf8") > maxOutputBytes || lines.some((line) => Buffer.byteLength(line, "utf8") > maxOutputBytes)) {
+      stop(new Error(`${options.label} produced an oversized response.`))
+      return
+    }
     for (const raw of lines) {
       const line = raw.trim()
       if (line.length === 0) continue
@@ -164,24 +180,30 @@ export function createJsonLineHelper(options: PersistentHelperOptions): Persiste
       const id = String(counter)
       return new Promise<PersistentHelperLine>((resolve, reject) => {
         const timer = setTimeout(() => {
-          pending.delete(id)
-          reject(new Error(`${options.label} timed out running ${command}.`))
+          stop(new Error(`${options.label} timed out running ${command}.`))
         }, requestTimeoutMs)
         timer.unref?.()
         pending.set(id, { resolve, reject, timer })
-        child.stdin.write(`${JSON.stringify({ id, command, params })}\n`)
+        try {
+          child.stdin.write(`${JSON.stringify({ id, command, params })}\n`)
+        } catch (error) {
+          pending.delete(id)
+          clearTimeout(timer)
+          reject(error)
+        }
       })
     },
     async dispose() {
       if (disposed) return
       disposed = true
+      settle({ ok: false, error: `${options.label} was disposed.`, payload: {} })
       try {
         child.stdin.write(`${JSON.stringify({ id: "quit", command: "quit", params: {} })}\n`)
       } catch {
         // The helper may already be gone; the kills below are best effort.
       }
-      child.kill("SIGTERM")
-      const killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS)
+      terminateProcessTree(child, "SIGTERM")
+      const killTimer = setTimeout(() => terminateProcessTree(child, "SIGKILL"), KILL_GRACE_MS)
       child.once("exit", () => clearTimeout(killTimer))
       failPending(new Error(`${options.label} was disposed.`))
     },

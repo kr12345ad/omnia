@@ -1,3 +1,4 @@
+import { chmodSync } from "node:fs"
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -25,6 +26,7 @@ describe("file remote key storage", () => {
     const directory = scratch()
     const file = join(directory, "remote-key.json")
     writeFileSync(file, JSON.stringify(createRemoteKeyPair()), { mode: 0o644 })
+    chmodSync(file, 0o644) // Establish the fixture even under a restrictive umask.
     expect(statSync(file).mode & 0o777).toBe(0o644)
     const replaced = createRemoteKeyPair()
     fileRemoteKeyStorage(file).save(replaced)

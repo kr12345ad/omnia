@@ -817,7 +817,8 @@ JSON.stringify({ ok: true })
     if (action.type === "press_keys" || action.type === "press") {
       const script = keyCodeScript(action.keys)
       if (script === undefined) return { success: false, status: "rejected", message: "The key combination is not supported." }
-      await this.script(script)
+      const result = await this.script(script)
+      if (result.code !== 0) return { success: false, status: "failed", message: result.stderr.trim() || "macOS key event failed." }
       return { success: true, status: "success", message: `Pressed ${action.keys}.` }
     }
     if (action.type === "type") {

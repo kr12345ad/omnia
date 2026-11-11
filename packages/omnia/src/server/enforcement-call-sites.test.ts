@@ -1066,3 +1066,24 @@ describe("what the driver gate does not cover", () => {
     }
   })
 })
+
+describe("stored-secret alternate actions enforce the free login budget", () => {
+  for (const action of ["type", "browser_type", "browser_auth"]) {
+    test(`${action} refuses before reading the vault when the allowance is spent`, async () => {
+      const controlPlane = await startControlPlane({ signedIn: true })
+      try {
+        const harness = await createDriverHarness()
+        await spendVaultLogin(controlPlane, 3)
+        process.env.OMNIA_SERVER_URL = controlPlane.url
+        process.env.OMNIA_SERVER_TOKEN = controlPlane.token
+        const outcome = await harness.manager.execute("local", {
+          action, credential: harness.credentialId, ...APPROVAL,
+        })
+        expect(outcome.httpStatus).toBe(402)
+        expect(harness.credentials.reads).toBe(0)
+      } finally {
+        await controlPlane.stop()
+      }
+    })
+  }
+})

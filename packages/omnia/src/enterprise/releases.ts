@@ -16,11 +16,12 @@
 // A target that cannot be produced on this host reports why rather than
 // silently serving the enrollment fallback as if it were an installer.
 
+import { terminateProcessTree } from "../daemon/process"
 import { spawn } from "node:child_process"
 import { createHash } from "node:crypto"
 import { delimiter } from "node:path"
 import { fileURLToPath } from "node:url"
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs"
+import { createReadStream, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, extname, join, resolve, sep } from "node:path"
 
 import type { EnterpriseStore } from "./store"
@@ -333,19 +334,29 @@ export function dependencyStatus(root: string): { ready: boolean; reason?: strin
 }
 
 /** Run one child process, forwarding output lines as they arrive. */
-async function stream(
+export async function stream(
   command: string,
   args: string[],
   cwd: string,
   env: Record<string, string>,
   onLine: (line: string) => void,
+  timeoutMs = 30 * 60 * 1000,
 ): Promise<void> {
   await new Promise<void>((done, fail) => {
     const child = spawn(command, args, {
       cwd,
+      detached: process.platform !== "win32",
       env: { ...process.env, ...env },
       stdio: ["ignore", "pipe", "pipe"],
     })
+    const timer = setTimeout(() => {
+      terminateProcessTree(child, "SIGKILL")
+      child.stdout.destroy()
+      child.stderr.destroy()
+      fail(new Error(`Build step timed out after ${timeoutMs}ms: ${command}`))
+    }, timeoutMs)
+    child.once("error", () => clearTimeout(timer))
+    child.once("close", () => clearTimeout(timer))
     const forward = (chunk: Buffer) => {
       for (const line of chunk.toString().split(/\r?\n/)) onLine(line.trimEnd())
     }
@@ -359,13 +370,14 @@ async function stream(
   })
 }
 
-function hashFile(file: string): BuiltArtifact {
-  const bytes = readFileSync(file)
-  return {
-    file,
-    bytes: bytes.byteLength,
-    sha256: createHash("sha256").update(bytes).digest("hex"),
+export async function hashFile(file: string): Promise<BuiltArtifact> {
+  const hash = createHash("sha256")
+  let bytes = 0
+  for await (const chunk of createReadStream(file)) {
+    bytes += chunk.length
+    hash.update(chunk)
   }
+  return { file, bytes, sha256: hash.digest("hex") }
 }
 
 /** Default runner: provision dependencies, compile, package, pick the artifact. */
@@ -407,7 +419,7 @@ export const runDesktopBuild: BuildRunner = async ({ plan, onLine }) => {
     recursive: true,
     force: true,
   })
-  const artifact = hashFile(destination)
+  const artifact = await hashFile(destination)
   onLine(`Artifact ${chosen} (${artifact.bytes} bytes) sha256 ${artifact.sha256}`)
   return artifact
 }

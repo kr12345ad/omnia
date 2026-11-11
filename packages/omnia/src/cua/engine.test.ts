@@ -1330,3 +1330,53 @@ function captureError(run: () => unknown): unknown {
   }
   return undefined
 }
+
+for (const platform of ["linux", "darwin", "win32"] as const) {
+  test(`${platform}: disposal prevents queued actions and late snapshots`, async () => {
+    const backend = new FakeBackend()
+    backend.snapshotDelayMs = 30
+    backend.queue = [snapshot("late", 1)]
+    const engine = new CuaEngine({ backend, platform })
+    const capture = engine.snapshot()
+    const action = engine.execute({ type: "key", keys: ["Enter"] })
+    const outcomes = Promise.allSettled([capture, action])
+    await engine.dispose()
+    expect((await outcomes).every((r) => r.status === "rejected")).toBe(true)
+    expect(engine.latestSnapshot()).toBeUndefined()
+    expect(backend.executed).toHaveLength(0)
+    await engine.dispose()
+    expect(backend.disposals).toBe(1)
+  })
+}
+
+test("refresh does not reuse a capture started before invalidation", async () => {
+  const backend = new FakeBackend()
+  backend.snapshotDelayMs = 30
+  backend.queue = [snapshot("old", 1), snapshot("new", 2)]
+  const engine = new CuaEngine({ backend })
+  const pending = engine.snapshot()
+  const refreshed = engine.refresh()
+  const [first, second] = await Promise.all([pending, refreshed])
+  expect(backend.snapshotCalls).toBe(2)
+  expect(first.id).toBe(second.id)
+  expect(engine.latestSnapshot()?.id).toBe(second.id)
+})
+
+
+test("repeated invalidation bounds snapshot and find without caching stale captures", async () => {
+  const backend = new FakeBackend()
+  const engine = new CuaEngine({ backend })
+  let captures = 0
+  backend.snapshot = async () => {
+    captures++
+    engine.invalidate()
+    return snapshot("invalidated", captures)
+  }
+  await expect(engine.snapshot()).rejects.toThrow("repeatedly invalidated")
+  expect(captures).toBe(4)
+  await expect(engine.find({ name: "Save" })).rejects.toThrow("repeatedly invalidated")
+  expect(captures).toBe(8)
+  expect(engine.latestSnapshot()).toBeUndefined()
+  backend.snapshot = async () => snapshot("stable", 9)
+  expect((await engine.snapshot()).id).toBe("stable")
+})

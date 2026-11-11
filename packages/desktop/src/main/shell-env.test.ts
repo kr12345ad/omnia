@@ -48,3 +48,21 @@ describe("shell env", () => {
     expect(isNushell("/bin/zsh")).toBe(false)
   })
 })
+
+test("shell environment probes leave the event loop responsive", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs")
+  const { tmpdir } = await import("node:os")
+  const { join } = await import("node:path")
+  const { loadShellEnv } = await import("./shell-env")
+  const directory = mkdtempSync(join(tmpdir(), "omnia-shell-probe-"))
+  try {
+    const shell = join(directory, "shell")
+    writeFileSync(shell, "#!/bin/sh\nsleep 0.2\nprintf 'PROBE=ok\\0'\n", { mode: 0o700 })
+    const pending = loadShellEnv(shell, { log: () => {} })
+    const first = await Promise.race([pending.then(() => "probe"), Bun.sleep(10).then(() => "timer")])
+    expect(first).toBe("timer")
+    expect(await pending).toEqual({ PROBE: "ok" })
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

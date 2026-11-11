@@ -439,6 +439,10 @@ export class EnterpriseStore {
     if (problem !== undefined) throw new EnterpriseStoreError(problem)
     const email = requireEmail(input.email)
     const passwordHash = await hashPassword(input.password)
+    if (this.hasOwner() || this.state.bootstrapTokenHash !== hashToken(input.token) ||
+      this.state.bootstrapExpiresAt === undefined || this.state.bootstrapExpiresAt <= this.now()) {
+      throw new EnterpriseStoreError("The setup token is no longer valid.")
+    }
     // Consume the token before anything is written: two concurrent setup calls
     // must not both create an owner.
     this.state.bootstrapTokenHash = undefined
@@ -472,7 +476,7 @@ export class EnterpriseStore {
     hours?: number,
   ): Promise<LoginResult> {
     const at = this.now()
-    const user = this.findByIdentifier(identifier)
+    let user = this.findByIdentifier(identifier)
     if (user === undefined) {
       await burnPasswordCheck(password)
       this.appendAudit({ action: "user.login_failed", metadata: { identifier: sanitizeText(identifier, 200) } })
@@ -499,9 +503,20 @@ export class EnterpriseStore {
       return { ok: false, reason: "Too many failed attempts. Try again shortly.", retryAfter: Math.ceil((user.lockedUntil - at) / 1000) }
     }
     const valid = await verifyPassword(password, user.passwordHash)
+    // Password verification yields: administrators may suspend, delete or edit
+    // the account while it is running. Commit against the current record only.
+    const userId = user.id
+    const current = this.state.users.find((entry) => entry.id === userId)
+    if (current === undefined || current.status !== "active" || current.passwordHash !== user.passwordHash ||
+      this.legalDecision({ email: current.email }).banned) {
+      return { ok: false, reason: "The account changed during sign-in. Try again." }
+    }
+    user = current
     if (!valid) {
       const failures = (user.failedLogins ?? 0) + 1
-      const lockedUntil = failures >= LOGIN_FAILURE_LIMIT ? at + LOGIN_LOCKOUT_MS : undefined
+      const lockedUntil = user.lockedUntil !== undefined && user.lockedUntil > this.now()
+        ? user.lockedUntil
+        : failures >= LOGIN_FAILURE_LIMIT ? this.now() + LOGIN_LOCKOUT_MS : undefined
       this.state.users = this.state.users.map((entry) =>
         entry.id === user.id ? { ...entry, failedLogins: failures, ...(lockedUntil === undefined ? {} : { lockedUntil }) } : entry,
       )
@@ -509,8 +524,11 @@ export class EnterpriseStore {
       return {
         ok: false,
         reason: "The email address or password is incorrect.",
-        ...(lockedUntil === undefined ? {} : { retryAfter: Math.ceil(LOGIN_LOCKOUT_MS / 1000) }),
+        ...(lockedUntil === undefined ? {} : { retryAfter: Math.max(0, Math.ceil((lockedUntil - this.now()) / 1000)) }),
       }
+    }
+    if (user.lockedUntil !== undefined && user.lockedUntil > this.now()) {
+      return { ok: false, reason: "Too many failed attempts. Try again shortly.", retryAfter: Math.ceil((user.lockedUntil - this.now()) / 1000) }
     }
     const updated: EnterpriseUser = {
       ...user,
@@ -715,9 +733,17 @@ export class EnterpriseStore {
     const problem = passwordProblem(password)
     if (problem !== undefined) throw new EnterpriseStoreError(problem)
     if (this.seatUsage().available === 0) throw new EnterpriseStoreError("No seats are available. Ask your administrator to add seats.")
-    const user = this.state.users.find((entry) => (invite.userId === undefined ? entry.email === invite.email : entry.id === invite.userId))
+    let user = this.state.users.find((entry) => (invite.userId === undefined ? entry.email === invite.email : entry.id === invite.userId))
     if (user === undefined) throw new EnterpriseStoreError("The invited user no longer exists.")
     const passwordHash = await hashPassword(password)
+    this.assertLicensed()
+    const currentInvite = this.state.invites.find((entry) => entry.id === invite.id)
+    if (currentInvite === undefined || currentInvite.acceptedAt !== undefined || currentInvite.revokedAt !== undefined ||
+      currentInvite.expiresAt <= this.now()) throw new EnterpriseStoreError("This invitation is no longer valid.")
+    const userId = user.id
+    user = this.state.users.find((entry) => entry.id === userId)
+    if (user === undefined || user.status === "suspended") throw new EnterpriseStoreError("The invited user is unavailable.")
+    if (this.seatUsage().available === 0) throw new EnterpriseStoreError("No seats are available. Ask your administrator to add seats.")
     const updated: EnterpriseUser = {
       ...user,
       name: sanitizeText(name ?? "", 120) || user.name,
@@ -730,6 +756,9 @@ export class EnterpriseStore {
     }
     this.state.users = this.state.users.map((entry) => (entry.id === user.id ? updated : entry))
     this.state.invites = this.state.invites.map((entry) => (entry.id === invite.id ? { ...entry, acceptedAt: at } : entry))
+    if (invite.purpose === "reset") {
+      this.state.sessions = this.state.sessions.filter((entry) => entry.userId !== user.id)
+    }
     this.save()
     this.appendAudit({ action: "user.created", actorId: user.id, actorEmail: user.email, target: user.email })
     const created = this.createSession(user.id, "admin", {})
@@ -758,6 +787,8 @@ export class EnterpriseStore {
       if (problem !== undefined) throw new EnterpriseStoreError(problem)
     }
     const passwordHash = input.password === undefined ? undefined : await hashPassword(input.password)
+    this.assertLicensed()
+    if (this.state.users.some((user) => user.email === email)) throw new EnterpriseStoreError("A user with that email already exists.")
     const at = this.now()
     const user: EnterpriseUser = {
       id: `usr_${randomBytes(8).toString("hex")}`,
@@ -1423,26 +1454,39 @@ export class EnterpriseStore {
   }
 
   appendUsage(input: Omit<UsageEvent, "id" | "at"> & { at?: number }): UsageEvent {
-    const at = input.at ?? this.now()
-    const event: UsageEvent = {
-      id: `usev_${randomBytes(8).toString("hex")}`,
-      at,
-      userId: input.userId,
-      model: sanitizeText(input.model, 160) || "unknown",
-      ...(input.provider === undefined ? {} : { provider: sanitizeText(input.provider, 64) }),
-      inputTokens: clampCount(input.inputTokens),
-      outputTokens: clampCount(input.outputTokens),
-      costUsd: clampCost(input.costUsd),
-      ...(input.tool === undefined ? {} : { tool: sanitizeText(input.tool, 64) }),
-      ...(input.computerId === undefined ? {} : { computerId: sanitizeText(input.computerId, 128) }),
-      ...(input.sessionId === undefined ? {} : { sessionId: sanitizeText(input.sessionId, 128) }),
-      ...(input.durationMs === undefined ? {} : { durationMs: clampCount(input.durationMs) }),
-      ...(input.distributionId === undefined ? {} : { distributionId: sanitizeText(input.distributionId, 128) }),
+    return this.appendUsageBatch([input])[0]!
+  }
+
+  appendUsageBatch(inputs: readonly (Omit<UsageEvent, "id" | "at"> & { at?: number })[]): UsageEvent[] {
+    if (inputs.length === 0) return []
+    const events = inputs.map((input) => {
+      const at = input.at ?? this.now()
+      const event: UsageEvent = {
+        id: `usev_${randomBytes(8).toString("hex")}`,
+        at,
+        userId: input.userId,
+        model: sanitizeText(input.model, 160) || "unknown",
+        ...(input.provider === undefined ? {} : { provider: sanitizeText(input.provider, 64) }),
+        inputTokens: clampCount(input.inputTokens),
+        outputTokens: clampCount(input.outputTokens),
+        costUsd: clampCost(input.costUsd),
+        ...(input.tool === undefined ? {} : { tool: sanitizeText(input.tool, 64) }),
+        ...(input.computerId === undefined ? {} : { computerId: sanitizeText(input.computerId, 128) }),
+        ...(input.sessionId === undefined ? {} : { sessionId: sanitizeText(input.sessionId, 128) }),
+        ...(input.durationMs === undefined ? {} : { durationMs: clampCount(input.durationMs) }),
+        ...(input.distributionId === undefined ? {} : { distributionId: sanitizeText(input.distributionId, 128) }),
+      }
+      return event
+    })
+    const previous = this.state.usage
+    this.state.usage = [...previous, ...events].slice(-MAX_USAGE)
+    try {
+      this.save()
+    } catch (error) {
+      this.state.usage = previous
+      throw error
     }
-    this.state.usage.push(event)
-    if (this.state.usage.length > MAX_USAGE) this.state.usage = this.state.usage.slice(-MAX_USAGE)
-    this.save()
-    return structuredClone(event)
+    return structuredClone(events)
   }
 
   // ── Internals ────────────────────────────────────────────────────────────

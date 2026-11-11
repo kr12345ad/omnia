@@ -137,6 +137,71 @@ const approval = {
 }
 
 describe("run_command", () => {
+  test("approval distinguishes shell command case", async () => {
+    const harness = createCommandDriver()
+    await withCommandServer(harness, async (_server, call) => {
+      const issued = await call("/v1/permissions/approve", {
+        action: "run_command", computerId: "local", resources: ["echo SAFE"], command: "echo SAFE", maxUses: 1,
+      })
+      const fingerprint = (issued.body.approval as { fingerprint: string }).fingerprint
+      const response = await call("/v1/computers/local/actions", {
+        action: "run_command", command: "echo safe", approvalFingerprint: fingerprint, sessionId: "session-1",
+      })
+      expect(response.status).toBe(428)
+      expect(harness.commands).toHaveLength(0)
+      for (const changed of [{ cwd: "/different" }, { credential: "none" }]) {
+        const denied = await call("/v1/computers/local/actions", {
+          action: "run_command", command: "echo SAFE", approvalFingerprint: fingerprint,
+          sessionId: "session-1", ...changed,
+        })
+        expect(denied.status).toBe(428)
+      }
+      const original = await call("/v1/computers/local/actions", {
+        action: "run_command", text: "echo SAFE", approvalFingerprint: fingerprint, sessionId: "session-1",
+      })
+      expect(original.status).toBe(200)
+    })
+  })
+
+  test("shell approvals require and bind the target computer", async () => {
+    const harness = createCommandDriver()
+    await withCommandServer(harness, async (_server, call) => {
+      const operation = { action: "run_command", resources: ["echo hello"], command: "echo hello" }
+      expect((await call("/v1/permissions/approve", operation)).status).toBe(400)
+      const issued = await call("/v1/permissions/approve", { ...operation, computerId: "another-computer" })
+      expect(issued.status).toBe(200)
+      const denied = await call("/v1/computers/local/actions", {
+        action: "run_command", command: "echo hello", sessionId: "session-1",
+        approvalFingerprint: (issued.body.approval as { fingerprint: string }).fingerprint,
+      })
+      expect(denied.status).toBe(428)
+      expect(harness.commands).toHaveLength(0)
+    })
+  })
+
+  test("redacts command errors and nested metadata", async () => {
+    const harness = createCommandDriver()
+    harness.driver.runCommand = async () => ({
+      success: false, status: "failed", message: "failed with synthetic-secret",
+      error: { code: "command_failed", message: "synthetic-secret", retryable: false },
+      metadata: { diagnostic: { value: "synthetic-secret" } },
+    })
+    await withCommandServer(harness, async (_server, call) => {
+      await call("/v1/computers/local/credentials", {
+        computerId: "local", name: "sudo", kind: "password", secret: "synthetic-secret",
+        rules: [{ kind: "command", match: "sudo" }],
+      })
+      await call("/v1/permissions", { scope: "SECRETS", state: "prompt" })
+      const response = await call("/v1/computers/local/actions", {
+        action: "run_command", command: "sudo whoami", ...approval,
+        approvedScopes: ["PROCESS_EXECUTE", "SECRETS"],
+      })
+      expect(response.status).toBe(500)
+      expect(JSON.stringify(response.body)).not.toContain("synthetic-secret")
+      expect(JSON.stringify(response.body)).toContain("[redacted]")
+    })
+  })
+
   test("runs a shell command and verifies the exit code", async () => {
     const harness = createCommandDriver()
     await withCommandServer(harness, async (_server, call) => {
@@ -360,6 +425,7 @@ describe("credential API", () => {
     await withCommandServer(harness, async (_server, call) => {
       const issued = await call("/v1/permissions/approve", {
         action: "run_command",
+        computerId: "local",
         resources: ["echo hello"],
         command: "echo hello",
         expiresInMs: 60000,
@@ -508,3 +574,27 @@ describe("read_value and wait", () => {
     })
   })
 })
+
+
+for (const selector of [undefined, "auto"] as const) {
+test(`shell approval confirms and binds the resolved credential (${selector ?? "omitted"})`, async () => {
+  const harness = createCommandDriver()
+  await withCommandServer(harness, async (_server, call) => {
+    await call("/v1/computers/local/credentials", { name: "first", secret: "first-secret", rules: [{ kind: "command", match: "whoami" }] })
+    const operation = { action: "run_command", resources: ["whoami"], command: "whoami", computerId: "local", maxUses: 3, ...(selector === undefined ? {} : { credential: selector }) }
+    const preview = await call("/v1/permissions/approve", operation)
+    expect(preview.status).toBe(428)
+    expect(JSON.stringify(preview.body)).not.toContain("first-secret")
+    const issued = await call("/v1/permissions/approve", { ...operation, resolvedCredential: preview.body.credential })
+    expect(issued.status).toBe(200)
+    const fingerprint = (issued.body.approval as { fingerprint: string }).fingerprint
+    // A bound operator approval intentionally overrides the denied SECRETS scope.
+    const approved = await call("/v1/computers/local/actions", { action: "run_command", command: "whoami", ...(selector === undefined ? {} : { credential: selector }), approvalFingerprint: fingerprint })
+    expect(approved.status).toBe(200)
+    await call("/v1/computers/local/credentials", { name: "second", secret: "second-secret", rules: [{ kind: "command", match: "whoami" }] })
+    const denied = await call("/v1/computers/local/actions", { action: "run_command", command: "whoami", ...(selector === undefined ? {} : { credential: selector }), approvalFingerprint: fingerprint })
+    expect(denied.status).toBe(403)
+    expect(harness.commands).toHaveLength(1)
+  })
+})
+}

@@ -3226,9 +3226,9 @@ describe("cua linux helper protocol", () => {
           children: [
             {
               ...WINDOW_FRAME,
-              delay: 0.05,
               children: Array.from({ length: 60 }, (_, index) =>
                 button({
+                  delay: index === 0 ? 0 : 0.05,
                   role: "push button",
                   name: `Item ${index}`,
                   bounds: { x: 0, y: index * 24, width: 80, height: 20 },
