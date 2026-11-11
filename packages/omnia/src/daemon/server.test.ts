@@ -117,3 +117,7 @@ describe("daemon server", () => {
     }
   })
 })
+
+test("refuses an empty daemon authentication token", async () => {
+  await expect(startDaemon(stubDriver(), "")).rejects.toThrow("non-empty")
+})

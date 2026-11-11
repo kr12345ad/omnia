@@ -586,10 +586,10 @@ function redactValueSecrets(value: unknown, needles: readonly string[]): unknown
 
 // Defense in depth: a driver or verifier that echoes the typed value still
 // cannot place the stored secret into the model-visible result.
-function redactResultCredential(result: ActionResult, credential: ComputerCredential): ActionResult {
+function redactResultCredential<T extends ActionResult>(result: T, credential: ComputerCredential): T {
   const needles = credentialRedactionNeedles(credential.secret)
   if (needles.length === 0) return result
-  return redactValueSecrets(result, needles) as ActionResult
+  return redactValueSecrets(result, needles) as T
 }
 
 export interface ServerBatchRequest {
@@ -1546,7 +1546,9 @@ export class ComputerManager {
   }
 
   private actionOperation(actionType: string, id: string, request: ServerActionRequest): OperationInput {
+    const command = actionType === "run_command" ? (request.command ?? request.text ?? "").trim() : request.command
     const resource =
+      (actionType === "run_command" ? command : undefined) ??
       request.target?.elementId ??
       request.command ??
       request.query ??
@@ -1558,7 +1560,10 @@ export class ComputerManager {
     return {
       action: actionType,
       resources: [resource],
-      ...(request.command === undefined ? {} : { command: request.command }),
+      ...(actionType === "run_command" ? { metadata: {
+        computerId: id, cwd: request.cwd ?? null, credential: request.credential ?? null,
+      } } : {}),
+      ...(command === undefined ? {} : { command }),
     }
   }
 
@@ -2964,13 +2969,14 @@ export class ComputerManager {
 
     const safeCwd = this.assertCwd(request.cwd)
     const safeEnv = this.assertEnv(env)
-    const executed = await computer.driver.runCommand({
+    const rawResult = await computer.driver.runCommand({
       command: effectiveCommand,
       ...(safeCwd === undefined ? {} : { cwd: safeCwd }),
       ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
       ...(safeEnv === undefined ? {} : { env: safeEnv }),
       ...(stdin === undefined ? {} : { stdin }),
     })
+    const executed = credential === undefined ? rawResult : redactResultCredential(rawResult, credential)
     const secrets = credential === undefined ? [] : [credential.secret]
     const commandResult =
       executed.command === undefined

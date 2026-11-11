@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  operationFingerprint,
   ApprovalError,
   ApprovalRegistry,
   applyApprovalReply,
@@ -417,4 +418,11 @@ describe("approval and audit helpers", () => {
     expect(JSON.stringify(event)).not.toContain("sk-abcdefghijklmnop")
     expect(auditRedaction({ password: "hidden" }).metadata.count).toBeGreaterThan(0)
   })
+})
+
+test("approval fingerprints preserve shell syntax and use a full digest", () => {
+  const fingerprint = (command: string) => operationFingerprint({ action: "run_command", command, resources: [command] })
+  expect(fingerprint("echo SAFE")).not.toBe(fingerprint("echo safe"))
+  expect(fingerprint(String.raw`echo a\b`)).not.toBe(fingerprint("echo a/b"))
+  expect(fingerprint("echo safe")).toMatch(/^[a-f0-9]{64}$/)
 })

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { classifyDanger } from "./dangerous"
 import { isTrustedProvenance, makeProvenance } from "./provenance"
 import type {
@@ -73,14 +74,7 @@ const stableValue = (value: unknown, seen = new Set<object>()): string => {
   return JSON.stringify(value)
 }
 
-const fingerprintHash = (value: string) => {
-  let hash = 2166136261
-  for (const character of value) {
-    hash ^= character.codePointAt(0) ?? 0
-    hash = Math.imul(hash, 16777619)
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0")
-}
+const fingerprintHash = (value: string) => createHash("sha256").update(value).digest("hex")
 
 export function operationFingerprint(input: OperationInput): string {
   const danger = classifyDanger(input)
@@ -90,7 +84,8 @@ export function operationFingerprint(input: OperationInput): string {
       action: normalize(input.action),
       resources: operationResources(input),
       access: input.access ?? input.mode ?? "read",
-      command: normalize(input.command ?? ""),
+      // Shell syntax, case and backslashes are significant authorization inputs.
+      command: input.command ?? "",
       recursive: input.recursive === true,
       explicitDangerous: input.explicitDangerous === true,
       dangerous: input.dangerous === true,

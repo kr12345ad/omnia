@@ -182,6 +182,7 @@ describe("operator identity", () => {
     await withServer(async (server, clientToken) => {
       const response = await post(server, "/v1/permissions/approve", clientToken, {
         action: "run_command",
+        computerId: "local",
         resources: ["echo hello"],
       })
       expect(response.status).toBe(403)
@@ -240,6 +241,7 @@ describe("operator identity", () => {
     await withServer(async (server, clientToken) => {
       const issued = await post(server, "/v1/permissions/approve", server.token, {
         action: "run_command",
+        computerId: "local",
         resources: ["echo hello"],
         command: "echo hello",
       })

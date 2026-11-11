@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { IncomingMessage } from "node:http"
-import { MAX_CLIENT_SESSION_BINDINGS, SessionUnboundError, checkSessionBinding, sessionProof, type ApiContext } from "./api"
+import { MAX_CLIENT_SESSION_BINDINGS, presentsServerToken, SessionUnboundError, checkSessionBinding, sessionProof, type ApiContext } from "./api"
 import { startOmniaServer } from "./server"
 import type { ServerComputerDriver } from "./computers"
 import type { ActionResult, ComputerAction, FindRequest, Observation } from "../protocol"
@@ -270,4 +270,9 @@ describe("session binding", () => {
       expect(response.status).toBe(200)
     })
   })
+})
+
+test("operator token comparison rejects multibyte impostors without throwing", () => {
+  const request = { headers: { authorization: "Bearer é" } } as import("node:http").IncomingMessage
+  expect(presentsServerToken({ token: "a" }, request)).toBe(false)
 })
