@@ -70,8 +70,12 @@ export async function verifyPassword(password: string, encoded: string): Promise
   }
   if (salt.length < 8 || expected.length < 16) return false
   if (128 * n * r > MAX_MEM) return false
-  const actual = await scrypt(password, salt, expected.length, { N: n, r, p, maxmem: MAX_MEM })
-  return actual.length === expected.length && timingSafeEqual(actual, expected)
+  try {
+    const actual = await scrypt(password, salt, expected.length, { N: n, r, p, maxmem: MAX_MEM })
+    return actual.length === expected.length && timingSafeEqual(actual, expected)
+  } catch {
+    return false
+  }
 }
 
 /**

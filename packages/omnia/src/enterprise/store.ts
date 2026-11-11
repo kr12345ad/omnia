@@ -439,6 +439,10 @@ export class EnterpriseStore {
     if (problem !== undefined) throw new EnterpriseStoreError(problem)
     const email = requireEmail(input.email)
     const passwordHash = await hashPassword(input.password)
+    if (this.hasOwner() || this.state.bootstrapTokenHash !== hashToken(input.token) ||
+      this.state.bootstrapExpiresAt === undefined || this.state.bootstrapExpiresAt <= this.now()) {
+      throw new EnterpriseStoreError("The setup token is no longer valid.")
+    }
     // Consume the token before anything is written: two concurrent setup calls
     // must not both create an owner.
     this.state.bootstrapTokenHash = undefined
@@ -472,7 +476,7 @@ export class EnterpriseStore {
     hours?: number,
   ): Promise<LoginResult> {
     const at = this.now()
-    const user = this.findByIdentifier(identifier)
+    let user = this.findByIdentifier(identifier)
     if (user === undefined) {
       await burnPasswordCheck(password)
       this.appendAudit({ action: "user.login_failed", metadata: { identifier: sanitizeText(identifier, 200) } })
@@ -499,6 +503,16 @@ export class EnterpriseStore {
       return { ok: false, reason: "Too many failed attempts. Try again shortly.", retryAfter: Math.ceil((user.lockedUntil - at) / 1000) }
     }
     const valid = await verifyPassword(password, user.passwordHash)
+    // Password verification yields: administrators may suspend, delete or edit
+    // the account while it is running. Commit against the current record only.
+    const userId = user.id
+    const current = this.state.users.find((entry) => entry.id === userId)
+    if (current === undefined || current.status !== "active" || current.passwordHash !== user.passwordHash ||
+      this.legalDecision({ email: current.email }).banned ||
+      (current.lockedUntil !== undefined && current.lockedUntil > this.now())) {
+      return { ok: false, reason: "The account changed during sign-in. Try again." }
+    }
+    user = current
     if (!valid) {
       const failures = (user.failedLogins ?? 0) + 1
       const lockedUntil = failures >= LOGIN_FAILURE_LIMIT ? at + LOGIN_LOCKOUT_MS : undefined
@@ -715,9 +729,17 @@ export class EnterpriseStore {
     const problem = passwordProblem(password)
     if (problem !== undefined) throw new EnterpriseStoreError(problem)
     if (this.seatUsage().available === 0) throw new EnterpriseStoreError("No seats are available. Ask your administrator to add seats.")
-    const user = this.state.users.find((entry) => (invite.userId === undefined ? entry.email === invite.email : entry.id === invite.userId))
+    let user = this.state.users.find((entry) => (invite.userId === undefined ? entry.email === invite.email : entry.id === invite.userId))
     if (user === undefined) throw new EnterpriseStoreError("The invited user no longer exists.")
     const passwordHash = await hashPassword(password)
+    this.assertLicensed()
+    const currentInvite = this.state.invites.find((entry) => entry.id === invite.id)
+    if (currentInvite === undefined || currentInvite.acceptedAt !== undefined || currentInvite.revokedAt !== undefined ||
+      currentInvite.expiresAt <= this.now()) throw new EnterpriseStoreError("This invitation is no longer valid.")
+    const userId = user.id
+    user = this.state.users.find((entry) => entry.id === userId)
+    if (user === undefined || user.status === "suspended") throw new EnterpriseStoreError("The invited user is unavailable.")
+    if (this.seatUsage().available === 0) throw new EnterpriseStoreError("No seats are available. Ask your administrator to add seats.")
     const updated: EnterpriseUser = {
       ...user,
       name: sanitizeText(name ?? "", 120) || user.name,
@@ -730,6 +752,9 @@ export class EnterpriseStore {
     }
     this.state.users = this.state.users.map((entry) => (entry.id === user.id ? updated : entry))
     this.state.invites = this.state.invites.map((entry) => (entry.id === invite.id ? { ...entry, acceptedAt: at } : entry))
+    if (invite.purpose === "reset") {
+      this.state.sessions = this.state.sessions.filter((entry) => entry.userId !== user.id)
+    }
     this.save()
     this.appendAudit({ action: "user.created", actorId: user.id, actorEmail: user.email, target: user.email })
     const created = this.createSession(user.id, "admin", {})
@@ -758,6 +783,8 @@ export class EnterpriseStore {
       if (problem !== undefined) throw new EnterpriseStoreError(problem)
     }
     const passwordHash = input.password === undefined ? undefined : await hashPassword(input.password)
+    this.assertLicensed()
+    if (this.state.users.some((user) => user.email === email)) throw new EnterpriseStoreError("A user with that email already exists.")
     const at = this.now()
     const user: EnterpriseUser = {
       id: `usr_${randomBytes(8).toString("hex")}`,
