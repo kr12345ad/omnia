@@ -70,3 +70,20 @@ describe("windows paid primitive enforcement", () => {
     expect(result.message).toContain("remote_shell")
   })
 })
+
+const testPosix = process.platform === "win32" ? test.skip : test
+for (const type of ["key", "press_keys"] as const) {
+  testPosix(`Windows ${type} reports native command failure`, async () => {
+    const host = new WindowsHostDriver({ powershell: "/bin/false" })
+    const result = await host.execute(type === "key" ? { type, key: "enter" } : { type, keys: "ctrl+a" })
+    expect(result.success).toBe(false)
+  })
+}
+
+testPosix("Windows refuses targeted typing when focus failed", async () => {
+  const { calls, runner } = captureInputRunner()
+  const host = new WindowsHostDriver({ powershell: "/bin/false", inputRunner: runner })
+  const result = await host.execute({ type: "type", text: "private text", target: { kind: "element", elementId: "uia:1" } })
+  expect(result.success).toBe(false)
+  expect(calls).toHaveLength(0)
+})

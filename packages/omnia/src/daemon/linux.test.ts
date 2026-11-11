@@ -653,6 +653,7 @@ describe("paid primitive enforcement", () => {
   test("leaves every other primitive ungated", async () => {
     const calls: string[] = []
     const host = new LinuxHostDriver({
+      display: ":99",
       access: { surface: "paired", plan: "free" },
       runner: async (file, args) => {
         calls.push(`${file} ${args.join(" ")}`)
