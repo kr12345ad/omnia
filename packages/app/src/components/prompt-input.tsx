@@ -86,6 +86,7 @@ import { useSettings } from "@/context/settings"
 import { resolveSessionMode } from "@/utils/session-mode"
 import { createPromptInputTransientState } from "./prompt-input/transient-state"
 import { showToast } from "@/utils/toast"
+import { createVoiceInput } from "@/utils/voice-input"
 import { ImagePreview } from "@opencode-ai/ui/image-preview"
 import type { ReferenceInfo } from "@opencode-ai/sdk/v2/client"
 
@@ -126,6 +127,19 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
   const sync = useSync()
   const files = useFile()
   const prompt = props.state ?? usePrompt()
+  const voice = createVoiceInput({
+    onText: (text) => {
+      const current = prompt.current()
+      const attachments = current.filter((part) => part.type !== "text")
+      const existing = current
+        .filter((part) => part.type === "text")
+        .map((part) => part.content)
+        .join("")
+      const next = (existing.trim() ? existing.replace(/\s+$/, "") + " " : "") + text
+      prompt.set([...attachments, { type: "text", content: next, start: 0, end: next.length }], next.length)
+    },
+    onError: (message) => showToast({ title: "Voice input failed", description: message }),
+  })
   const layout = useLayout()
   const comments = useComments()
   const dialog = useDialog()
@@ -1652,6 +1666,31 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
             />
 
             <div class="flex items-center gap-1 pointer-events-auto">
+              <Show when={voice.available}>
+                <Tooltip
+                  placement="top"
+                  value={
+                    voice.state() === "recording"
+                      ? "Stop and transcribe"
+                      : voice.state() === "transcribing"
+                        ? "Transcribing"
+                        : "Talk to Omnia"
+                  }
+                >
+                  <IconButton
+                    type="button"
+                    icon={voice.state() === "recording" ? "microphone-off" : "microphone"}
+                    variant={voice.state() === "recording" ? "primary" : "ghost"}
+                    class="size-8"
+                    disabled={voice.state() === "transcribing"}
+                    aria-label="Voice input"
+                    onClick={(event) => {
+                      event.preventDefault()
+                      voice.toggle()
+                    }}
+                  />
+                </Tooltip>
+              </Show>
               <Tooltip placement="top" inactive={!working() && blank()} value={tip()}>
                 <IconButton
                   data-action="prompt-submit"
