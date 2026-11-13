@@ -71,7 +71,7 @@ const FREE_MATRIX = {
   audit_export: { limit: 0, metering: "hard" },
   rbac: { limit: 0, metering: "hard" },
   sso: { limit: 0, metering: "hard" },
-  self_hosted: { limit: 0, metering: "hard" },
+  self_hosted: { limit: UNLIMITED, metering: "soft" },
   custom_specialists: { limit: 0, metering: "hard" },
   chat_channels: { limit: 0, metering: "hard" },
 } satisfies Record<Capability, Row>
@@ -95,7 +95,7 @@ const PRO_MATRIX = {
   audit_export: { limit: 0, metering: "hard" },
   rbac: { limit: 0, metering: "hard" },
   sso: { limit: 0, metering: "hard" },
-  self_hosted: { limit: 0, metering: "hard" },
+  self_hosted: { limit: UNLIMITED, metering: "soft" },
   custom_specialists: { limit: UNLIMITED, metering: "soft" },
   chat_channels: { limit: UNLIMITED, metering: "soft" },
 } satisfies Record<Capability, Row>
@@ -446,9 +446,9 @@ describe("the failure policy, per capability, on the plan the customer is on", (
     ).sort()
     // Pinned deliberately: these are exactly the capabilities that must survive
     // OUR outage rather than being taken away from a customer who did nothing
-    // wrong. All five are unlimited - "soft with no ceiling" is
+    // wrong. All six are unlimited - "soft with no ceiling" is
     // still soft, and stripping them would break the free app entirely.
-    expect(atRisk).toEqual(["clipboard", "input_freeze", "local_computer", "remote_computer", "subagents"])
+    expect(atRisk).toEqual(["clipboard", "input_freeze", "local_computer", "remote_computer", "self_hosted", "subagents"])
     for (const capability of atRisk) {
       expect(decide(freshStore("free"), PROFILE, capability, { now: NOW, storeReadable: false }).allowed).toBe(true)
     }

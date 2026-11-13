@@ -1,3 +1,9 @@
+# Contributing to Omnia
+
+Omnia is open source under the MIT license. Contributions are accepted under the same license. The client, server, and protocol are all in scope.
+
+The upstream OpenCode contribution notes below still apply where they do not conflict with Omnia's local-first and self-hosting model.
+
 # Contributing to OpenCode
 
 We want to make it easy for you to contribute to OpenCode. Here are the most common type of changes that get merged:

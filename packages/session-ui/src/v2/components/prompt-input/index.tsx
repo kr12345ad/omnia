@@ -61,7 +61,7 @@ export type PromptInputV2Props = {
    * Omitted means this composer has no billing context and draws no notice.
    */
   paywalls?: PromptInputV2Paywalls
-  /** Optional host-provided microphone control, rendered next to submit. */
+  /** Optional host-provided microphone control, rendered in the left control cluster. */
   voiceControl?: JSX.Element
 }
 
@@ -314,8 +314,8 @@ export function PromptInputV2(props: PromptInputV2Props) {
               )}
             </Show>
             {contextMeter()}
+            <Show when={props.voiceControl}>{props.voiceControl}</Show>
           </div>
-          <Show when={props.voiceControl}>{props.voiceControl}</Show>
           <PromptInputV2SubmitButton
             mode={state.mode}
             stopping={view.submit.stopping()}

@@ -105,7 +105,7 @@ const BUSINESS: Readonly<Record<Capability, CapabilityRule>> = {
   audit_export: UNLIMITED,
   rbac: UNLIMITED,
   sso: UNLIMITED,
-  self_hosted: NEVER,
+  self_hosted: UNLIMITED,
   custom_specialists: UNLIMITED,
   chat_channels: UNLIMITED,
 }
@@ -164,7 +164,10 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
       audit_export: NEVER,
       rbac: NEVER,
       sso: NEVER,
-      self_hosted: NEVER,
+      // Self-hosting is the open-source path: the server is free to run and
+      // adapt. Paid plans sell hosted compute and team administration, not the
+      // right to run the code you already have.
+      self_hosted: UNLIMITED,
       // Free keeps the four built-in discussion specialists; renaming and
       // refocusing them is what Pro adds.
       custom_specialists: NEVER,
@@ -198,7 +201,7 @@ export const PLANS: Readonly<Record<PlanId, Plan>> = {
       audit_export: NEVER,
       rbac: NEVER,
       sso: NEVER,
-      self_hosted: NEVER,
+      self_hosted: UNLIMITED,
       custom_specialists: UNLIMITED,
       chat_channels: UNLIMITED,
     },

@@ -23,6 +23,12 @@ export function FirstRunGate(props: ParentProps) {
   const auth = platform.auth
   if (auth === undefined) return <>{props.children}</>
 
+  // Open source builds are local-first: an Omnia account is optional and is
+  // only needed for hosted services. Managed tenant installers still require
+  // the work account their administrator provisioned.
+  const managed = auth.enterprise?.managed === true
+  if (!managed) return <>{props.children}</>
+
   const [error, setError] = createSignal<unknown>()
   const [status, { refetch, mutate }] = createResource(async () => {
     try {
@@ -36,10 +42,6 @@ export function FirstRunGate(props: ParentProps) {
       return undefined
     }
   })
-  // A tenant installer must never offer GitHub or Google. The flag is known
-  // synchronously from the packaged build, so a slow or failed profile read
-  // cannot fall back to the public sign-in screen.
-  const managed = auth.enterprise?.managed === true
   // The profile is packaged with the installer, so it is available before the
   // first sign-in and does not depend on the network.
   const [profile] = createResource(async () => auth.enterprise?.profile().catch(() => undefined))

@@ -25,7 +25,8 @@ const rendererProtocol = "oc"
 const rendererHost = "renderer"
 const clipboardWritePermission = "clipboard-sanitized-write"
 const notificationPermission = "notifications"
-const rendererPermissions = new Set([clipboardWritePermission, notificationPermission])
+const rendererPermissions = new Set([clipboardWritePermission, notificationPermission, "media"])
+const mediaPermission = "media"
 // The application has no location features. Geolocation is denied explicitly
 // so no future allow-list change can enable it, and so the policy is auditable.
 const deniedPermissions = new Set(["geolocation"])
@@ -582,11 +583,13 @@ function allowRendererPermissions(win: BrowserWindow) {
       callback(false)
       return
     }
-    callback(
-      rendererPermissions.has(permission) &&
-        isTrustedRendererUrl(details.requestingUrl) &&
-        trustedWebContents.has(webContents.id),
-    )
+    const trusted = isTrustedRendererUrl(details.requestingUrl) && trustedWebContents.has(webContents.id)
+    if (permission === mediaPermission) {
+      const types = (details as { mediaTypes?: string[] }).mediaTypes ?? []
+      callback(trusted && types.length > 0 && types.every((type) => type === "audio"))
+      return
+    }
+    callback(rendererPermissions.has(permission) && trusted)
   })
   session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
     if (deniedPermissions.has(permission)) return false

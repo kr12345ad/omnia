@@ -240,6 +240,8 @@ const getBase = (appId: string): Configuration => ({
         "Omnia may read and write files on your Desktop when a task you ask for needs them.",
       NSSystemAdministrationUsageDescription:
         "Omnia asks for administrator approval only when a task you requested requires elevated access.",
+      NSMicrophoneUsageDescription:
+        "Omnia uses the microphone only when you press the voice input button, so your words can be transcribed locally.",
     },
     target: ["dmg", "zip"],
   },

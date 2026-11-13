@@ -1666,31 +1666,6 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
             />
 
             <div class="flex items-center gap-1 pointer-events-auto">
-              <Show when={voice.available}>
-                <Tooltip
-                  placement="top"
-                  value={
-                    voice.state() === "recording"
-                      ? "Stop and transcribe"
-                      : voice.state() === "transcribing"
-                        ? "Transcribing"
-                        : "Talk to Omnia"
-                  }
-                >
-                  <IconButton
-                    type="button"
-                    icon={voice.state() === "recording" ? "microphone-off" : "microphone"}
-                    variant={voice.state() === "recording" ? "primary" : "ghost"}
-                    class="size-8"
-                    disabled={voice.state() === "transcribing"}
-                    aria-label="Voice input"
-                    onClick={(event) => {
-                      event.preventDefault()
-                      voice.toggle()
-                    }}
-                  />
-                </Tooltip>
-              </Show>
               <Tooltip placement="top" inactive={!working() && blank()} value={tip()}>
                 <IconButton
                   data-action="prompt-submit"
@@ -1737,6 +1712,31 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                   <Icon name="plus" class="size-4.5" />
                 </Button>
               </TooltipKeybind>
+              </Show>
+              <Show when={voice.available}>
+                <Tooltip
+                  placement="top"
+                  value={
+                    voice.state() === "recording"
+                      ? "Stop and transcribe"
+                      : voice.state() === "transcribing"
+                        ? "Transcribing"
+                        : "Talk to Omnia"
+                  }
+                >
+                  <IconButton
+                    type="button"
+                    icon={voice.state() === "recording" ? "microphone-off" : "microphone"}
+                    variant={voice.state() === "recording" ? "primary" : "ghost"}
+                    class="size-8"
+                    disabled={voice.state() === "transcribing"}
+                    aria-label="Voice input"
+                    onClick={(event) => {
+                      event.preventDefault()
+                      voice.toggle()
+                    }}
+                  />
+                </Tooltip>
               </Show>
             </div>
           </div>
