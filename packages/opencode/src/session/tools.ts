@@ -14,7 +14,10 @@ import { Truncate } from "@/tool/truncate"
 import { Plugin } from "@/plugin"
 import type { TaskPromptOps } from "@/tool/task"
 import { type Tool as AITool, tool, jsonSchema, type ToolExecutionOptions, asSchema } from "ai"
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
+import { Handoff } from "@/handoff"
+import { ShellID } from "@/tool/shell/id"
+import { InstanceRef } from "@/effect/instance-ref"
 import { MessageV2 } from "./message-v2"
 import { Session } from "./session"
 import { SessionProcessor } from "./processor"
@@ -48,6 +51,10 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   messages: SessionV1.WithParts[]
   promptOps: TaskPromptOps
 }) {
+  // The chat surface is tool-free by construction, not only by permission
+  // filtering: no registry or MCP resource tool may reach the model.
+  if (input.agent.name === "chat") return {}
+
   const tools: Record<string, AITool> = {}
   const run = yield* EffectBridge.make()
   const plugin = yield* Plugin.Service
@@ -56,6 +63,12 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   const mcp = yield* MCP.Service
   const truncate = yield* Truncate.Service
   const flags = yield* RuntimeFlags.Service
+  // The handoff hook is optional: tests and embedding hosts may not provide the
+  // session runtime or an InstanceRef. serviceOption keeps those dependencies
+  // out of this function's environment type.
+  const sessions = Option.getOrUndefined(yield* Effect.serviceOption(Session.Service))
+  const agents = Option.getOrUndefined(yield* Effect.serviceOption(Agent.Service))
+  const instance = yield* InstanceRef
 
   const context = (args: Record<string, unknown>, options: ToolExecutionOptions): Tool.Context => ({
     sessionID: input.session.id,
@@ -89,6 +102,22 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         })
         .pipe(Effect.orDie),
   })
+
+  // A failed test is the only automatic handoff trigger. The dispatcher runs
+  // outside the tool call so the main agent gets its result immediately, then
+  // the dormant agent's summary arrives as a synthetic user message.
+  const dispatch = (prepared: Handoff.Prepared) => {
+    const dormant = prepared.matches[0]
+    if (!dormant || !sessions || !agents) return Effect.void
+    return Handoff.run({
+      prepared,
+      agent: dormant,
+      parent: { id: input.session.id, agent: input.session.agent },
+      ops: input.promptOps,
+      sessions,
+      agents,
+    })
+  }
 
   for (const item of yield* registry.tools({
     modelID: ModelV2.ID.make(input.model.api.id),
@@ -125,6 +154,32 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
               output,
             )
+            if (item.id === ShellID.ToolID && instance) {
+              // A handoff is an optional side channel: a malformed agent file
+              // or an unwritable .omnia directory must never turn a completed
+              // shell command into a failed tool call.
+              const prepared = yield* Effect.promise(() =>
+                Handoff.prepare({
+                  root: instance.worktree,
+                  session: {
+                    id: input.session.id,
+                    parentID: input.session.parentID,
+                    agent: input.session.agent,
+                    directory: input.session.directory,
+                    metadata: input.session.metadata,
+                  },
+                  tool: item.id,
+                  args: toRecord(args),
+                  result: { output: output.output, metadata: output.metadata },
+                  messages: input.messages,
+                }),
+              ).pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("handoff prepare failed", { cause }).pipe(Effect.as(undefined)),
+                ),
+              )
+              if (prepared) run.fork(dispatch(prepared))
+            }
             if (options.abortSignal?.aborted) {
               yield* input.processor.completeToolCall(options.toolCallId, output)
             }

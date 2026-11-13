@@ -2503,10 +2503,18 @@ ToolRegistry.register({
           ? props.input.description
           : childSessionId()
       if (!value) return value
-      if (props.metadata.background === true) return `${value} (background)`
       return value
     })
-    const running = createMemo(() => props.status === "pending" || props.status === "running")
+    const background = createMemo(() => props.metadata.background === true)
+    const running = createMemo(() => {
+      if (props.status === "pending" || props.status === "running") return true
+      // A background task's tool call returns as soon as the subagent starts,
+      // so its own status is already `completed` while the child session keeps
+      // working. Follow the child session instead of painting a success dot on
+      // a task that is still running.
+      const id = background() ? childSessionId() : undefined
+      return id !== undefined && (data.store.session_status[id]?.type ?? "idle") !== "idle"
+    })
 
     const href = createMemo(() => sessionLink(childSessionId(), data.sessionHref))
     const clickable = createMemo(() => !!(childSessionId() && (data.navigateToSession || href())))
@@ -2569,6 +2577,29 @@ ToolRegistry.register({
                 </span>
               </Show>
               <span data-component="task-tool-title">{title()}</span>
+              <Show when={background()}>
+                <span
+                  data-component="task-tool-background"
+                  data-state={running() ? "running" : props.status}
+                  class="ml-0.5 inline-flex shrink-0 items-center gap-1 rounded-full border border-v2-border-border-muted px-1.5 py-px text-[10px] font-[530] leading-4 text-v2-text-text-muted"
+                  title="Background subagent"
+                  aria-label="Background subagent"
+                >
+                  <span
+                    class="size-1.5 rounded-full"
+                    classList={{
+                      "animate-pulse bg-v2-state-fg-warning": running(),
+                      // The launch tool call is already `completed` while the
+                      // child runs, and it does not learn about a later child
+                      // failure, so a settled badge must stay neutral rather
+                      // than claim success.
+                      "bg-v2-state-fg-danger": !running() && props.status === "error",
+                      "bg-v2-icon-icon-muted": !running() && props.status !== "error",
+                    }}
+                  />
+                  background
+                </span>
+              </Show>
               <Show when={subtitle()}>
                 <span data-slot="basic-tool-tool-subtitle">{subtitle()}</span>
               </Show>

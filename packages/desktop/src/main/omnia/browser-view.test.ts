@@ -48,12 +48,14 @@ interface FakeContents {
   readonly debugger: FakeDebugger
   readonly navigationHistory: FakeNavigationHistory
   readonly reloads: string[]
+  readonly loads: string[]
   send(channel: string, message: unknown): void
   isDestroyed(): boolean
   isLoading(): boolean
   getType(): string
   getURL(): string
   getTitle(): string
+  loadURL(url: string): Promise<void>
   reload(): void
   reloadIgnoringCache(): void
   insertCSS(css: string): Promise<string>
@@ -158,6 +160,7 @@ function createContents(options: { type?: string; url?: string } = {}): FakeCont
     debugger: createDebugger(),
     navigationHistory: history,
     reloads: [],
+    loads: [],
     send(channel, message) {
       if (contents.failSend) throw new Error("The renderer is gone.")
       contents.sent.push({ channel, message })
@@ -167,6 +170,11 @@ function createContents(options: { type?: string; url?: string } = {}): FakeCont
     getType: () => contents.type,
     getURL: () => contents.url,
     getTitle: () => "Example",
+    loadURL: (url) => {
+      contents.loads.push(url)
+      contents.url = url
+      return Promise.resolve()
+    },
     reload: () => contents.reloads.push("reload"),
     reloadIgnoringCache: () => contents.reloads.push("reloadIgnoringCache"),
     insertCSS: () => Promise.resolve(""),
@@ -239,11 +247,15 @@ function filterRequest(details: Record<string, unknown>): { cancelled: boolean }
   return { cancelled: results[0]?.cancel === true }
 }
 
-function filterResponse(details: Record<string, unknown>): { cancelled: boolean } {
+function filterResponseResult(details: Record<string, unknown>): Record<string, unknown> | undefined {
   const results: Array<Record<string, unknown>> = []
   fakeRequestFilters.get("headersReceived")?.(details, (result: Record<string, unknown>) => results.push(result))
   expect(results).toHaveLength(1)
-  return { cancelled: results[0]?.cancel === true }
+  return results[0]
+}
+
+function filterResponse(details: Record<string, unknown>): { cancelled: boolean } {
+  return { cancelled: filterResponseResult(details)?.cancel === true }
 }
 
 // The shared substitution supplies every other Electron member, so a module
@@ -744,6 +756,9 @@ describe("embedded browser page debugger and dialogs", () => {
     }
     attempt("will-navigate", "http://127.0.0.1:8080/admin")
     attempt("will-navigate", "https://allowed.test/page")
+    // The pdf.js reader is a local renderer page, not web content; routing a
+    // PDF to it must not be blocked by the page allowlist.
+    attempt("will-navigate", "oc://renderer/pdf.html?url=https%3A%2F%2Fallowed.test%2Finvoice.pdf")
     attempt("will-frame-navigate", "http://169.254.169.254/latest/meta-data")
     attempt("will-frame-navigate", "https://allowed.test/frame")
     attempt("will-redirect", "http://[::1]:9000/")
@@ -769,10 +784,24 @@ describe("embedded browser page debugger and dialogs", () => {
     })
     expect(preferences.partition).toBe("persist:omnia-browser")
     expect(preferences.allowRunningInsecureContent).toBe(false)
+    // Every guest carries the PDF preload, which exposes nothing unless its own
+    // document is the reader page.
+    expect(String(preferences.preload).replace(/\\/g, "/").endsWith("/preload/pdf.js")).toBe(true)
+    // The guest plugin flag is what lets Chromium's PDF viewer render a PDF
+    // instead of leaving the webview blank.
+    expect(preferences.plugins).toBe(true)
 
     expect(filterRequest({ url: "https://allowed.test/page.png", resourceType: "image" })).toEqual({
       cancelled: false,
     })
+    // The PDF viewer is a chrome-extension page; its local resources are not
+    // network egress and must survive the partition filter.
+    expect(
+      filterRequest({
+        url: "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html?streaming",
+        resourceType: "other",
+      }),
+    ).toEqual({ cancelled: false })
     expect(filterRequest({ url: "http://127.0.0.1:8080/admin", resourceType: "xmlhttprequest" })).toEqual({
       cancelled: true,
     })
@@ -794,6 +823,84 @@ describe("embedded browser page debugger and dialogs", () => {
         responseHeaders: { location: "/next" },
       }),
     ).toEqual({ cancelled: false })
+    await browser.destroy()
+  })
+
+  test("normalizes attachment PDFs into inline documents for the embedded viewer", async () => {
+    const browser = manager()
+    browser.watch()
+
+    const php = filterResponseResult({
+      url: "https://allowed.test/invoice.php?id=7",
+      resourceType: "mainFrame",
+      responseHeaders: {
+        "Content-Type": ["application/pdf"],
+        "Content-Disposition": ['attachment; filename="invoice.pdf"'],
+        "Cache-Control": ["no-store"],
+      },
+    })
+    expect(php?.cancel).toBeUndefined()
+    expect(php?.responseHeaders).toEqual({
+      "Cache-Control": ["no-store"],
+      "Content-Type": "application/pdf",
+      "Content-Disposition": 'inline; filename="invoice.pdf"',
+    })
+
+    // PHP endpoints often label the generated file as octet-stream and only
+    // reveal its type in the download filename.
+    const octet = filterResponseResult({
+      url: "https://allowed.test/download.php?id=9",
+      resourceType: "mainFrame",
+      responseHeaders: {
+        "content-type": ["application/octet-stream"],
+        "content-disposition": ["attachment; filename=report.pdf"],
+      },
+    })
+    expect(octet?.responseHeaders).toMatchObject({
+      "Content-Type": "application/pdf",
+      "Content-Disposition": "inline; filename=report.pdf",
+    })
+
+    // A normal HTML endpoint and a PDF subresource must keep their headers.
+    expect(
+      filterResponseResult({
+        url: "https://allowed.test/invoice.php",
+        resourceType: "mainFrame",
+        responseHeaders: { "content-type": ["text/html"] },
+      })?.responseHeaders,
+    ).toBeUndefined()
+    expect(
+      filterResponseResult({
+        url: "https://allowed.test/manual.pdf",
+        resourceType: "subFrame",
+        responseHeaders: { "content-type": ["application/pdf"] },
+      })?.responseHeaders,
+    ).toBeUndefined()
+
+    await browser.destroy()
+  })
+
+  test("routes a top-level PDF response to the local pdf.js reader", async () => {
+    const browser = manager()
+    const host = createWindow()
+    browser.watch()
+    const { guest } = registerGuest(browser, host.webContents, "req-pdf-reader")
+
+    const source = "https://allowed.test/invoice.php?id=7"
+    filterResponseResult({
+      url: source,
+      resourceType: "mainFrame",
+      webContentsId: guest.id,
+      responseHeaders: {
+        "Content-Type": ["application/pdf"],
+        "Content-Disposition": ['attachment; filename="invoice.pdf"'],
+      },
+    })
+
+    await waitUntil(() => guest.loads.length > 0)
+    const reader = guest.loads[0]!
+    expect(reader.startsWith("oc://renderer/pdf.html?url=")).toBe(true)
+    expect(new URL(reader).searchParams.get("url")).toBe(source)
     await browser.destroy()
   })
 

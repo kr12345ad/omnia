@@ -165,3 +165,19 @@ it.effect("preserves running tool start time across metadata updates", () =>
     }
   }),
 )
+
+it.effect("returns no tools for the chat surface agent", () =>
+  Effect.gen(function* () {
+    const tools = yield* SessionTools.resolve({
+      agent: { ...agent, name: "chat" },
+      model,
+      session: { id: sessionID, permission: [] } as unknown as Session.Info,
+      processor: undefined as never,
+      bypassAgentCheck: false,
+      messages: [],
+      promptOps: {} as never,
+    })
+
+    expect(tools).toEqual({})
+  }),
+)

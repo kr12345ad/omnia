@@ -121,4 +121,12 @@ export {
 export type { ParsedScript, ToolSchema } from "./text-protocol"
 export type { ActionCatalogEntry } from "./catalog"
 export { OMNIA_SERVER_VERSION, startOmniaServer } from "./server"
-export type { OmniaServerHandle, OmniaServerOptions } from "./server"
+export type { OmniaGrpcOptions, OmniaServerHandle, OmniaServerOptions } from "./server"
+export { startGrpcServer } from "./grpc"
+export type {
+  GnmiAccess,
+  GnmiStateSource,
+  GrpcServerHandle,
+  GrpcServerOptions,
+  GrpcTlsOptions,
+} from "./grpc"

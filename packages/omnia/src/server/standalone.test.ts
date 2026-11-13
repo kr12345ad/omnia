@@ -35,8 +35,15 @@ describe("standalone credential publication", () => {
         if (chunk.done) throw new Error(`Standalone exited before readiness: ${output}`)
         output += decoder.decode(chunk.value, { stream: true })
       }
-      const connection = JSON.parse(readFileSync(file, "utf8")) as { token: string; url: string }
+      const connection = JSON.parse(readFileSync(file, "utf8")) as {
+        token: string
+        url: string
+        grpcUrl?: string
+        grpcPort?: number
+      }
       expect(connection.token).toMatch(/^[a-f0-9]{64}$/)
+      expect(connection.grpcUrl).toMatch(/^grpc:\/\/127\.0\.0\.1:\d+$/)
+      expect(connection.grpcPort).toBeGreaterThan(0)
       expect(output).not.toContain(connection.token)
       expect(output).not.toContain('"token"')
       if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600)

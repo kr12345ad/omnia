@@ -25,9 +25,9 @@ export interface TaskPromptOps {
 const id = "task"
 const BACKGROUND_DESCRIPTION = [
   "Background mode: background=true launches the subagent asynchronously and returns immediately.",
-  "Foreground is the default; use it when you need the result before continuing.",
-  "Use background only for independent work that can run while you continue elsewhere.",
-  "You will be notified automatically when it finishes.",
+  "Use the default foreground mode when you need the result before continuing.",
+  "Use background only for independent work that can run while you continue elsewhere; do not sleep, poll, or duplicate its work.",
+  "Its completion arrives later as a synthetic message in this session, so you may keep working or end your turn after launching it.",
 ].join(" ")
 const BACKGROUND_STARTED = [
   "The task is working in the background. You will be notified automatically when it finishes.",
@@ -61,6 +61,15 @@ export const Parameters = Schema.Struct({
       "Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress",
   }),
 })
+
+/**
+ * A background completion is only useful while its parent session is visible.
+ * Archived sessions and sessions removed out from under the job must not wake
+ * a paid turn nobody can see.
+ */
+export function canDeliverBackgroundResult(session: Session.Info | undefined): session is Session.Info {
+  return session !== undefined && session.time.archived === undefined
+}
 
 function renderOutput(input: {
   sessionID: SessionID
@@ -235,7 +244,13 @@ export const TaskTool = Tool.define(
         state: "completed" | "error",
         text: string,
       ) {
-        const currentParent = yield* sessions.get(ctx.sessionID)
+        // The parent may have been archived or removed while the background
+        // task ran. Waking it would start a paid turn in a session the user
+        // cannot see, so the completion is dropped instead.
+        const currentParent = yield* sessions
+          .get(ctx.sessionID)
+          .pipe(Effect.catch(() => Effect.succeed(undefined)))
+        if (!canDeliverBackgroundResult(currentParent)) return
         yield* ops
           .prompt({
             sessionID: ctx.sessionID,

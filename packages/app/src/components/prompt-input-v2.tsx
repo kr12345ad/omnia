@@ -3,11 +3,13 @@ import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { ProviderIcon } from "@opencode-ai/ui/provider-icon"
 import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2"
 import { Icon } from "@opencode-ai/ui/v2/icon"
+import { IconButtonV2 } from "@opencode-ai/ui/v2/icon-button-v2"
 import { KeybindV2 } from "@opencode-ai/ui/v2/keybind-v2"
 import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
 import type { ReferenceInfo } from "@opencode-ai/sdk/v2/client"
-import { createEffect, createMemo, on, Show } from "solid-js"
-import { ModelSelectorPopoverV2 } from "@/components/dialog-select-model"
+import { createEffect, createMemo, on, Show, type Accessor } from "solid-js"
+import { ModelMark, ModelSelectorPopoverV2 } from "@/components/dialog-select-model"
+import { modelDisplayName } from "@/components/dialog-select-model-search"
 import { DialogSelectModelUnpaidV2 } from "@/components/dialog-select-model-unpaid-v2"
 import type { PromptInputProps } from "@/components/prompt-input/contracts"
 import { normalizePromptHistoryEntry, promptLength, type PromptHistoryComment } from "@/components/prompt-input/history"
@@ -27,9 +29,12 @@ import { usePlatform } from "@/context/platform"
 import { useSDK } from "@/context/sdk"
 import { useSettings } from "@/context/settings"
 import { useSync } from "@/context/sync"
+import { useProviders } from "@/hooks/use-providers"
+import { getLiveSessionContext } from "@/components/session/session-context-metrics"
 import { createSessionTabs } from "@/pages/session/helpers"
 import { resolveSessionMode } from "@/utils/session-mode"
 import { showToast } from "@/utils/toast"
+import { createVoiceInput } from "@/utils/voice-input"
 import {
   PromptInputV2,
   type PromptInputV2Paywalls,
@@ -50,10 +55,25 @@ export type PromptInputV2ComposerProps = {
 export type PromptInputV2ControllerProps = Omit<PromptInputProps, "class" | "submission">
 export type PromptInputV2ComposerController = PromptInputV2Interaction & {
   readonly model: PromptInputProps["controls"]["model"]
+  readonly contextUsage: Accessor<{ total: number; limit?: number } | undefined>
 }
 
 export function PromptInputV2Composer(props: PromptInputV2ComposerProps) {
   const dialog = useDialog()
+  const prompt = usePrompt()
+  const voice = createVoiceInput({
+    onText: (text) => {
+      const current = prompt.current()
+      const attachments = current.filter((part) => part.type !== "text")
+      const existing = current
+        .filter((part) => part.type === "text")
+        .map((part) => part.content)
+        .join("")
+      const next = (existing.trim() ? existing.replace(/\s+$/, "") + " " : "") + text
+      prompt.set([...attachments, { type: "text", content: next, start: 0, end: next.length }], next.length)
+    },
+    onError: (message) => showToast({ title: "Voice input failed", description: message }),
+  })
   const command = useCommand()
   const language = useLanguage()
   const enterprise = useEnterprise()
@@ -94,6 +114,36 @@ export function PromptInputV2Composer(props: PromptInputV2ComposerProps) {
         attachHidden={!enterprise.feature("fileAttachments")}
         shellHidden={enterprise.permission("bash") === "deny"}
         variantControlVisible={!props.controller.model.loading}
+        voiceControl={
+          <Show when={voice.available}>
+            <TooltipV2
+              placement="top"
+              value={
+                voice.state() === "recording"
+                  ? "Stop and transcribe"
+                  : voice.state() === "transcribing"
+                    ? "Transcribing"
+                    : "Talk to Omnia"
+              }
+            >
+              <IconButtonV2
+                type="button"
+                size="small"
+                variant={voice.state() === "recording" ? "contrast" : "ghost"}
+                aria-label="Voice input"
+                disabled={voice.state() === "transcribing"}
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  voice.toggle()
+                }}
+                icon={<Icon name={voice.state() === "recording" ? "microphone-off" : "microphone"} size="small" />}
+              />
+            </TooltipV2>
+          </Show>
+        }
+        contextUsed={props.controller.contextUsage()?.total}
+        contextLimit={props.controller.contextUsage()?.limit}
         attachKeybind={command.keybindParts("file.attach")}
         attachShortcut={command.keybind("file.attach")}
         modelControl={
@@ -105,6 +155,7 @@ export function PromptInputV2Composer(props: PromptInputV2ComposerProps) {
             model={props.controller.model.selection}
             providerID={props.controller.model.selection.current()?.provider?.id}
             modelName={props.controller.model.selection.current()?.name ?? language.t("dialog.model.select.title")}
+            currentModel={props.controller.model.selection.current()}
             onClose={props.controller.restoreFocus}
             onUnpaidClick={() =>
               dialog.show(() => <DialogSelectModelUnpaidV2 model={props.controller.model.selection} />)
@@ -153,6 +204,18 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
   })
   const info = createMemo(() => (props.controls.session.id ? sync().session.get(props.controls.session.id) : undefined))
   const working = createMemo(() => sync().data.session_working(props.controls.session.id ?? ""))
+  const providers = useProviders(() => sdk().directory)
+  // Resolving the provider catalog walks every model, so keep it out of the
+  // streaming hot path; only message/part changes should rerun the estimate.
+  const providerList = createMemo(() => [...providers.all().values()])
+  // The meter reads the last reported usage and, while a turn streams, folds in
+  // a cheap visible-character estimate so it moves on every delta instead of
+  // only at the next provider report.
+  const contextUsage = createMemo(() => {
+    const id = props.controls.session.id
+    if (!id) return undefined
+    return getLiveSessionContext(sync().data.message[id] ?? [], sync().data.part, providerList(), working())
+  })
   const attachments = createMemo(() =>
     prompt.current().filter((part): part is ImageAttachmentPart => part.type === "image"),
   )
@@ -243,6 +306,15 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
     if (!id) return permission.isAutoAcceptingDirectory(sdk().directory)
     return permission.isAutoAccepting(id, sdk().directory)
   })
+  // Typed built-in slashes are dispatched like the popover does; the submit
+  // factory calls this only after no server custom command matches.
+  const runSlashCommand = (name: string) => {
+    const matches = command.options.filter((entry) => entry.slash === name)
+    if (matches.length === 0) return false
+    const option = matches.find((entry) => !entry.disabled)
+    if (option) command.trigger(option.id, "slash")
+    return true
+  }
   const submission = createPromptSubmit({
     prompt,
     info,
@@ -260,6 +332,7 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
     setPopover: (popover) => {
       if (!popover) controller.dispatch({ type: "popover.close" })
     },
+    runSlashCommand,
     newSessionWorktree: () => props.newSessionWorktree,
     onNewSessionWorktreeReset: props.onNewSessionWorktreeReset,
     shouldQueue: props.shouldQueue,
@@ -459,6 +532,7 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
     },
   })
   Object.defineProperty(controller, "model", { get: () => props.controls.model })
+  Object.defineProperty(controller, "contextUsage", { value: contextUsage })
 
   command.register("prompt-input", () => [
     {
@@ -526,6 +600,7 @@ function PromptInputV2ModelControl(props: {
   model: PromptInputV2ComposerController["model"]["selection"]
   providerID?: string
   modelName: string
+  currentModel?: { name: string; provider: { id: string; name: string } }
   onClose: () => void
   onUnpaidClick: () => void
 }) {

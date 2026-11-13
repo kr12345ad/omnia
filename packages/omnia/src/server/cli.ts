@@ -497,6 +497,7 @@ export async function startCommand(parsed: Parsed): Promise<number> {
   const runtime = {
     pid: process.pid,
     url: handle.url,
+    ...(handle.grpc === undefined ? {} : { grpcUrl: handle.grpc.url, grpcPort: handle.grpc.port }),
     publicUrl: config.publicUrl,
     consoleUrl: `${consoleUrl(config)}/admin`,
     startedAt: Date.now(),

@@ -122,6 +122,17 @@ Actions:
   when the challenge is for another host. Verified only when an independent
   page read succeeds afterwards.
 
+PDFs: a top-level PDF opens in the built-in pdf.js reader, not Chromium's PDF
+plugin. Its text layer and AcroForm controls are ordinary page content: use
+browser_read for the text, browser_find with role textbox, combobox, or
+checkbox for the fields, and browser_type, browser_select, or browser_click
+to fill them. When the form is complete, find the button labeled "Save filled
+PDF" and click it; then browser_read the status line beginning "Saved to " for
+the output path. Move through the document with the toolbar's previous and
+next page buttons. A scanned or image-only PDF has no text layer, so inspect
+it visually with browser_screenshot instead of expecting text. XFA forms are
+not supported; only AcroForm fields are fillable.
+
 Refs are scoped to the observation they were found in: use refs from the
 latest browser_find on the same page and tab, and pass that find's
 observationId with them. An element ref carries the document it was resolved

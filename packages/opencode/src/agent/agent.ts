@@ -14,6 +14,7 @@ import PROMPT_COMPACTION from "./prompt/compaction.txt"
 import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
+import PROMPT_CHAT_SURFACE from "./prompt/chat.txt"
 import PROMPT_DISCUSSION_MANAGER from "./prompt/discussion-manager.txt"
 import PROMPT_DISCUSSION_STRATEGIST from "./prompt/discussion-strategist.txt"
 import PROMPT_DISCUSSION_BUILDER from "./prompt/discussion-builder.txt"
@@ -162,6 +163,21 @@ const layer = Layer.effect(
             ),
             mode: "primary",
             native: true,
+          },
+          // The tool-free surface behind the browser chat page. Hidden so it
+          // never appears in the desktop agent picker or becomes the default
+          // agent; the chat page names it explicitly when it creates a session.
+          // The deny rule is last so project permission config cannot re-enable
+          // a tool for this agent.
+          chat: {
+            name: "chat",
+            description: "Chat-only assistant. Has no tools and no access to files, the shell, or the desktop.",
+            options: {},
+            permission: Permission.merge(defaults, user, Permission.fromConfig({ "*": "deny" })),
+            prompt: PROMPT_CHAT_SURFACE,
+            mode: "primary",
+            native: true,
+            hidden: true,
           },
           plan: {
             name: "plan",

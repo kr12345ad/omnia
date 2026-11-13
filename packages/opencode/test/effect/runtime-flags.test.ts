@@ -27,6 +27,7 @@ describe("RuntimeFlags", () => {
             OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
             OPENCODE_AUTO_SHARE: "true",
             OPENCODE_DISABLE_EMBEDDED_WEB_UI: "true",
+            OPENCODE_CHAT_ONLY: "true",
             OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
             OPENCODE_DISABLE_LSP_DOWNLOAD: "true",
             OPENCODE_EXPERIMENTAL: "true",
@@ -43,6 +44,7 @@ describe("RuntimeFlags", () => {
       expect(flags.autoShare).toBe(true)
       expect(flags.disableDefaultPlugins).toBe(true)
       expect(flags.disableEmbeddedWebUi).toBe(true)
+      expect(flags.chatOnly).toBe(true)
       expect(flags.disableExternalSkills).toBe(true)
       expect(flags.disableLspDownload).toBe(true)
       expect(flags.disableClaudeCodePrompt).toBe(false)
@@ -109,6 +111,7 @@ describe("RuntimeFlags", () => {
       expect(flags.autoShare).toBe(false)
       expect(flags.disableDefaultPlugins).toBe(true)
       expect(flags.disableEmbeddedWebUi).toBe(false)
+      expect(flags.chatOnly).toBe(false)
       expect(flags.disableExternalSkills).toBe(false)
       expect(flags.disableLspDownload).toBe(false)
       expect(flags.disableClaudeCodePrompt).toBe(false)

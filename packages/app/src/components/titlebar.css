@@ -75,3 +75,13 @@
     animation-range: calc(100% - 1.1px) calc(100% - 1px);
   }
 }
+
+/* Unified custom titlebar on Linux: the header is the window's top edge,
+   so the whole bar is a drag region except for interactive children. */
+[data-slot="titlebar-v2"] {
+  -webkit-app-region: drag;
+}
+
+[data-slot="titlebar-v2"] :is(button, input, a, select, [role="button"]) {
+  -webkit-app-region: no-drag;
+}

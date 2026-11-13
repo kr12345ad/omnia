@@ -228,6 +228,10 @@ type PromptSubmitInput = {
   resetHistoryNavigation: () => void
   setMode: (mode: "normal" | "shell") => void
   setPopover: (popover: "at" | "slash" | null) => void
+  // Runs an application slash command (registered with `slash` in the command
+  // registry) and reports whether one matched. Built-ins never become prompt
+  // text, even when the slash popover is closed.
+  runSlashCommand?: (name: string) => boolean
   newSessionWorktree?: Accessor<string | undefined>
   onNewSessionWorktreeReset?: () => void
   shouldQueue?: Accessor<boolean>
@@ -495,6 +499,17 @@ export function createPromptSubmit(input: PromptSubmitInput) {
         input.queueScroll()
       })
       return true
+    }
+
+    const runSlashCommand = input.runSlashCommand
+    if (mode === "normal" && text.startsWith("/") && runSlashCommand) {
+      const commandName = text.split(/\s+/)[0].slice(1)
+      const customCommand = sync().data.command.some((command) => command.name === commandName)
+      if (!customCommand) {
+        clearInput()
+        if (runSlashCommand(commandName)) return
+        restoreInput()
+      }
     }
 
     if (!isNewSession && mode === "normal" && input.shouldQueue?.()) {

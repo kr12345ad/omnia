@@ -308,8 +308,23 @@ describe("github auth routes", () => {
       expect(claim.computerId.startsWith("remote-")).toBe(true)
 
       const listed = await fetch(`${server.url}/v1/computers`, { headers: operatorAuth(server) })
-      const computers = ((await listed.json()) as { computers: Array<{ id: string; backend: string }> }).computers
-      expect(computers.some((computer) => computer.id === claim.computerId && computer.backend === "remote")).toBe(true)
+      const computers = ((await listed.json()) as { computers: Array<{ id: string; backend: string; name: string }> })
+        .computers
+      expect(computers.some((computer) => computer.id === claim.computerId && computer.backend === "remote")).toBe(
+        true,
+      )
+
+      const renamed = await fetch(`${server.url}/v1/computers/${claim.computerId}`, {
+        method: "PATCH",
+        headers: { authorization: `Bearer ${clientToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Studio Mac" }),
+      })
+      expect(renamed.status).toBe(200)
+      expect(((await renamed.json()) as { computer: { name: string } }).computer.name).toBe("Studio Mac")
+      const summary = await fetch(`${server.url}/v1/computers/${claim.computerId}`, {
+        headers: { authorization: `Bearer ${clientToken}` },
+      })
+      expect(((await summary.json()) as { computer: { name: string } }).computer.name).toBe("Studio Mac")
 
       const url = `${server.url}/v1/computers/${claim.computerId}/remote/commands?wait=0`
       const signed = await fetch(url, {

@@ -24,6 +24,7 @@
 //   `data.questions`. The footer shows whichever is first. When a reply
 //   event arrives, the queue entry is removed and the footer falls back
 //   to the next pending request or to the prompt view.
+import { contextWindowPercent, contextWindowTokens } from "@opencode-ai/core/session/usage"
 import type { Event, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
 import * as Locale from "@/util/locale"
 import { toolView } from "./tool"
@@ -136,12 +137,13 @@ function formatUsage(
   limit: number | undefined,
   cost: number | undefined,
 ): string | undefined {
-  const total =
-    (tokens?.input ?? 0) +
-    (tokens?.output ?? 0) +
-    (tokens?.reasoning ?? 0) +
-    (tokens?.cache?.read ?? 0) +
-    (tokens?.cache?.write ?? 0)
+  const counts = {
+    input: tokens?.input ?? 0,
+    output: tokens?.output ?? 0,
+    reasoning: tokens?.reasoning ?? 0,
+    cache: { read: tokens?.cache?.read ?? 0, write: tokens?.cache?.write ?? 0 },
+  }
+  const total = contextWindowTokens(counts)
 
   if (total <= 0) {
     if (typeof cost === "number" && cost > 0) {
@@ -150,8 +152,8 @@ function formatUsage(
     return undefined
   }
 
-  const text =
-    limit && limit > 0 ? `${Locale.number(total)} (${Math.round((total / limit) * 100)}%)` : Locale.number(total)
+  const percent = contextWindowPercent(counts, limit)
+  const text = percent === undefined ? Locale.number(total) : `${Locale.number(total)} (${percent}%)`
 
   if (typeof cost === "number" && cost > 0) {
     return `${text} · ${money.format(cost)}`

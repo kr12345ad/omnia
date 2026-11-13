@@ -17,4 +17,13 @@ describe("icon sprite", () => {
   test("keeps the Google mark independent of the icon color", () => {
     expect(symbolOf("google")).not.toContain("currentColor")
   })
+
+  test("ships platform brand marks on the 24 grid in currentColor", () => {
+    for (const name of ["slack", "telegram", "teams", "gchat", "linear", "whatsapp"]) {
+      const symbol = symbolOf(name)
+      expect(symbol).toContain('viewBox="0 0 24 24"')
+      expect(symbol).toContain('fill="currentColor"')
+      expect(symbol).not.toContain("#")
+    }
+  })
 })

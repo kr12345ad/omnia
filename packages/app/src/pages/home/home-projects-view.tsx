@@ -61,6 +61,7 @@ export type HomeProjectsViewProps = {
 }
 
 export function HomeProjectsView(props: HomeProjectsViewProps) {
+  const platform = usePlatform()
   const [contextMenu, setContextMenu] = createStore({ open: undefined as string | undefined })
   const contextMenuProps = {
     contextMenuOpen: (id: string) => contextMenu.open === id,
@@ -84,16 +85,18 @@ export function HomeProjectsView(props: HomeProjectsViewProps) {
           when={props.servers().length === 1 && !(props.projects().length === 0 && props.recentlyClosed().length > 0)}
         >
           <TooltipV2 placement="bottom" value={props.language.t("home.project.add")}>
-            <IconButtonV2
-              data-action="home-add-project"
-              variant="ghost-muted"
-              size="large"
-              class="titlebar-icon [&_[data-slot=icon-svg]]:text-v2-icon-icon-muted"
-              icon={<IconV2 name="folder-add-left" />}
-              disabled={props.serverHealth(props.servers()[0])?.healthy === false}
-              onClick={() => props.onChooseProject(props.servers()[0])}
-              aria-label={props.language.t("home.project.add")}
-            />
+            <Show when={platform.platform === "desktop"}>
+              <IconButtonV2
+                data-action="home-add-project"
+                variant="ghost-muted"
+                size="large"
+                class="titlebar-icon [&_[data-slot=icon-svg]]:text-v2-icon-icon-muted"
+                icon={<IconV2 name="folder-add-left" />}
+                disabled={props.serverHealth(props.servers()[0])?.healthy === false}
+                onClick={() => props.onChooseProject(props.servers()[0])}
+                aria-label={props.language.t("home.project.add")}
+              />
+            </Show>
           </TooltipV2>
         </Show>
       </div>
@@ -200,6 +203,7 @@ function HomeServerRow(props: {
   collapsed: boolean
   health: ServerHealth | undefined
 }) {
+  const platform = usePlatform()
   const healthy = () => !!props.health?.healthy
   const canToggle = () => healthy() && props.projectsForServer(props.server).length > 0
   const contextMenuID = () => serverContextMenuID(props.server)
@@ -284,17 +288,19 @@ function HomeServerRow(props: {
           open={props.contextMenuOpen(contextMenuID())}
           onOpenChange={(open) => props.onSetContextMenuOpen(contextMenuID(), open)}
         />
-        <TooltipV2 class="flex shrink-0 items-center" placement="bottom" value={props.language.t("home.project.add")}>
-          <IconButtonV2
-            data-action="home-add-project"
-            variant="ghost-muted"
-            size="small"
-            icon={<IconV2 name="folder-add-left" />}
-            aria-label={props.language.t("home.project.add")}
-            disabled={props.health?.healthy === false}
-            onClick={() => props.onChooseProject(props.server)}
-          />
-        </TooltipV2>
+        <Show when={platform.platform === "desktop"}>
+          <TooltipV2 class="flex shrink-0 items-center" placement="bottom" value={props.language.t("home.project.add")}>
+            <IconButtonV2
+              data-action="home-add-project"
+              variant="ghost-muted"
+              size="small"
+              icon={<IconV2 name="folder-add-left" />}
+              aria-label={props.language.t("home.project.add")}
+              disabled={props.health?.healthy === false}
+              onClick={() => props.onChooseProject(props.server)}
+            />
+          </TooltipV2>
+        </Show>
       </div>
     </div>
   )
@@ -312,6 +318,7 @@ type HomeProjectListProps = HomeProjectsViewProps &
   }
 
 function HomeProjectList(props: HomeProjectListProps) {
+  const platform = usePlatform()
   let listRef!: HTMLDivElement
 
   return (
@@ -389,19 +396,22 @@ function HomeProjectEmpty(
     items: LocalProject[]
   },
 ) {
+  const platform = usePlatform()
   const unreachable = () => props.serverHealth(props.server)?.healthy === false
   return (
     <div class="flex min-w-0 flex-col gap-1">
-      <HomeProjectNavButton
-        type="button"
-        data-action="home-add-project-row"
-        class="disabled:opacity-60 [&>[data-slot=icon-svg]]:text-v2-icon-icon-muted"
-        disabled={unreachable()}
-        onClick={() => props.onChooseProject(props.server)}
-      >
-        <IconV2 name="folder-add-left" size="small" />
-        <span class={HOME_PROJECT_NAV_LABEL}>{props.language.t("home.project.add")}</span>
-      </HomeProjectNavButton>
+      <Show when={platform.platform === "desktop"}>
+        <HomeProjectNavButton
+          type="button"
+          data-action="home-add-project-row"
+          class="disabled:opacity-60 [&>[data-slot=icon-svg]]:text-v2-icon-icon-muted"
+          disabled={unreachable()}
+          onClick={() => props.onChooseProject(props.server)}
+        >
+          <IconV2 name="folder-add-left" size="small" />
+          <span class={HOME_PROJECT_NAV_LABEL}>{props.language.t("home.project.add")}</span>
+        </HomeProjectNavButton>
+      </Show>
       <Show when={props.items.length > 0}>
         <div class="mt-3 flex h-7 min-w-0 shrink-0 items-center pl-1.5 pr-3">
           <div class="text-v2-text-text-faint [font-weight:530]">{props.language.t("home.recentlyClosed")}</div>

@@ -51,7 +51,12 @@ import type {
   BrowserStatus,
   BrowserTabInfo,
 } from "./page-script"
-import { assertNavigableBrowserUrl, isNavigableBrowserUrl } from "./url-policy"
+import {
+  assertNavigableBrowserUrl,
+  isNavigableBrowserUrl,
+  isPdfReaderBrowserDocument,
+  isPdfReaderBrowserResource,
+} from "./url-policy"
 
 export { BROWSER_TEXT_LIMIT }
 export type { BrowserCandidate, BrowserPageText, BrowserStatus, BrowserTabInfo }
@@ -809,7 +814,7 @@ export class CdpRuntime {
         : typeof record.requestUrl === "string"
           ? record.requestUrl
           : ""
-    if (isNavigableBrowserUrl(url)) {
+    if (isNavigableBrowserUrl(url) || isPdfReaderBrowserResource(url)) {
       void this.send("Fetch.continueRequest", { requestId }, target).catch(() => undefined)
       return
     }
@@ -839,7 +844,7 @@ export class CdpRuntime {
   // page content reaches the model instead of trusting the URL that opened the
   // tab. A tab that landed on a blocked address is closed, not just reported.
   private assertLanded(tabId: string, url: string): string {
-    if (isNavigableBrowserUrl(url)) return url
+    if (isNavigableBrowserUrl(url) || isPdfReaderBrowserDocument(url)) return url
     this.forgetTab(tabId, url)
     throw new CdpError("url_blocked", "The page moved to a blocked address, so the tab was closed.")
   }
@@ -873,7 +878,7 @@ export class CdpRuntime {
     // tab with no URL yet (still on its first navigation) is left alone: it has
     // not been anywhere.
     return tabs.flatMap((tab) => {
-      if (tab.url.length === 0 || isNavigableBrowserUrl(tab.url)) {
+      if (tab.url.length === 0 || isNavigableBrowserUrl(tab.url) || isPdfReaderBrowserDocument(tab.url)) {
         return [
           {
             ...tab,
@@ -2215,7 +2220,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function isNavigableTab(tab: RawTab): boolean {
-  return isNavigableBrowserUrl(tab.url)
+  return isNavigableBrowserUrl(tab.url) || isPdfReaderBrowserDocument(tab.url)
 }
 
 // Splits a base64 image data URL into its declared media type and decoded body,

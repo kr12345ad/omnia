@@ -11,6 +11,8 @@ import type { SessionComposerRegionController } from "./session-composer-region-
 
 export function SessionComposerRegion(props: {
   controller: SessionComposerRegionController
+  /** Optional free-tier ad slot, directly above the composer. */
+  sponsoredAd?: JSX.Element
   promptInput: JSX.Element
 }) {
   const language = useLanguage()
@@ -61,6 +63,9 @@ export function SessionComposerRegion(props: {
         </Show>
 
         <Show when={controller.showComposer()}>
+          <Show when={props.sponsoredAd !== undefined}>
+            <div class="pb-2">{props.sponsoredAd}</div>
+          </Show>
           <Show when={controller.dock()}>
             <div
               classList={{

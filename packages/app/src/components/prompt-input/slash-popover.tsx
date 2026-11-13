@@ -52,12 +52,12 @@ type PromptPopoverProps = {
 }
 
 export const PromptPopover: Component<PromptPopoverProps> = (props) => {
+  // The container is shared by the at and slash popovers, and it is not remounted when the popover
+  // switches between them. Always publish it so slash scrolling works after an at popover.
   return (
     <Show when={props.popover}>
       <div
-        ref={(el) => {
-          if (props.popover === "slash") props.setSlashPopoverRef(el)
-        }}
+        ref={props.setSlashPopoverRef}
         class="absolute inset-x-0 -top-2 -translate-y-full origin-bottom-left max-h-80 min-h-10
                  overflow-auto no-scrollbar flex flex-col p-2"
         classList={{

@@ -1,0 +1,385 @@
+module omnia {
+  yang-version 1.1;
+  namespace "https://github.com/kr12345ad/omnia/yang/omnia";
+  prefix omnia;
+
+  organization "Omnia";
+  contact "https://github.com/kr12345ad/omnia";
+  description
+    "The Omnia operational state and configuration model exposed over gNMI.
+
+     This module describes the read-only operational state of one Omnia
+     control plane. The only writable configuration is the permission state
+     of a named scope under /omnia/config/permissions/scope. Computer
+     execution, approvals and session actions intentionally remain HTTP-only:
+     they are operations, not configuration, and keep their existing
+     permission, approval, verification and audit boundaries.";
+
+  revision 2026-10-31 {
+    description "Initial Omnia gNMI model.";
+    reference "https://github.com/kr12345ad/omnia";
+  }
+
+  container omnia {
+    description "Root of the Omnia model.";
+
+    container server {
+      description "Identity and health of this control plane.";
+      config false;
+
+      container status {
+        description "Stable server identity and lifecycle status.";
+        leaf state {
+          type enumeration {
+            enum starting;
+            enum ready;
+            enum degraded;
+            enum stopping;
+            enum stopped;
+            enum failed;
+          }
+          description "Current server lifecycle state.";
+        }
+        leaf version {
+          type string;
+          description "Omnia server version.";
+        }
+        leaf protocol {
+          type uint32;
+          description "Omnia protocol version.";
+        }
+        leaf api {
+          type string;
+          description "HTTP API prefix, for compatibility with existing clients.";
+        }
+        leaf server-id {
+          type string;
+          description "Stable identifier for this server process.";
+        }
+        leaf started-at {
+          type uint64;
+          description "Unix epoch milliseconds when the server started.";
+        }
+        leaf uptime-ms {
+          type uint64;
+          description "Time since started-at, in milliseconds.";
+        }
+        leaf url {
+          type string;
+          description "Loopback HTTP URL of this server.";
+        }
+      }
+
+      container health {
+        description "Aggregated health and subsystem status.";
+        leaf status {
+          type string;
+          description "Aggregated server health state.";
+        }
+        leaf version {
+          type string;
+        }
+        leaf protocol {
+          type uint32;
+        }
+        leaf server-id {
+          type string;
+        }
+        leaf uptime-ms {
+          type uint64;
+        }
+        leaf active-sessions {
+          type uint32;
+          description "Sessions observed since the server started.";
+        }
+        leaf connected-computers {
+          type uint32;
+          description "Computer runtimes currently registered.";
+        }
+        list subsystem {
+          key "name";
+          description "One health subsystem.";
+          leaf name {
+            type string;
+          }
+          leaf status {
+            type string;
+          }
+          leaf reason {
+            type string;
+          }
+        }
+      }
+
+      container execution {
+        description "The most recent semantic computer-use execution reported by the EventBus.";
+        container last {
+          description "Last execution observed since this server process started.";
+          leaf at {
+            type uint64;
+            description "Unix epoch milliseconds when the execution completed.";
+          }
+          leaf action {
+            type string;
+            description "Computer-use action that was executed.";
+          }
+          leaf success {
+            type boolean;
+            description "Whether the execution reported success.";
+          }
+          leaf verified {
+            type boolean;
+            description "Whether the execution was verified by the existing verification path.";
+          }
+          leaf provider {
+            type string;
+            description "Provider that performed the execution, when the EventBus reported one.";
+          }
+          leaf model {
+            type string;
+            description "Model that performed the execution, when the EventBus reported one.";
+          }
+          leaf delivery {
+            type string;
+            description "Delivery mode reported by the execution, when present.";
+          }
+        }
+      }
+    }
+
+    container computers {
+      description "Computer runtimes connected to this control plane.";
+      config false;
+
+      list computer {
+        key "id";
+        description "One computer runtime.";
+
+        leaf id {
+          type string;
+          description "Computer runtime identifier.";
+        }
+        leaf name {
+          type string;
+          description "Human-readable computer name.";
+        }
+
+        container status {
+          description "Connectivity and platform identity of this computer.";
+          leaf id {
+            type string;
+          }
+          leaf name {
+            type string;
+          }
+          leaf platform {
+            type string;
+          }
+          leaf architecture {
+            type string;
+          }
+          leaf backend {
+            type string;
+            description "Driver backend, for example x11, wayland or darwin.";
+          }
+          leaf driver {
+            type string;
+            description "Registered driver identifier.";
+          }
+          leaf connected {
+            type boolean;
+          }
+          leaf last-seen {
+            type uint64;
+            description "Unix epoch milliseconds of the last driver interaction.";
+          }
+        }
+
+        container capabilities {
+          description "Capabilities the driver advertises.";
+          list capability {
+            key "name";
+            leaf name {
+              type string;
+            }
+            leaf status {
+              type string;
+            }
+            leaf score {
+              type decimal64 {
+                fraction-digits 4;
+              }
+            }
+            leaf reason {
+              type string;
+            }
+
+            container permissions {
+              list permission {
+                key "id";
+                leaf id {
+                  type string;
+                }
+                leaf description {
+                  type string;
+                }
+                leaf status {
+                  type string;
+                }
+                leaf-list capability {
+                  type string;
+                }
+                leaf promptable {
+                  type boolean;
+                }
+                leaf reason {
+                  type string;
+                }
+              }
+            }
+
+            container limitations {
+              list limitation {
+                key "code";
+                leaf code {
+                  type string;
+                }
+                leaf kind {
+                  type string;
+                }
+                leaf severity {
+                  type string;
+                }
+                leaf message {
+                  type string;
+                }
+                leaf-list affects {
+                  type string;
+                }
+              }
+            }
+
+            anydata metadata {
+              description "Driver-specific capability metadata.";
+            }
+          }
+        }
+
+        container sessions {
+          description "Sessions that have acted on this computer.";
+          list session {
+            key "id";
+            leaf id {
+              type string;
+            }
+            leaf computer-id {
+              type string;
+            }
+            leaf actions {
+              type uint32;
+            }
+            leaf last-action-at {
+              type uint64;
+            }
+          }
+        }
+      }
+    }
+
+    container sessions {
+      description "Sessions observed by this server.";
+      config false;
+
+      list session {
+        key "id";
+        leaf id {
+          type string;
+        }
+        leaf computer-id {
+          type string;
+        }
+        leaf actions {
+          type uint32;
+          description "Actions performed in this session, excluding observations.";
+        }
+        leaf last-action-at {
+          type uint64;
+        }
+      }
+    }
+
+    container chat {
+      description "Messaging-platform integration state.";
+      config false;
+
+      container channels {
+        description "Configured chat channels.";
+        list channel {
+          key "platform";
+          leaf platform {
+            type string;
+          }
+          leaf enabled {
+            type boolean;
+          }
+          leaf-list configured {
+            type string;
+            description "Names of credentials that are present. Values are never exposed.";
+          }
+          leaf connected-at {
+            type uint64;
+          }
+          leaf last-message-at {
+            type uint64;
+          }
+          leaf message-count {
+            type uint32;
+          }
+          leaf error {
+            type string;
+          }
+          container owner {
+            description "Account that connected this channel; credentials are never returned.";
+            leaf provider {
+              type string;
+            }
+            leaf id {
+              type string;
+            }
+            leaf login {
+              type string;
+            }
+          }
+        }
+      }
+    }
+
+    container config {
+      description "Writable Omnia configuration.";
+
+      container permissions {
+        description "Operator permission policy.";
+
+        list scope {
+          key "name";
+          description "One permission scope.";
+          leaf name {
+            type string;
+            description "Omnia scope name, for example SECRETS or UI_CONTROL.";
+          }
+          leaf state {
+            type enumeration {
+              enum granted;
+              enum denied;
+              enum prompt;
+            }
+            config true;
+            description
+              "Whether operations in this scope are granted, denied, or require
+               an approval prompt. This is the only writable leaf in the model.";
+          }
+        }
+      }
+    }
+  }
+}

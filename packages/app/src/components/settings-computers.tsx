@@ -49,6 +49,9 @@ export const SettingsComputers = () => {
     error: undefined as unknown,
     loading: true,
     saving: false,
+    renameOpen: false,
+    renameValue: "",
+    renaming: false,
   })
   const [selectedCredential, setSelectedCredential] = createSignal<string | undefined>(undefined)
   const details = createErrorDetailsCopy()
@@ -57,18 +60,32 @@ export const SettingsComputers = () => {
     store.error === undefined ? undefined : friendlyErrorMessage(store.error, language.t, "error.common.unknown"),
   )
 
+  // Polls and user actions overlap; only the newest response may publish a list,
+  // otherwise a slow poll can overwrite a rename or stop that already completed.
+  let computersRequest = 0
   const refreshComputers = async (silent = false) => {
     if (!api) return
+    const request = ++computersRequest
     if (!silent) setStore("loading", true)
     try {
       const computers = await api.list()
+      if (request !== computersRequest) return
       setStore("computers", computers)
       if (!silent) setStore("error", undefined)
+      if (store.selectedId !== undefined && !computers.some((computer) => computer.id === store.selectedId)) {
+        // The selected computer was unpaired or removed elsewhere; keeping the id
+        // left the details pane stuck blank and credentials scoped to a dead id.
+        setStore("selectedId", undefined)
+        setStore("credentials", [])
+        setStore("draft", undefined)
+        setStore("renameOpen", false)
+        setSelectedCredential(undefined)
+      }
       if (store.selectedId === undefined && computers.length > 0) {
         await selectComputer(computers[0]!.id)
       }
     } catch (error) {
-      if (!silent) setStore("error", error)
+      if (request === computersRequest && !silent) setStore("error", error)
     } finally {
       if (!silent) setStore("loading", false)
     }
@@ -99,16 +116,20 @@ export const SettingsComputers = () => {
   const refreshCredentials = async (computerId: string) => {
     if (!api) return
     try {
-      setStore("credentials", await api.credentials.list(computerId))
+      const credentials = await api.credentials.list(computerId)
+      // Selecting B while A's request is in flight must not render A's credentials under B.
+      if (store.selectedId !== computerId) return
+      setStore("credentials", credentials)
       setStore("error", undefined)
     } catch (error) {
-      setStore("error", error)
+      if (store.selectedId === computerId) setStore("error", error)
     }
   }
 
   const selectComputer = async (computerId: string) => {
     setStore("selectedId", computerId)
     setStore("draft", undefined)
+    setStore("renameOpen", false)
     setSelectedCredential(undefined)
     setStore("status", "")
     await refreshCredentials(computerId)
@@ -221,6 +242,37 @@ export const SettingsComputers = () => {
       await refreshCredentials(store.selectedId ?? credential.computerId)
     } catch (error) {
       setStore("error", error)
+    }
+  }
+
+  const startRename = () => {
+    const computer = selectedComputer()
+    if (computer === undefined) return
+    setStore("renameValue", computer.name)
+    setStore("renameOpen", true)
+    setStore("status", "")
+    setStore("error", undefined)
+  }
+
+  const saveRename = async () => {
+    const computer = selectedComputer()
+    const name = store.renameValue.trim()
+    if (!api || computer === undefined) return
+    if (name.length === 0) {
+      setStore("error", language.t("settings.computers.renameRequired"))
+      return
+    }
+    setStore("renaming", true)
+    try {
+      await api.rename(computer.id, name)
+      setStore("renameOpen", false)
+      setStore("status", language.t("settings.computers.renamed", { name }))
+      setStore("error", undefined)
+      await refreshComputers(true)
+    } catch (error) {
+      setStore("error", error)
+    } finally {
+      setStore("renaming", false)
     }
   }
 
@@ -385,23 +437,55 @@ export const SettingsComputers = () => {
               {(computer) => (
                 <div class="flex min-w-0 flex-1 flex-col gap-4">
                   <div class="flex items-center justify-between gap-3 rounded-md border border-v2-border-border-muted p-3">
-                    <div class="flex min-w-0 flex-col">
-                      <span class="truncate text-[13px] font-[530] text-v2-text-text-base">{computer().name}</span>
-                    </div>
-                    <div class="flex items-center gap-2">
-                      <Show
-                        when={computer().connected}
-                        fallback={
-                          <Button variant="secondary" size="small" icon="enter" onClick={() => void connectComputer()}>
-                            {language.t("settings.computers.connect")}
-                          </Button>
-                        }
-                      >
-                        <Button variant="secondary" size="small" icon="stop" onClick={() => void stopComputer()}>
-                          {language.t("settings.computers.stop")}
+                    <Show
+                      when={store.renameOpen}
+                      fallback={
+                        <>
+                          <div class="flex min-w-0 flex-col">
+                            <span class="truncate text-[13px] font-[530] text-v2-text-text-base">{computer().name}</span>
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <Show when={computer().backend === "remote"}>
+                              <Button variant="secondary" size="small" onClick={startRename}>
+                                {language.t("settings.computers.rename")}
+                              </Button>
+                            </Show>
+                            <Show
+                              when={computer().connected}
+                              fallback={
+                                <Button variant="secondary" size="small" icon="enter" onClick={() => void connectComputer()}>
+                                  {language.t("settings.computers.connect")}
+                                </Button>
+                              }
+                            >
+                              <Button variant="secondary" size="small" icon="stop" onClick={() => void stopComputer()}>
+                                {language.t("settings.computers.stop")}
+                              </Button>
+                            </Show>
+                          </div>
+                        </>
+                      }
+                    >
+                      <div class="min-w-0 flex-1">
+                        <TextField
+                          label={language.t("settings.computers.renameLabel")}
+                          value={store.renameValue}
+                          onChange={(value) => setStore("renameValue", value)}
+                        />
+                      </div>
+                      <div class="flex items-center gap-2">
+                        <Button variant="primary" size="small" onClick={() => void saveRename()} disabled={store.renaming}>
+                          {language.t("settings.computers.renameSave")}
                         </Button>
-                      </Show>
-                    </div>
+                        <Button
+                          variant="secondary"
+                          size="small"
+                          onClick={() => setStore("renameOpen", false)}
+                        >
+                          {language.t("settings.computers.renameCancel")}
+                        </Button>
+                      </div>
+                    </Show>
                   </div>
 
                   <div class="flex items-start justify-between gap-4">

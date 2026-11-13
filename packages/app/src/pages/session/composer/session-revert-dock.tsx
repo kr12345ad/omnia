@@ -33,6 +33,7 @@ export function SessionRevertDock(props: {
   const preview = createMemo(() => props.items[0]?.text ?? "")
 
   const onHeaderKeyDown = (event: KeyboardEvent) => {
+    if (event.target !== event.currentTarget) return
     if (event.key !== "Enter" && event.key !== " ") return
     event.preventDefault()
     toggle()

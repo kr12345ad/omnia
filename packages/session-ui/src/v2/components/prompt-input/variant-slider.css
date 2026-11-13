@@ -39,6 +39,31 @@
   transform: translateX(-50%);
 }
 
+/* The effort control starts as text. The rail is only mounted once the label is
+   pressed, so the resting composer keeps a compact token readout instead of a
+   permanently open slider. */
+[data-component="prompt-variant-slider"] [data-slot="variant-label"] {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+[data-component="prompt-variant-slider"] [data-slot="variant-label"]:focus-visible {
+  outline: none;
+  border-radius: 4px;
+  box-shadow: 0 0 0 1.5px var(--v2-border-border-focus);
+}
+
+[data-component="prompt-variant-slider"][data-expanded] {
+  background-color: var(--v2-overlay-simple-overlay-hover);
+}
+
 [data-component="prompt-variant-slider"] [data-slot="variant-thumb"] {
   background-color: var(--v2-background-bg-accent);
   box-shadow: 0 1px 2px rgb(0 0 0 / 0.28);

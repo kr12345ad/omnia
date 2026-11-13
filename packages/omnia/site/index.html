@@ -1,0 +1,1053 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Omnia: a local-first computer agent</title>
+<meta name="description" content="Omnia is a local-first agent that operates the apps on your computer. It opens, clicks, types and reads each result back. Sensitive actions wait for your approval." />
+<meta name="theme-color" content="#f2f1ea" />
+<meta name="robots" content="index,follow" />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="Omnia: a local-first computer agent" />
+<meta property="og:description" content="An agent that works in your browser, desktop apps and terminal. Free on macOS, Windows and Linux." />
+<meta property="og:url" content="https://omnia.openfoodpantry.org/" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111310'/%3E%3Cmask id='m' maskUnits='userSpaceOnUse' x='0' y='0' width='32' height='32' style='mask-type:luminance'%3E%3Crect width='32' height='32' fill='white'/%3E%3Crect x='15.2' y='15.2' width='12' height='12' rx='3.2' fill='black'/%3E%3C/mask%3E%3Crect x='7' y='7' width='18' height='18' rx='3' fill='none' stroke='%23f2f1ea' stroke-width='2' mask='url(%23m)'/%3E%3Crect x='18' y='18' width='8' height='8' rx='2' fill='%23d4ff4f'/%3E%3C/svg%3E" />
+<script>document.documentElement.classList.add("js")</script>
+<style>
+  :root {
+    --paper: #f2f1ea;
+    --paper-2: #fbfaf5;
+    --ink: #111310;
+    --muted: #64675e;
+    --line: #d9d8cc;
+    --line-2: #bcbbaf;
+    --lime: #d4ff4f;
+    --lime-deep: #b9e62e;
+    --dark: #0f110e;
+    --dark-2: #171a15;
+    --dark-line: #2c3027;
+    --white: #f4f4ec;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --ease: cubic-bezier(0.2, 0, 0, 1);
+    --max: 1160px;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: clip;
+  }
+  ::selection { background: var(--lime); color: var(--ink); }
+  h1, h2, h3, h4, p, ul, ol, figure { margin: 0; }
+  ul, ol { padding: 0; list-style: none; }
+  a { color: inherit; text-decoration: none; }
+  svg { display: block; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+  [hidden] { display: none !important; }
+  .wrap { width: min(var(--max), calc(100% - 48px)); margin-inline: auto; }
+  .skip {
+    position: fixed; left: 12px; top: -60px; z-index: 100;
+    background: var(--ink); color: var(--paper);
+    padding: 10px 14px; border-radius: 6px; font-size: 13px;
+    transition: top 150ms var(--ease);
+  }
+  .skip:focus { top: 12px; }
+
+  /* Header */
+  .progress { position: fixed; inset: 0 0 auto; height: 2px; z-index: 60; pointer-events: none; }
+  .progress i { display: block; height: 100%; width: 0; background: var(--lime-deep); }
+  .header {
+    position: sticky; top: 0; z-index: 50;
+    background: color-mix(in srgb, var(--paper) 88%, transparent);
+    -webkit-backdrop-filter: blur(14px);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid transparent;
+    transition: border-color 200ms var(--ease), background-color 200ms var(--ease);
+  }
+  .header.scrolled { border-bottom-color: var(--line); }
+  .header-in { display: flex; align-items: center; gap: 30px; height: 70px; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 12.5px; font-weight: 600; letter-spacing: 0.2em; }
+  .brand svg { width: 22px; height: 22px; }
+  .nav { display: flex; align-items: center; gap: 26px; margin-left: auto; font-size: 13px; color: var(--muted); }
+  .nav a { position: relative; padding: 7px 0; transition: color 150ms var(--ease); }
+  .nav a.active { color: var(--ink); }
+  .nav a.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: var(--ink); }
+  .header-cta { display: flex; align-items: center; gap: 10px; }
+  .menu { display: none; width: 38px; height: 38px; border: 1px solid var(--line-2); border-radius: 7px; place-items: center; }
+  .menu span { display: block; width: 15px; height: 1.5px; margin: 3px auto; background: var(--ink); transition: transform 150ms var(--ease), opacity 150ms var(--ease); }
+  .menu[aria-expanded="true"] span:first-child { transform: translateY(4.5px) rotate(45deg); }
+  .menu[aria-expanded="true"] span:last-child { transform: translateY(-4.5px) rotate(-45deg); }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 12px;
+    height: 50px; padding: 0 20px; border-radius: 9px;
+    border: 1px solid transparent;
+    font-size: 14px; font-weight: 560; letter-spacing: -0.01em;
+    transition: background-color 150ms var(--ease), border-color 150ms var(--ease), transform 150ms var(--ease);
+  }
+  .btn-primary { background: var(--ink); color: var(--paper); }
+  .btn-small { height: 38px; padding: 0 14px; font-size: 12.5px; border-radius: 7px; }
+  .btn-lime { background: var(--lime); color: var(--ink); }
+  .btn-outline { border-color: var(--line-2); color: var(--ink); }
+  .btn-arrow { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: var(--lime); color: var(--ink); font-size: 12px; line-height: 1; }
+  @media (prefers-reduced-motion: no-preference) {
+    .btn:not(:disabled):active { transform: scale(0.96); }
+  }
+  @media (hover: hover) {
+    .btn-primary:hover { background: #000; }
+    .btn-lime:hover { background: var(--lime-deep); }
+    .btn-outline:hover { border-color: var(--ink); }
+  }
+  .link-arrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 14px; font-weight: 520;
+    padding-bottom: 4px; border-bottom: 1px solid var(--line-2);
+    transition: gap 150ms var(--ease), border-color 150ms var(--ease);
+  }
+  @media (hover: hover) { .link-arrow:hover { gap: 12px; border-color: var(--ink); } }
+
+  /* Hero */
+  .hero { padding: clamp(48px, 7vw, 92px) 0 0; }
+  .hero-grid { display: grid; grid-template-columns: 1.02fr 0.98fr; gap: clamp(32px, 5vw, 68px); align-items: center; }
+  .eyebrow {
+    display: flex; align-items: center; gap: 9px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 26px;
+  }
+  .pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--lime-deep); flex: none; }
+  @media (prefers-reduced-motion: no-preference) {
+    .pulse { animation: pulse 2.6s var(--ease) infinite; }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--lime-deep) 20%, transparent); }
+      50% { box-shadow: 0 0 0 7px transparent; }
+    }
+  }
+  h1 { font-size: clamp(44px, 6.2vw, 82px); line-height: 0.98; letter-spacing: -0.055em; font-weight: 600; }
+  .mark { position: relative; display: inline-block; z-index: 0; }
+  .mark::before {
+    content: ""; position: absolute; left: -0.04em; right: -0.04em; bottom: 0.03em; height: 0.4em;
+    background: var(--lime); z-index: -1; transform: skewX(-9deg);
+  }
+  .lede { margin-top: 26px; max-width: 46ch; font-size: clamp(15px, 1.3vw, 17px); line-height: 1.6; letter-spacing: -0.01em; color: var(--muted); }
+  .hero-actions { display: flex; align-items: center; gap: 26px; flex-wrap: wrap; margin-top: 34px; }
+  .fine { margin-top: 22px; font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+  .fine .sep { margin: 0 8px; color: var(--line-2); }
+
+  .hero-stage { position: relative; padding: clamp(12px, 2vw, 20px); border: 1px solid var(--line); border-radius: 18px; background: var(--paper-2); }
+  .window {
+    border-radius: 12px; overflow: hidden; background: var(--dark); border: 1px solid #000;
+    box-shadow: 0 30px 60px -34px rgb(17 19 16 / 0.5);
+    transform: perspective(1400px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+    transition: transform 300ms var(--ease);
+  }
+  .window-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--dark-line); background: #0b0d0a; }
+  .window-id { display: flex; align-items: center; gap: 8px; font-size: 11px; color: #cfd3c8; letter-spacing: 0.02em; }
+  .window-id svg { width: 15px; height: 15px; color: var(--lime); }
+  .window-id .dim { color: #6d7268; }
+  .window-status { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase; color: #8f9588; white-space: nowrap; }
+  .window-body { display: grid; grid-template-columns: 38px 1fr; min-height: 424px; }
+  .rail { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 16px 0; border-right: 1px solid var(--dark-line); background: #0c0e0b; }
+  .rail i { width: 9px; height: 9px; border-radius: 3px; background: #2c3028; }
+  .rail i.active { background: var(--lime); }
+  .chat { display: flex; flex-direction: column; gap: 15px; padding: 20px 20px 18px; font-size: 12px; color: #d9ddd2; }
+  .bubble { align-self: flex-end; max-width: 87%; padding: 11px 13px; line-height: 1.5; color: #eef1e7; background: #23271f; border: 1px solid #343a2c; border-radius: 11px 11px 3px 11px; }
+  .steps { display: flex; flex-direction: column; gap: 9px; }
+  .steps li { display: grid; grid-template-columns: 20px 1fr auto; gap: 10px; align-items: start; padding: 9px 10px; border: 1px solid var(--dark-line); border-radius: 8px; background: #151814; }
+  .tick { display: grid; place-items: center; width: 18px; height: 18px; margin-top: 1px; border-radius: 50%; background: #26301a; color: var(--lime); font-size: 10px; }
+  .steps b { display: block; font-size: 11.5px; font-weight: 560; letter-spacing: -0.01em; color: #eef1e7; }
+  .steps small { display: block; margin-top: 2px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.03em; color: #7f8577; }
+  .steps em { font-style: normal; font-family: var(--mono); font-size: 8px; letter-spacing: 0.1em; text-transform: uppercase; color: #9db36c; border: 1px solid #334026; border-radius: 4px; padding: 2px 5px; white-space: nowrap; }
+  .steps li.hold { border-color: #4a4126; background: #1c1a12; }
+  .steps li.hold .tick { background: #332b13; color: #f4c95a; }
+  .steps li.hold em { color: #e8c063; border-color: #4a4126; }
+  .answer { padding-left: 10px; border-left: 2px solid var(--lime); font-size: 11.5px; line-height: 1.55; color: #a9afa0; }
+  .ad { margin-top: 2px; border: 1px dashed #3a4033; border-radius: 9px; background: #141712; overflow: hidden; }
+  .ad-top { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-bottom: 1px solid #262b22; }
+  .ad-tag { padding: 2px 5px; border-radius: 3px; background: var(--lime); color: var(--ink); font-family: var(--mono); font-size: 8px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; }
+  .ad-brand { font-family: var(--mono); font-size: 9px; letter-spacing: 0.06em; color: #8b9182; }
+  .ad-more { margin-left: auto; color: #5f655a; font-size: 12px; letter-spacing: 2px; line-height: 1; }
+  .ad-main { display: grid; grid-template-columns: 30px 1fr auto; gap: 10px; align-items: center; padding: 10px; }
+  .ad-logo { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: #2b2f3a; color: #dbe1f5; font-size: 12px; font-weight: 700; }
+  .ad-copy b { display: block; font-size: 10.5px; font-weight: 560; color: #e6e9df; }
+  .ad-copy p { margin-top: 2px; font-size: 9.5px; line-height: 1.4; color: #858b7d; }
+  .ad-go { font-family: var(--mono); font-size: 9px; color: var(--lime); white-space: nowrap; }
+  .float {
+    position: absolute; display: flex; flex-direction: column; gap: 2px;
+    padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper);
+    box-shadow: 0 14px 30px -18px rgb(17 19 16 / 0.35); font-size: 10.5px; line-height: 1.35;
+  }
+  .float b { font-weight: 560; }
+  .float span { font-family: var(--mono); font-size: 8px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .float-1 { right: -26px; top: -18px; }
+  .float-2 { left: -26px; bottom: -16px; }
+  .trust {
+    display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px 28px;
+    margin-top: clamp(38px, 6vw, 62px); padding: 17px 0;
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.13em; text-transform: uppercase; color: var(--muted);
+  }
+  .trust span { display: inline-flex; align-items: center; gap: 8px; }
+  .trust i { width: 4px; height: 4px; border-radius: 50%; background: var(--line-2); }
+
+  /* Sections */
+  .section { padding: clamp(68px, 8.5vw, 112px) 0; border-top: 1px solid var(--line); scroll-margin-top: 88px; }
+  .section-head { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: end; margin-bottom: clamp(36px, 5vw, 56px); }
+  .kicker { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
+  .kicker::before { content: ""; width: 26px; height: 1px; background: var(--line-2); }
+  h2 { font-size: clamp(32px, 4.3vw, 52px); line-height: 1.03; letter-spacing: -0.045em; font-weight: 600; text-wrap: balance; }
+  .section-head p { justify-self: end; max-width: 42ch; font-size: 14px; line-height: 1.6; color: var(--muted); }
+  .dark { background: var(--dark); color: var(--paper); border-color: var(--dark-line); }
+  .dark .kicker { color: #8c9285; }
+  .dark .kicker::before { background: #444a3f; }
+  .dark h2 { color: var(--paper); }
+  .dark .section-head p { color: #9ba094; }
+
+  /* Features */
+  .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .feature { padding: 22px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper-2); transition: border-color 150ms var(--ease), transform 150ms var(--ease); }
+  .feature-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 34px; }
+  .feature-top svg { width: 20px; height: 20px; color: var(--ink); }
+  .feature-top span { font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.1em; color: var(--line-2); }
+  .feature h3 { font-size: 13.5px; font-weight: 560; letter-spacing: -0.015em; }
+  .feature p { margin-top: 8px; font-size: 12px; line-height: 1.55; color: var(--muted); }
+  @media (hover: hover) {
+    .feature:hover { border-color: var(--line-2); transform: translateY(-2px); }
+  }
+
+  /* Demo */
+  .demo-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+    padding: 10px 12px; border: 1px solid var(--dark-line); border-bottom: 0; border-radius: 12px 12px 0 0; background: #141713;
+  }
+  .demo-tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+  .demo-tabs button {
+    padding: 7px 10px; border: 1px solid transparent; border-radius: 6px;
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: #8f9588;
+    transition: color 150ms var(--ease), background-color 150ms var(--ease);
+  }
+  .demo-tabs button[aria-selected="true"] { background: var(--lime); border-color: var(--lime); color: var(--ink); }
+  @media (hover: hover) { .demo-tabs button:hover { color: var(--paper); } .demo-tabs button[aria-selected="true"]:hover { color: var(--ink); } }
+  .replay { padding: 7px 10px; border: 1px solid var(--dark-line); border-radius: 6px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: #a9afa0; transition: border-color 150ms var(--ease), color 150ms var(--ease); }
+  @media (hover: hover) { .replay:hover { border-color: #4a5044; color: var(--paper); } }
+  .demo-panel { min-height: 332px; padding: clamp(16px, 3vw, 26px); border: 1px solid var(--dark-line); border-radius: 0 0 12px 12px; background: #0c0e0b; }
+  .demo-prompt { display: flex; gap: 10px; padding-bottom: 15px; border-bottom: 1px solid #242821; font-family: var(--mono); font-size: 11px; line-height: 1.55; color: #c9cec1; }
+  .demo-prompt b { flex: none; font-weight: 500; color: var(--lime); }
+  .trace { display: flex; flex-direction: column; gap: 1px; margin-top: 13px; font-family: var(--mono); font-size: 10.5px; line-height: 1.5; }
+  .trace li { display: grid; grid-template-columns: 50px 112px 1fr auto; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid #1c201a; color: #aeb4a6; }
+  .trace li:last-child { border-bottom: 0; }
+  .trace .t { color: #5f665a; }
+  .trace .tool { color: #d9ff8e; }
+  .trace .ok { font-size: 8px; letter-spacing: 0.1em; text-transform: uppercase; color: #9db36c; white-space: nowrap; }
+  .trace li.hold .ok { color: #e8c063; }
+  @media (prefers-reduced-motion: no-preference) {
+    .play .trace li { animation: line-in 400ms var(--ease) both; animation-delay: var(--d, 0s); }
+    @keyframes line-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+  }
+  .demo-foot { display: flex; align-items: center; gap: 8px; margin-top: 18px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: #6f7568; }
+  .demo-foot::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--lime); }
+
+  /* Security */
+  .security-grid { display: grid; grid-template-columns: 0.85fr 1.15fr; gap: clamp(32px, 6vw, 76px); }
+  .security-copy { align-self: start; }
+  .security-copy p { margin-top: 18px; max-width: 40ch; font-size: 14px; line-height: 1.65; color: var(--muted); }
+  .security-note { display: inline-flex; align-items: center; gap: 8px; margin-top: 26px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); background: var(--paper-2); }
+  .security-note i { width: 5px; height: 5px; border-radius: 50%; background: var(--lime-deep); }
+  .security-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .sec-card { padding: 20px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper-2); }
+  .sec-card .n { font-family: var(--mono); font-size: 9px; letter-spacing: 0.12em; color: var(--muted); }
+  .sec-card h3 { margin-top: 26px; font-size: 13px; font-weight: 560; letter-spacing: -0.015em; }
+  .sec-card p { margin-top: 7px; font-size: 11.5px; line-height: 1.55; color: var(--muted); }
+
+  /* Free and ads */
+  .free-grid { display: grid; grid-template-columns: 1fr 1fr; gap: clamp(28px, 5vw, 68px); align-items: center; }
+  .free-copy > p { margin-top: 16px; max-width: 48ch; font-size: 14px; line-height: 1.65; color: var(--muted); }
+  .free-list { display: flex; flex-direction: column; gap: 10px; margin-top: 24px; font-size: 12.5px; }
+  .free-list li { display: flex; gap: 10px; align-items: flex-start; line-height: 1.5; }
+  .free-list svg { flex: none; width: 15px; height: 15px; margin-top: 2px; color: var(--ink); }
+  .disclosure { margin-top: 22px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper-2); font-size: 11.5px; line-height: 1.6; color: var(--muted); }
+  .disclosure b { font-weight: 560; color: var(--ink); }
+  .ad-preview { padding: 18px; border: 1px solid var(--line-2); border-radius: 14px; background: var(--paper-2); box-shadow: 0 24px 50px -38px rgb(17 19 16 / 0.4); }
+  .ad-sample { border: 1px dashed var(--line-2); border-radius: 9px; background: #fff; overflow: hidden; }
+  .ad-sample-top { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border-bottom: 1px solid var(--line); }
+  .ad-sample-top .ad-brand { color: var(--muted); }
+  .ad-sample-top .ad-more { color: var(--line-2); }
+  .ad-sample-main { display: grid; grid-template-columns: 32px 1fr auto; gap: 11px; align-items: center; padding: 12px; }
+  .ad-sample-logo { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; background: #2b2f3a; color: #dbe1f5; font-size: 13px; font-weight: 700; }
+  .ad-sample-main b { display: block; font-size: 11px; font-weight: 560; letter-spacing: -0.01em; }
+  .ad-sample-main p { margin-top: 2px; font-size: 10px; line-height: 1.4; color: var(--muted); }
+  .ad-sample-main .ad-go { color: var(--ink); }
+  .ad-caption { margin-top: 12px; text-align: center; font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  .ad-rules { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+  .ad-rules span { padding: 4px 7px; border: 1px solid var(--line); border-radius: 4px; font-family: var(--mono); font-size: 8px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+
+  /* Pricing */
+  .plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; align-items: stretch; }
+  .plan { display: flex; flex-direction: column; padding: 24px; border: 1px solid var(--line); border-radius: 13px; background: var(--paper-2); }
+  .plan.featured { background: var(--dark); border-color: var(--dark); color: var(--paper); }
+  .plan .tier { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.14em; text-transform: uppercase; }
+  .plan .price { display: flex; align-items: baseline; gap: 6px; margin-top: 18px; font-size: 42px; font-weight: 600; letter-spacing: -0.05em; }
+  .plan .price small { font-size: 11px; font-weight: 450; letter-spacing: 0; color: var(--muted); }
+  .plan.featured .price small { color: #8f9588; }
+  .plan > p { margin-top: 8px; font-size: 12px; line-height: 1.55; color: var(--muted); }
+  .plan.featured > p { color: #9ba094; }
+  .plan ul { display: flex; flex-direction: column; gap: 9px; margin: 22px 0 26px; font-size: 12px; }
+  .plan li { display: flex; gap: 8px; line-height: 1.45; }
+  .plan li::before { content: "\2014"; color: var(--line-2); }
+  .plan.featured li::before { color: #6f7568; }
+  .plan .btn { margin-top: auto; width: 100%; }
+  .plan-note { margin-top: 20px; text-align: center; font-size: 11px; color: var(--muted); }
+
+  /* FAQ */
+  .faq-grid { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: clamp(28px, 6vw, 76px); }
+  .faq-grid .section-head { display: block; margin: 0; }
+  .faq-grid .section-head p { margin-top: 16px; max-width: 34ch; }
+  .faq-list { border-top: 1px solid var(--line); }
+  details { border-bottom: 1px solid var(--line); }
+  summary { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 17px 0; font-size: 13.5px; font-weight: 520; letter-spacing: -0.01em; cursor: pointer; list-style: none; }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: "+"; font-family: var(--mono); font-size: 16px; color: var(--muted); transition: transform 150ms var(--ease); }
+  details[open] summary::after { transform: rotate(45deg); }
+  details p { max-width: 64ch; padding: 0 0 18px; font-size: 12.5px; line-height: 1.65; color: var(--muted); }
+
+  /* CTA and footer */
+  .cta { padding: clamp(60px, 8vw, 96px) 0; border-top: 1px solid var(--dark-line); background: var(--dark); color: var(--paper); }
+  .cta-in { display: flex; align-items: flex-end; justify-content: space-between; gap: 36px; flex-wrap: wrap; }
+  .cta h2 { max-width: 12ch; font-size: clamp(38px, 5.8vw, 72px); }
+  .cta p { margin-top: 14px; max-width: 40ch; font-size: 13.5px; line-height: 1.6; color: #9ba094; }
+  .cta-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
+  .cta .link-arrow { color: #b9beb0; border-color: #3a3f35; }
+  @media (hover: hover) { .cta .link-arrow:hover { border-color: var(--paper); } }
+  .footer { padding: 44px 0 34px; }
+  .footer-grid { display: grid; grid-template-columns: 1.8fr 1fr 1fr 1fr; gap: 32px; }
+  .footer .brand { margin-bottom: 12px; }
+  .footer p { max-width: 30ch; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
+  .footer h4 { margin: 0 0 14px; font-family: var(--mono); font-size: 9px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+  .footer ul { display: flex; flex-direction: column; gap: 9px; font-size: 12px; }
+  @media (hover: hover) { .footer a:hover { text-decoration: underline; text-underline-offset: 3px; } }
+  .footer-bottom { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-top: 42px; padding-top: 18px; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 8.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+
+  /* Reveals */
+  .js .reveal { opacity: 0; transform: translateY(14px); transition: opacity 500ms var(--ease), transform 500ms var(--ease); transition-delay: var(--delay, 0s); }
+  .js .reveal.in { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) {
+    .js .reveal { opacity: 1; transform: none; transition: none; }
+    .window { transition: none; }
+  }
+
+  /* Responsive */
+  @media (max-width: 1080px) {
+    .hero-grid { grid-template-columns: 1fr; gap: 44px; }
+    .hero-stage { max-width: 620px; }
+    .float { display: none; }
+    .section-head { grid-template-columns: 1fr; gap: 18px; }
+    .section-head p { justify-self: start; }
+    .security-grid, .free-grid, .faq-grid { grid-template-columns: 1fr; }
+    .features { grid-template-columns: 1fr 1fr; }
+    .plans { grid-template-columns: 1fr; }
+    .footer-grid { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 860px) {
+    .nav { display: none; }
+    .nav.open {
+      position: absolute; left: 0; right: 0; top: 70px; display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+      padding: 14px 24px 18px; background: var(--paper); border-bottom: 1px solid var(--line);
+    }
+    .nav.open a { padding: 10px 0; font-size: 14px; }
+    .menu { display: grid; }
+    .header-cta { margin-left: auto; }
+    .trace li { grid-template-columns: 44px 96px 1fr; row-gap: 2px; }
+    .trace .ok { grid-column: 3; justify-self: start; }
+    .security-cards { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 620px) {
+    .wrap { width: calc(100% - 28px); }
+    .header-cta .btn { display: none; }
+    .features { grid-template-columns: 1fr; }
+    .security-cards { grid-template-columns: 1fr; }
+    .hero-stage { padding: 10px; }
+    .window-body { grid-template-columns: 1fr; }
+    .rail { display: none; }
+    .chat { padding: 14px; }
+    .steps li { grid-template-columns: 20px 1fr; }
+    .steps em { grid-column: 2; justify-self: start; }
+    .ad-main { grid-template-columns: 26px 1fr; }
+    .ad-go { display: none; }
+    .footer-grid { grid-template-columns: 1fr; }
+    .cta-in { align-items: flex-start; }
+  }
+
+  /* App-accurate mockup: the real window is a dark v2 surface with a tab strip,
+     a session sidebar and a timeline of tool cards above a composer. */
+  .window.app { background: #080808; color: #e7e9ee; border: 1px solid #1e232c; }
+  .app-titlebar { display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border-bottom: 1px solid #1e232c; background: #0c0e12; }
+  .app-dot { width: 9px; height: 9px; border-radius: 50%; background: #22262e; }
+  .app-tabs { display: flex; align-items: center; gap: 4px; margin-left: 6px; min-width: 0; }
+  .app-tab { padding: 4px 10px; border-radius: 6px; background: #14181f; font-size: 11px; color: #a6acba; white-space: nowrap; }
+  .app-tab.active { background: #1d232d; color: #eef1f6; }
+  .app-tab-add { color: #6c7280; font-size: 13px; }
+  .app-status { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 10px; color: #8a90a0; }
+  .app-status i { width: 6px; height: 6px; border-radius: 50%; background: var(--lime); }
+  .app-body { display: grid; grid-template-columns: 148px minmax(0, 1fr); min-height: 300px; }
+  .app-side { border-right: 1px solid #1e232c; background: #0b0d11; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+  .app-side-top { padding: 6px 8px; border-radius: 6px; background: #14181f; font-size: 10px; color: #cfd4de; }
+  .app-side-search { padding: 6px 8px; border-radius: 6px; border: 1px solid #1e232c; font-size: 9px; color: #6c7280; }
+  .app-side-label { margin: 8px 0 2px; padding: 0 6px; font-size: 8px; letter-spacing: 0.09em; text-transform: uppercase; color: #6c7280; }
+  .app-side-row { padding: 5px 8px; border-radius: 5px; font-size: 10px; color: #a6acba; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .app-side-row.active { background: #181d25; color: #eef1f6; }
+  .app-main { display: flex; flex-direction: column; min-width: 0; }
+  .app-thread { flex: 1; padding: 14px 14px 4px; display: flex; flex-direction: column; gap: 7px; overflow: hidden; }
+  .app-user { align-self: flex-end; max-width: 86%; padding: 7px 10px; border-radius: 9px; background: #1c2230; font-size: 10.5px; line-height: 1.45; color: #dfe3ea; }
+  .app-tool { display: flex; align-items: center; gap: 8px; padding: 7px 9px; border: 1px solid #1e232c; border-radius: 8px; background: #0e1116; }
+  .app-tool b { display: block; font-size: 10.5px; font-weight: 600; color: #e3e6ec; letter-spacing: -0.01em; }
+  .app-tool small { display: block; margin-top: 1px; font-size: 9px; color: #7d8393; }
+  .app-tool em { margin-left: auto; font-style: normal; font-size: 8.5px; color: #7fbf6a; }
+  .app-tool.hold em { color: #d9a441; }
+  .app-tool-icon { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 5px; background: #171c24; font-size: 10px; color: #9aa1b1; }
+  .app-reply { padding: 7px 10px; border-radius: 8px; background: #10151c; font-size: 10.5px; line-height: 1.45; color: #cfd4de; }
+  .app-composer { margin: 8px 10px 10px; display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid #262c37; border-radius: 10px; background: #0e1116; }
+  .app-chip { display: flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: 6px; background: #171c24; font-size: 9px; color: #cfd4de; white-space: nowrap; }
+  .app-chip i { display: grid; place-items: center; width: 12px; height: 12px; border-radius: 3px; background: #22304a; color: #9bc1ff; font-style: normal; font-size: 7.5px; font-weight: 700; }
+  .app-placeholder { flex: 1; font-size: 10px; color: #5f6573; }
+  .app-send { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 6px; background: var(--lime); color: #111310; font-size: 11px; font-weight: 700; }
+  @media (max-width: 720px) { .app-body { grid-template-columns: 0 minmax(0, 1fr); } .app-side { display: none; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="progress" aria-hidden="true"><i id="progress"></i></div>
+
+<header class="header" id="top">
+  <div class="wrap header-in">
+    <a class="brand" href="#top" aria-label="Omnia home">
+      <svg width="26" height="26" viewBox="2 2 12 12" fill="none" aria-hidden="true">
+        <mask id="omnia-mark-index-1" maskUnits="userSpaceOnUse" x="2" y="2" width="12" height="12" style="mask-type:luminance">
+          <rect x="2" y="2" width="12" height="12" fill="white"/>
+          <rect x="7.6" y="7.6" width="6" height="6" rx="1.6" fill="black"/>
+        </mask>
+        <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1" mask="url(#omnia-mark-index-1)"/>
+        <rect x="9" y="9" width="4" height="4" rx="1" fill="currentColor"/>
+      </svg>
+      <span>OMNIA</span>
+    </a>
+    <nav class="nav" id="nav" aria-label="Primary">
+      <a href="#product">Product</a>
+      <a href="#demo">How it works</a>
+      <a href="#security">Security</a>
+      <a href="#free">Free &amp; ads</a>
+      <a href="#pricing">Pricing</a>
+    </nav>
+    <div class="header-cta">
+      <a class="btn btn-primary btn-small" href="/downloads.html">Download</a>
+      <button class="menu" id="menu" aria-expanded="false" aria-controls="nav" aria-label="Open menu"><span></span><span></span></button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow reveal"><span class="pulse"></span>Runs on your machine</p>
+        <h1 class="reveal" style="--delay:.05s">The agent that<br />drives your<br /><span class="mark">apps.</span></h1>
+        <p class="lede reveal" style="--delay:.1s">Omnia is a local-first agent that works inside the apps you already use. It opens, clicks, types and reads the screen or file back after each step. When an action needs approval, it stops and asks.</p>
+        <div class="hero-actions reveal" style="--delay:.15s">
+          <a class="btn btn-primary" href="/downloads.html">Download free <span class="btn-arrow" aria-hidden="true">↓</span></a>
+          <a class="link-arrow" href="#demo">See it work <span aria-hidden="true">→</span></a>
+        </div>
+        <p class="fine reveal" style="--delay:.2s">macOS 13+ · Windows 10+ · Linux x64 <span class="sep">/</span> no card required</p>
+      </div>
+
+      <div class="hero-stage reveal" style="--delay:.1s">
+        <div class="window app" id="window">
+          <div class="app-titlebar">
+            <span class="app-dot"></span><span class="app-dot"></span>
+            <div class="app-tabs">
+              <span class="app-tab active">Invoices</span>
+              <span class="app-tab">Statements</span>
+              <span class="app-tab-add">+</span>
+            </div>
+            <span class="app-status"><i></i>Agent</span>
+          </div>
+          <div class="app-body">
+            <aside class="app-side">
+              <div class="app-side-top">New session</div>
+              <div class="app-side-search">Search sessions</div>
+              <p class="app-side-label">Today</p>
+              <div class="app-side-row active">Close out Q3 invoices</div>
+              <div class="app-side-row">Supplier statements</div>
+              <div class="app-side-row">Restart local database</div>
+              <p class="app-side-label">Yesterday</p>
+              <div class="app-side-row">Quarterly research</div>
+            </aside>
+            <div class="app-main">
+              <div class="app-thread">
+                <div class="app-user">Close out the Q3 invoices in Stripe and export a CSV to my Desktop.</div>
+                <div class="app-tool"><span class="app-tool-icon">◇</span><div><b>computer_observe</b><small>Stripe · Invoices</small></div><em>verified</em></div>
+                <div class="app-tool"><span class="app-tool-icon">⌕</span><div><b>computer_find</b><small>42 open invoices</small></div><em>verified</em></div>
+                <div class="app-tool"><span class="app-tool-icon">⇥</span><div><b>computer_act</b><small>Closed 39 · 3 need attention</small></div><em>verified</em></div>
+                <div class="app-tool"><span class="app-tool-icon">⇩</span><div><b>write</b><small>invoices-q3.csv → Desktop</small></div><em>read back</em></div>
+                <div class="app-tool hold"><span class="app-tool-icon">!</span><div><b>approval</b><small>Refund INV-0031</small></div><em>waiting</em></div>
+                <div class="app-reply">Done. 39 invoices closed. The refund is held for your approval.</div>
+              </div>
+              <div class="app-composer">
+                <span class="app-chip"><i>D</i>DeepSeek V4.1 Flash</span>
+                <span class="app-placeholder">Describe the task to do.</span>
+                <span class="app-send">↑</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="float float-1"><b>Every step verified</b><span>read back from the app</span></div>
+        <div class="float float-2"><b>You stay in control</b><span>take over any time</span></div>
+      </div>
+    </div>
+    <div class="wrap">
+      <div class="trust reveal">
+        <span><i></i>Runs locally</span>
+        <span><i></i>Every step read back</span>
+        <span><i></i>Hosted or local model</span>
+        <span><i></i>Free, no card</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="product">
+    <div class="wrap">
+      <div class="section-head">
+        <div>
+          <p class="kicker">01 / Product</p>
+          <h2>It works in your apps.</h2>
+        </div>
+        <p>Omnia controls the browser, desktop apps and terminal in one session. The run ends when the result is visible on screen or written to disk.</p>
+      </div>
+      <div class="features">
+        <article class="feature reveal">
+          <div class="feature-top">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="M7 6.5h.01"/></svg><span>01</span>
+          </div>
+          <h3>Controls your apps</h3>
+          <p>Omnia uses the browser, desktop apps and terminal in one session, including tools with no API.</p>
+        </article>
+        <article class="feature reveal" style="--delay:.06s">
+          <div class="feature-top">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.4-3 8.4-7 9.5C8 19.4 5 15.4 5 11V6l7-3Z"/><path d="m9 12 2 2 4-4"/></svg><span>02</span>
+          </div>
+          <h3>Verifies its own work</h3>
+          <p>After each action, Omnia reads the screen or file back. A step counts as done only when the result is visible in the app.</p>
+        </article>
+        <article class="feature reveal" style="--delay:.12s">
+          <div class="feature-top">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M12 3v10"/><path d="M8 9l4 4 4-4"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg><span>03</span>
+          </div>
+          <h3>Stops for approval</h3>
+          <p>Payments, deletes and other irreversible actions wait for your approval. The exact scope is shown before anything runs.</p>
+        </article>
+        <article class="feature reveal" style="--delay:.18s">
+          <div class="feature-top">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg><span>04</span>
+          </div>
+          <h3>Stays on your machine</h3>
+          <p>Sessions, files and credentials stay on your computer. The model receives only the context needed for the current step.</p>
+        </article>
+        <article class="feature reveal" style="--delay:.24s">
+          <div class="feature-top">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg><span>05</span>
+          </div>
+          <h3>Bring your own model</h3>
+          <p>Use a hosted provider or a local OpenAI-compatible endpoint. You can switch models between sessions.</p>
+        </article>
+        <article class="feature reveal" style="--delay:.3s">
+          <div class="feature-top">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/></svg><span>06</span>
+          </div>
+          <h3>You can take over</h3>
+          <p>Each session shows a live desktop. You can take the mouse, type or pause the agent, then let it continue from that point.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section dark" id="demo">
+    <div class="wrap">
+      <div class="section-head">
+        <div>
+          <p class="kicker">02 / How it works</p>
+          <h2>Watch a task finish.</h2>
+        </div>
+        <p>Three example runs. Each line is an action Omnia took and the check that confirmed the result.</p>
+      </div>
+
+      <div class="demo reveal" data-demo>
+        <div class="demo-bar">
+          <div class="demo-tabs" role="tablist" aria-label="Example tasks">
+            <button role="tab" id="tab-invoices" aria-controls="panel-invoices" aria-selected="true" data-scene="invoices">Invoices</button>
+            <button role="tab" id="tab-browser" aria-controls="panel-browser" aria-selected="false" tabindex="-1" data-scene="browser">Browser</button>
+            <button role="tab" id="tab-approval" aria-controls="panel-approval" aria-selected="false" tabindex="-1" data-scene="approval">Approval</button>
+          </div>
+          <button class="replay" id="replay">Replay ↻</button>
+        </div>
+        <div class="demo-panel" role="tabpanel" id="panel-invoices" aria-labelledby="tab-invoices" data-panel="invoices">
+          <p class="demo-prompt"><b>you</b>Close the Q3 invoices in Stripe, then export a CSV to my Desktop.</p>
+          <ol class="trace">
+            <li data-line><span class="t">00:01</span><span class="tool">computer_browser</span><span>Opened Stripe → Invoices</span><span class="ok">verified</span></li>
+            <li data-line><span class="t">00:06</span><span class="tool">computer_find</span><span>Filtered 42 open invoices</span><span class="ok">verified</span></li>
+            <li data-line><span class="t">00:19</span><span class="tool">computer_act</span><span>Closed 39 · 3 need attention</span><span class="ok">verified</span></li>
+            <li data-line><span class="t">00:24</span><span class="tool">write</span><span>invoices-q3.csv → Desktop</span><span class="ok">read back</span></li>
+            <li data-line class="hold"><span class="t">00:31</span><span class="tool">approval</span><span>Refund INV-0031 held for you</span><span class="ok">waiting</span></li>
+          </ol>
+          <p class="demo-foot">Finished in 31 seconds. One decision left to a human.</p>
+        </div>
+        <div class="demo-panel" role="tabpanel" id="panel-browser" aria-labelledby="tab-browser" data-panel="browser" hidden>
+          <p class="demo-prompt"><b>you</b>Sign in to the supplier portal and download this month's statements.</p>
+          <ol class="trace">
+            <li data-line><span class="t">00:02</span><span class="tool">computer_browser</span><span>Opened supplier portal</span><span class="ok">verified</span></li>
+            <li data-line><span class="t">00:05</span><span class="tool">credentials</span><span>Typed the stored credential</span><span class="ok">sealed</span></li>
+            <li data-line><span class="t">00:09</span><span class="tool">computer_find</span><span>Found Statements · October</span><span class="ok">1 result</span></li>
+            <li data-line><span class="t">00:14</span><span class="tool">write</span><span>3 PDFs → Downloads</span><span class="ok">read back</span></li>
+          </ol>
+          <p class="demo-foot">Credentials stay out of the model context.</p>
+        </div>
+        <div class="demo-panel" role="tabpanel" id="panel-approval" aria-labelledby="tab-approval" data-panel="approval" hidden>
+          <p class="demo-prompt"><b>you</b>Restart the local database and check that it is healthy.</p>
+          <ol class="trace">
+            <li data-line><span class="t">00:01</span><span class="tool">shell</span><span>Requested PROCESS_EXECUTE</span><span class="ok">scoped</span></li>
+            <li data-line class="hold"><span class="t">00:02</span><span class="tool">approval</span><span>Stopped before launching</span><span class="ok">waiting</span></li>
+            <li data-line><span class="t">00:14</span><span class="tool">approval</span><span>You approved the scope</span><span class="ok">signed</span></li>
+            <li data-line><span class="t">00:15</span><span class="tool">shell</span><span>Started postgres, read back the PID</span><span class="ok">healthy</span></li>
+          </ol>
+          <p class="demo-foot">Nothing irreversible runs without your click.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="security">
+    <div class="wrap security-grid">
+      <div class="security-copy">
+        <p class="kicker">03 / Trust</p>
+        <h2>You set the limits.</h2>
+        <p>Omnia asks for capabilities per session and shows the scope of a sensitive action before it runs. You can deny any request.</p>
+        <span class="security-note"><i></i>Capabilities are granted per session</span>
+      </div>
+      <div class="security-cards">
+        <article class="sec-card reveal"><span class="n">01</span><h3>Explicit grants</h3><p>Each session gets grants for files, process, browser and network. Omnia cannot use a capability you did not grant.</p></article>
+        <article class="sec-card reveal" style="--delay:.06s"><span class="n">02</span><h3>Credentials stay in the vault</h3><p>The runtime types stored credentials into the app. They are not placed in the model context and do not appear in logs.</p></article>
+        <article class="sec-card reveal" style="--delay:.12s"><span class="n">03</span><h3>Sensitive actions wait</h3><p>Irreversible actions and anything that moves money pause with the exact scope on screen. Deny one and the agent stops that path.</p></article>
+        <article class="sec-card reveal" style="--delay:.18s"><span class="n">04</span><h3>Local transcript</h3><p>Every command, file and approval is recorded in a transcript on your machine. You can export or delete it.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="free">
+    <div class="wrap free-grid">
+      <div class="free-copy">
+        <p class="kicker">04 / Free &amp; ads</p>
+        <h2>One sponsor card pays for Free.</h2>
+        <p>On the free tier, one labelled sponsor card appears below a reply. There are no pop-ups or interstitials, and Omnia does not track activity inside your files.</p>
+        <ul class="free-list">
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg><span>One card below the answer. It never appears inside a step, a file or a permission prompt.</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg><span>The card matches your latest request. That text and a random session id go to our ad service. No other data is sent for ads.</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg><span>Each card is marked <strong>Sponsored</strong> and carries the brand name and one outbound link.</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg><span>Pro and Business remove the card.</span></li>
+        </ul>
+        <p class="disclosure"><b>On Free, the ad service receives two things.</b> The latest request text and a random session id go to Omnia's control plane and Gravity to pick a card. Files, credentials, tool output and the rest of the conversation stay on your machine.</p>
+      </div>
+      <div class="reveal" style="--delay:.08s">
+        <figure class="ad-preview">
+          <div class="ad-sample">
+            <div class="ad-sample-top"><span class="ad-tag">Sponsored</span><span class="ad-brand">Linear</span><span class="ad-more" aria-hidden="true">···</span></div>
+            <div class="ad-sample-main">
+              <span class="ad-sample-logo" aria-hidden="true">L</span>
+              <div><b>The system for modern software teams.</b><p>Plan, build, and ship from one quiet workspace.</p></div>
+              <span class="ad-go">Open →</span>
+            </div>
+          </div>
+          <figcaption class="ad-caption">One card below a reply is the only ad format</figcaption>
+        </figure>
+        <div class="ad-rules" aria-label="Ad placement rules">
+          <span>No pop-ups</span><span>No interstitials</span><span>No tracking in files</span><span>Never in approval prompts</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="pricing">
+    <div class="wrap">
+      <div class="section-head">
+        <div>
+          <p class="kicker">05 / Pricing</p>
+          <h2>Start free. Paid plans raise the limits.</h2>
+        </div>
+        <p>Every plan runs on your machine. Paid plans raise usage limits and remove the sponsor card.</p>
+      </div>
+      <div class="plans">
+        <article class="plan reveal">
+          <span class="tier">Free</span>
+          <div class="price">$0<small>forever</small></div>
+          <p>For one person on their own computers.</p>
+          <ul>
+            <li>3 computers</li>
+            <li>500 browser actions a day</li>
+            <li>3 vault logins</li>
+            <li>5 stored credentials</li>
+            <li>2-hour remote sessions</li>
+            <li>One sponsored card below replies</li>
+          </ul>
+          <a class="btn btn-outline" href="/downloads.html">Download free</a>
+        </article>
+        <article class="plan featured reveal" style="--delay:.06s">
+          <span class="tier">Pro</span>
+          <div class="price">$15<small>/ month</small></div>
+          <p>For daily use across more computers, with more automation and longer remote sessions.</p>
+          <ul>
+            <li>Everything in Free</li>
+            <li>No sponsored cards</li>
+            <li>More computers and automation</li>
+            <li>Longer remote sessions</li>
+            <li>Priority support</li>
+          </ul>
+          <a class="btn btn-lime" href="/downloads.html">Upgrade in the app</a>
+        </article>
+        <article class="plan reveal" style="--delay:.12s">
+          <span class="tier">Business</span>
+          <div class="price">$49<small>/ month</small></div>
+          <p>For teams that need shared specialists, roles, SSO and central billing.</p>
+          <ul>
+            <li>Everything in Pro</li>
+            <li>Shared specialists</li>
+            <li>Roles and SSO</li>
+            <li>Central billing</li>
+            <li>Dedicated support</li>
+          </ul>
+          <a class="btn btn-outline" href="mailto:hello@openfoodpantry.org?subject=Omnia%20Business">Talk to us</a>
+        </article>
+      </div>
+      <p class="plan-note">Prices in USD. Cancel any time from the billing portal. Local use stays free forever.</p>
+    </div>
+  </section>
+
+  <section class="section" id="faq">
+    <div class="wrap faq-grid">
+      <div class="section-head">
+        <p class="kicker">06 / Questions</p>
+        <h2>What runs where.</h2>
+        <p>Answers about data, models, ads and limits.</p>
+      </div>
+      <div class="faq-list">
+        <details>
+          <summary>What can Omnia do?</summary>
+          <p>Within the permissions you grant, Omnia can fill in a portal, reconcile a spreadsheet, file receipts, run a deploy or collect research across tabs. It stops at any approval boundary you set.</p>
+        </details>
+        <details>
+          <summary>Does it work with the apps I already use?</summary>
+          <p>Yes. Omnia controls the browser and desktop you already use, including internal tools, legacy apps and sites without APIs.</p>
+        </details>
+        <details>
+          <summary>What leaves my machine?</summary>
+          <p>The current request and the context needed for the step go to the model provider you choose. On Free, the latest request text and a random session id also go to our ad service to pick a sponsor card. Files and credentials stay on your machine.</p>
+        </details>
+        <details>
+          <summary>How is the ad chosen?</summary>
+          <p>Gravity matches the request text to a sponsor. The card is labelled Sponsored and has one outbound link. It does not appear in files, tool results or approval prompts.</p>
+        </details>
+        <details>
+          <summary>Can I use a local model?</summary>
+          <p>Yes. Point Omnia at a local OpenAI-compatible endpoint. Sessions, approvals and tools work the same way.</p>
+        </details>
+        <details>
+          <summary>Which platforms are supported?</summary>
+          <p>macOS 13+, Windows 10+ and Linux x64. One account and plan work on all three.</p>
+        </details>
+        <details>
+          <summary>What happens when I hit a limit?</summary>
+          <p>The session pauses and shows the limit. Nothing is charged automatically. You can upgrade if you want to continue.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <section class="cta">
+    <div class="wrap cta-in">
+      <div>
+        <h2>Start with one real task.</h2>
+        <p>Install Omnia, describe a task, and check the result in the app. Free on macOS, Windows and Linux.</p>
+      </div>
+      <div class="cta-actions">
+        <a class="btn btn-lime" href="/downloads.html">Download free <span aria-hidden="true">↓</span></a>
+        <a class="link-arrow" href="/docs.html">Read the docs <span aria-hidden="true">→</span></a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div>
+        <a class="brand" href="#top" aria-label="Omnia home">
+          <svg width="26" height="26" viewBox="2 2 12 12" fill="none" aria-hidden="true">
+        <mask id="omnia-mark-index-2" maskUnits="userSpaceOnUse" x="2" y="2" width="12" height="12" style="mask-type:luminance">
+          <rect x="2" y="2" width="12" height="12" fill="white"/>
+          <rect x="7.6" y="7.6" width="6" height="6" rx="1.6" fill="black"/>
+        </mask>
+        <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1" mask="url(#omnia-mark-index-2)"/>
+        <rect x="9" y="9" width="4" height="4" rx="1" fill="currentColor"/>
+      </svg>
+          <span>OMNIA</span>
+        </a>
+        <p>A local-first computer agent by Omnisciens. It operates your apps, verifies each step and asks before sensitive actions.</p>
+      </div>
+      <div>
+        <h4>Product</h4>
+        <ul>
+          <li><a href="#product">Overview</a></li>
+          <li><a href="#demo">How it works</a></li>
+          <li><a href="#pricing">Pricing</a></li>
+          <li><a href="#security">Security</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Resources</h4>
+        <ul>
+          <li><a href="/docs.html">Documentation</a></li>
+          <li><a href="/downloads.html">Releases</a></li>
+          <li><a mailto:hello@openfoodpantry.org?subject=Omnia%20issue>Report an issue</a></li>
+          <li><a href="/docs.html#install">License</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Company</h4>
+        <ul>
+          <li><a href="mailto:hello@openfoodpantry.org">Contact</a></li>
+          <li><a href="mailto:hello@openfoodpantry.org?subject=Advertising%20on%20Omnia">Advertise</a></li>
+          <li><a href="#free">Privacy &amp; ads</a></li>
+          <li><a href="#security">Trust</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© <span id="year">2026</span> Omnisciens</span>
+      <span>Made for macOS · Windows · Linux</span>
+      <span>Your machine stays yours</span>
+    </div>
+  </div>
+</footer>
+
+<script src="/vendor/anime.min.js"></script>
+<script>
+(() => {
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // anime v4 UMD exposes helpers on one object: animate(), stagger(), utils.
+  const lib = window.anime;
+  const animate = lib && typeof lib.animate === "function" ? lib.animate : undefined;
+  const stagger = lib && typeof lib.stagger === "function" ? lib.stagger : undefined;
+  const motion = (fn) => {
+    if (!animate || reduced) return;
+    fn({ animate, stagger, utils: lib.utils });
+  };
+  const header = document.querySelector(".header");
+  const bar = document.getElementById("progress");
+  const updateScroll = () => {
+    const max = document.documentElement.scrollHeight - innerHeight;
+    bar.style.width = (max > 0 ? Math.min(100, (scrollY / max) * 100) : 0) + "%";
+    header.classList.toggle("scrolled", scrollY > 6);
+  };
+  addEventListener("scroll", updateScroll, { passive: true });
+  updateScroll();
+
+  const nav = document.getElementById("nav");
+  const menu = document.getElementById("menu");
+  menu.addEventListener("click", () => {
+    const open = nav.classList.toggle("open");
+    menu.setAttribute("aria-expanded", String(open));
+  });
+  nav.querySelectorAll("a").forEach((link) =>
+    link.addEventListener("click", () => {
+      nav.classList.remove("open");
+      menu.setAttribute("aria-expanded", "false");
+    })
+  );
+
+  const reveals = document.querySelectorAll(".reveal");
+  if (reduced || !("IntersectionObserver" in window)) {
+    reveals.forEach((el) => el.classList.add("in"));
+  } else {
+    const io = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          entry.target.classList.add("in");
+          io.unobserve(entry.target);
+        });
+      },
+      { threshold: 0.12, rootMargin: "0px 0px -6% 0px" }
+    );
+    reveals.forEach((el) => io.observe(el));
+  }
+
+  const navLinks = [...nav.querySelectorAll("a")];
+  const sections = navLinks.map((a) => document.querySelector(a.getAttribute("href"))).filter(Boolean);
+  if ("IntersectionObserver" in window && sections.length) {
+    const spy = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          navLinks.forEach((link) =>
+            link.classList.toggle("active", link.getAttribute("href") === "#" + entry.target.id)
+          );
+        });
+      },
+      { rootMargin: "-38% 0px -56% 0px" }
+    );
+    sections.forEach((section) => spy.observe(section));
+  }
+
+  motion(({ animate, stagger, utils }) => {
+    utils?.set([".app-tool", ".app-side-row", ".app-user", ".app-composer"], { opacity: 0 });
+    animate(".app-user", {
+      opacity: [0, 1],
+      translateY: [6, 0],
+      duration: 420,
+      delay: 350,
+      easing: "easeOutQuad",
+    });
+    animate(".app-tool", {
+      opacity: [0, 1],
+      translateY: [7, 0],
+      delay: stagger(90, { start: 550 }),
+      duration: 380,
+      easing: "easeOutQuad",
+    });
+    animate(".app-side-row", {
+      opacity: [0, 1],
+      translateX: [-5, 0],
+      delay: stagger(70, { start: 300 }),
+      duration: 320,
+      easing: "easeOutQuad",
+    });
+    animate(".app-composer", {
+      opacity: [0, 1],
+      translateY: [8, 0],
+      delay: 1000,
+      duration: 420,
+      easing: "easeOutQuad",
+    });
+    const drift = (selector, distance, duration) =>
+      animate(selector, {
+        translateY: [-distance, distance],
+        direction: "alternate",
+        loop: true,
+        duration,
+        easing: "easeInOutSine",
+      });
+    drift(".float-1", 4, 2600);
+    drift(".float-2", 5, 3100);
+  });
+
+  const stage = document.querySelector(".hero-stage");
+  const win = document.getElementById("window");
+  if (stage && win && !reduced && matchMedia("(pointer: fine)").matches) {
+    stage.addEventListener("pointermove", (event) => {
+      const rect = stage.getBoundingClientRect();
+      const x = (event.clientX - rect.left) / rect.width - 0.5;
+      const y = (event.clientY - rect.top) / rect.height - 0.5;
+      win.style.setProperty("--ry", (x * 2.2).toFixed(2) + "deg");
+      win.style.setProperty("--rx", (-y * 1.8).toFixed(2) + "deg");
+    });
+    stage.addEventListener("pointerleave", () => {
+      win.style.setProperty("--ry", "0deg");
+      win.style.setProperty("--rx", "0deg");
+    });
+  }
+
+  const demo = document.querySelector("[data-demo]");
+  if (demo) {
+    const tabs = [...demo.querySelectorAll('[role="tab"]')];
+    const panels = [...demo.querySelectorAll("[data-panel]")];
+    let current = Math.max(0, tabs.findIndex((tab) => tab.getAttribute("aria-selected") === "true"));
+
+    if (animate && !reduced) {
+      lib.utils?.set(".trace [data-line]", { opacity: 0 });
+    }
+
+    const play = (panel) => {
+      const lines = panel.querySelectorAll("[data-line]");
+      if (!animate || reduced) {
+        panel.classList.add("play");
+        return;
+      }
+      panel.classList.remove("play");
+      animate(lines, {
+        opacity: [0, 1],
+        translateY: [6, 0],
+        delay: stagger(130),
+        duration: 380,
+        easing: "easeOutQuad",
+      });
+    };
+
+    const select = (index, animate) => {
+      current = (index + tabs.length) % tabs.length;
+      tabs.forEach((tab, i) => {
+        const selected = i === current;
+        tab.setAttribute("aria-selected", String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+      });
+      panels.forEach((panel, i) => {
+        panel.hidden = i !== current;
+      });
+      if (animate) {
+        play(panels[current]);
+        motion(({ animate }) => {
+          animate(panels[current], {
+            opacity: [0, 1],
+            translateY: [5, 0],
+            duration: 260,
+            easing: "easeOutQuad",
+          });
+        });
+      }
+    };
+
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => select(index, true));
+      tab.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+        event.preventDefault();
+        select(current + (event.key === "ArrowRight" ? 1 : -1), true);
+        tabs[current].focus();
+      });
+    });
+
+    demo.querySelector("#replay").addEventListener("click", () => play(panels[current]));
+    select(current, false);
+
+    if (reduced || !("IntersectionObserver" in window)) {
+      play(panels[current]);
+    } else {
+      const seen = new IntersectionObserver(
+        (entries) => {
+          if (!entries.some((entry) => entry.isIntersecting)) return;
+          seen.disconnect();
+          play(panels[current]);
+        },
+        { threshold: 0.25 }
+      );
+      seen.observe(demo);
+    }
+  }
+
+  document.getElementById("year").textContent = String(new Date().getFullYear());
+})();
+</script>
+</body>
+</html>

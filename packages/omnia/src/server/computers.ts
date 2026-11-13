@@ -318,6 +318,7 @@ export interface ServerComputerDriver {
   cua?: unknown
   readonly browser?: BrowserController
   getInfo(): Promise<ComputerInfo>
+  setName?(name: string): void | Promise<void>
   capabilities(): readonly CapabilitySupport[]
   observe(request?: ObservationRequest): Promise<Observation>
   find(request: FindRequest): Promise<FindResult>

@@ -233,6 +233,9 @@ export function createSidecarEnv(): Record<string, string> {
   )
   delete env.DEBUG
   if (process.platform === "linux") delete env.LD_PRELOAD
+  // Async subagents are a first-class Omnia coding feature: the task tool must
+  // advertise `background` and accept it without a developer env override.
+  env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = "true"
   // The agent sessions this sidecar serves must expose the Omnia computer
   // tools. Without this env the tools never register and the agent cannot
   // click, type, or capture the screen (the hosted control plane drives the

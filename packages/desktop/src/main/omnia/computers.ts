@@ -3,9 +3,16 @@ import { join } from "node:path"
 import { app, ipcMain } from "electron"
 import { serverCall } from "./server-call"
 import { enterpriseGuard } from "./enterprise"
+import { readRegisteredComputerId, rememberComputerDisplayName } from "./remote-agent"
 
 function computerPath(computerId: string): string {
   return `/v1/computers/${encodeURIComponent(computerId)}`
+}
+
+// The pairing command is copied into a shell. Quote each value so a URL with
+// spaces, "&" or a quote character cannot split the command or its flags.
+function shellArgument(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
 }
 
 export function registerComputerIpcHandlers(): void {
@@ -26,7 +33,13 @@ export function registerComputerIpcHandlers(): void {
       expiresAt: typeof pairing?.expiresAt === "number" ? pairing.expiresAt : 0,
       serverUrl,
       ...(typeof json.pairingCode === "string" ? { pairingCode: json.pairingCode } : {}),
-      ...(existsSync(cliPath) ? { command: `bun ${cliPath} pair --url ${serverUrl} --code ${code}` } : {}),
+      ...(existsSync(cliPath)
+        ? {
+            command: `bun ${shellArgument(cliPath)} pair${
+              serverUrl ? ` --url ${shellArgument(serverUrl)}` : ""
+            } --code ${shellArgument(code)}`,
+          }
+        : {}),
     }
   })
   guarded("computers-pair-cancel", async (_event, code: string) => {
@@ -42,6 +55,14 @@ export function registerComputerIpcHandlers(): void {
   guarded("computers-connect", async (_event, computerId: string) => {
     const json = await serverCall(`${computerPath(computerId)}/connect`, "POST", {})
     return json.result
+  })
+  guarded("computers-rename", async (_event, computerId: string, name: string) => {
+    const trimmed = typeof name === "string" ? name.trim() : ""
+    if (computerId.length === 0 || trimmed.length === 0) throw new Error("A computer name is required.")
+    const json = await serverCall(computerPath(computerId), "PATCH", { name: trimmed })
+    // Keep the chosen name across restarts for this machine's own registration.
+    if (readRegisteredComputerId() === computerId) rememberComputerDisplayName(computerId, trimmed)
+    return json.computer
   })
   // Stored sign-ins are a separate switch: an admin can allow computer control
   // without letting the agent spend credentials kept in the vault.

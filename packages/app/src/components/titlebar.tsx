@@ -211,6 +211,14 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
         "margin-right": windows() ? "auto" : undefined,
       }}
       data-tauri-drag-region
+      onDblClick={(event) => {
+        if (platform.platform !== "desktop") return
+        const target = event.target as HTMLElement | null
+        if (target?.closest("button, a, input, select, textarea, [role='button'], [data-no-drag]")) return
+        void (
+          window.api as unknown as { toggleMaximizeWindow?: () => Promise<boolean> }
+        ).toggleMaximizeWindow?.()
+      }}
     >
       <Switch>
         <Match when={useV2Titlebar()}>

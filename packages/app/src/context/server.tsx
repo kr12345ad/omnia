@@ -23,8 +23,10 @@ export const RECENTLY_CLOSED_DISPLAY_LIMIT = 5
 export function normalizeServerUrl(input: string) {
   const trimmed = input.trim()
   if (!trimmed) return
-  const withProtocol = /^https?:\/\//.test(trimmed) ? trimmed : `http://${trimmed}`
-  return withProtocol.replace(/\/+$/, "")
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`
+  const withoutTrailingSlash = withProtocol.replace(/\/+$/, "")
+  // Stripping every trailing slash turns a bare scheme into "https:", which is not a URL.
+  return /^https?:\/\/$/i.test(withoutTrailingSlash) ? withProtocol : withoutTrailingSlash
 }
 
 export function serverName(conn?: ServerConnection.Any, ignoreDisplayName = false) {
@@ -34,8 +36,17 @@ export function serverName(conn?: ServerConnection.Any, ignoreDisplayName = fals
 }
 
 function isLocalHost(url: string) {
-  const host = url.replace(/^https?:\/\//, "").split(":")[0]
-  if (host === "localhost" || host === "127.0.0.1") return "local"
+  // URL parsing keeps userinfo out of the host and normalizes hostname case.
+  const host = parseHostname(url)
+  if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") return "local"
+}
+
+function parseHostname(url: string) {
+  try {
+    return new URL(url).hostname.toLowerCase()
+  } catch {
+    return undefined
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

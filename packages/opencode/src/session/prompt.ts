@@ -1255,21 +1255,29 @@ const layer = Layer.effect(
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
-              sys.skills(agent),
-              sys.environment(model),
-              instruction.system().pipe(Effect.orDie),
-              sys.mcp(agent, session.permission),
-              MessageV2.toModelMessagesEffect(msgs, model),
-            ])
-            const system = [
-              ...env,
-              ...sys.renderUI(),
-              ...(sessionModeFromMetadata(session.metadata) === "chat" ? sys.chatMode() : []),
-              ...instructions,
-              ...(mcpInstructions ? [mcpInstructions] : []),
-              ...(skills ? [skills] : []),
-            ]
+            const modelMsgs = yield* MessageV2.toModelMessagesEffect(msgs, model)
+            // The `chat` surface agent is a plain assistant: its own prompt is
+            // enough, and project instructions, environment details, skills,
+            // MCP guidance, and the generated-UI catalogue would only turn it
+            // back into a coding agent.
+            const system =
+              agent.name === "chat"
+                ? []
+                : yield* Effect.all([
+                    sys.skills(agent),
+                    sys.environment(model),
+                    instruction.system().pipe(Effect.orDie),
+                    sys.mcp(agent, session.permission),
+                  ]).pipe(
+                    Effect.map(([skills, env, instructions, mcpInstructions]) => [
+                      ...env,
+                      ...sys.renderUI(),
+                      ...(sessionModeFromMetadata(session.metadata) === "chat" ? sys.chatMode() : []),
+                      ...instructions,
+                      ...(mcpInstructions ? [mcpInstructions] : []),
+                      ...(skills ? [skills] : []),
+                    ]),
+                  )
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
             const result = yield* handle.process({

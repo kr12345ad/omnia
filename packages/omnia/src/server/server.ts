@@ -38,6 +38,8 @@ import { ComputerManager, type BrowserController, type ExecuteOutcome, type Serv
 import { PermissionManager, requiredScopesForAction, type ApprovalPolicy, type OmniaScope, type PermissionState } from "./permissions"
 import { ApprovalRegistry } from "../security/approval"
 import { EnterpriseRuntime, type EnterpriseRuntimeOptions } from "../enterprise/runtime"
+import { startGrpcServer, type GrpcServerHandle, type GrpcTlsOptions } from "./grpc/server"
+import type { GnmiStateSource } from "./grpc/state"
 import {
   SecurityJournal,
   appendComputerUseRecord,
@@ -61,6 +63,7 @@ import {
   RequestBodyTooLargeError,
   SessionMismatchError,
   SessionUnboundError,
+  capabilityDecision,
   type ApiContext,
   type ServerCatalog,
   type ServerHealth,
@@ -108,8 +111,22 @@ export interface OmniaServerOptions {
   readonly version?: string
   readonly approvalPolicy?: ApprovalPolicy
   readonly permissions?: Partial<Record<OmniaScope, PermissionState>>
+  /**
+   * gRPC is enabled by default and binds to loopback on an ephemeral port. The
+   * port is reported on the handle so callers (including desktop sidecars) can
+   * connect without guessing. Setting enabled:false is an explicit opt-out.
+   */
+  readonly grpc?: OmniaGrpcOptions
   /** Self-hosted enterprise control plane, mounted at /admin and /v1/enterprise. */
   readonly enterprise?: EnterpriseServerOptions
+}
+
+export interface OmniaGrpcOptions {
+  readonly enabled?: boolean
+  readonly host?: string
+  readonly port?: number
+  readonly allowRemote?: boolean
+  readonly tls?: GrpcTlsOptions
 }
 
 export interface EnterpriseServerOptions extends Omit<EnterpriseRuntimeOptions, "version"> {
@@ -129,6 +146,7 @@ export interface OmniaServerHandle {
   readonly api: string
   readonly startedAt: number
   readonly events: EventBus
+  readonly grpc: GrpcServerHandle | undefined
   readonly computers: ComputerManager
   readonly permissions: PermissionManager
   readonly credentials: CredentialStore
@@ -1008,6 +1026,92 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
 
   for (const driver of options.drivers ?? []) registerComputer(driver)
 
+  const grpcSource: GnmiStateSource = {
+    url,
+    health,
+    computers: () => computers.list(),
+    sessions: () => [...sessions.values()],
+    chatChannels: () => chatChannels.describe(),
+    permissions: () => permissions.snapshot(),
+    // Execution state is projected from the existing bounded EventBus history
+    // rather than duplicated in a second cache. Once the history rolls over,
+    // "/omnia/server/execution" simply has no current value; the durable trail
+    // remains the security journal.
+    execution: () => {
+      const event = events
+        .since(0)
+        .filter((entry) => entry.type === "computer_use.executed")
+        .at(-1)
+      if (event === undefined) return undefined
+      const data = event.data ?? {}
+      const action = typeof data.action === "string" ? data.action : undefined
+      if (action === undefined) return undefined
+      const text = (key: string) => (typeof data[key] === "string" ? (data[key] as string) : undefined)
+      const flag = (key: string) => (typeof data[key] === "boolean" ? (data[key] as boolean) : undefined)
+      const success = flag("success")
+      const verified = flag("verified")
+      const provider = text("provider")
+      const model = text("model")
+      const delivery = text("delivery")
+      return {
+        at: event.at,
+        action,
+        ...(success === undefined ? {} : { success }),
+        ...(verified === undefined ? {} : { verified }),
+        ...(provider === undefined ? {} : { provider }),
+        ...(model === undefined ? {} : { model }),
+        ...(delivery === undefined ? {} : { delivery }),
+      }
+    },
+  }
+  let grpc: GrpcServerHandle | undefined
+  if (options.grpc?.enabled !== false) {
+    try {
+      grpc = await startGrpcServer({
+        host: options.grpc?.host ?? "127.0.0.1",
+        port: options.grpc?.port ?? 0,
+        ...(options.grpc?.allowRemote === undefined ? {} : { allowRemote: options.grpc.allowRemote }),
+        ...(options.grpc?.tls === undefined ? {} : { tls: options.grpc.tls }),
+        token,
+        auth,
+        remote,
+        source: grpcSource,
+        chatCapability: async (principal) => {
+          const profile = principal.kind === "operator" ? auth.status().profile : principal.profile
+          return capabilityDecision(profile === undefined ? undefined : String(profile.id), "chat_channels")
+        },
+        computers,
+        permissions,
+        events,
+        serverId,
+        now,
+        audit,
+      })
+      setSubsystem({ name: "grpc", status: "ready" })
+    } catch (error) {
+      // If the structured transport cannot start, the HTTP server must not keep
+      // running as if the server were healthy. Release every resource created
+      // on the way to the listener (discovery, chat, scheduler, model runtime
+      // and the HTTP listener) before reporting the startup failure.
+      state = "failed"
+      events.emit("server.failed", {
+        data: { message: error instanceof Error ? error.message : "The gRPC listener failed to start." },
+      })
+      pairingDiscovery?.close()
+      scheduler?.stop()
+      superskillBridges.close()
+      chatChannels.stop()
+      remote.close()
+      for (const remove of unregister.splice(0)) remove()
+      await localModels.unload().catch(() => undefined)
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      unsubscribeAudit()
+      audit.close()
+      computerUseAudit.close()
+      throw error
+    }
+  }
+
   setSubsystem({ name: "api", status: "ready" })
   setSubsystem({ name: "events", status: "ready" })
   setSubsystem({
@@ -1060,6 +1164,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     api: OMNIA_API_VERSION,
     startedAt,
     events,
+    grpc,
     computers,
     permissions,
     credentials,
@@ -1075,6 +1180,7 @@ export async function startOmniaServer(options: OmniaServerOptions = {}): Promis
     health,
     stop: async () => {
       state = "stopping"
+      await grpc?.stop()
       await localModels.unload()
       scheduler?.stop()
       superskillBridges.close()

@@ -5,7 +5,7 @@ import oc2ThemeJson from "../../../ui/src/theme/themes/oc-2.json"
 import { randomUUID } from "node:crypto"
 import { rmSync } from "node:fs"
 import { app, BrowserWindow, dialog, net, nativeImage, nativeTheme, protocol, shell } from "electron"
-import type { NativeImage } from "electron"
+import type { NativeImage, Protocol } from "electron"
 import { dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import type { TitlebarTheme } from "../preload/types"
@@ -128,6 +128,10 @@ export function setTitlebar(win: BrowserWindow, theme: Partial<TitlebarTheme> = 
   // "system" (not the resolved mode) or prefers-color-scheme stops tracking
   // OS appearance changes in the renderer.
   if (process.platform === "darwin") nativeTheme.themeSource = theme.scheme ?? theme.mode ?? "system"
+  // Linux has no native titlebar chrome to match, but Chromium's own
+  // prefers-color-scheme (form controls, scrollbars, dialogs) follows
+  // nativeTheme. Keep it aligned with the app's chosen scheme.
+  if (process.platform === "linux") nativeTheme.themeSource = theme.scheme ?? theme.mode ?? "system"
   updateTitlebar(win)
 }
 
@@ -233,6 +237,13 @@ export function createMainWindow(id: string = randomUUID()) {
       ? {
           titleBarStyle: "hidden" as const,
           trafficLightPosition: { x: 14, y: 14 },
+        }
+      : {}),
+    ...(process.platform === "linux"
+      ? {
+          // Unified custom titlebar: the renderer draws the header into the
+          // top bar on every platform instead of the OS decoration.
+          titleBarStyle: "hidden" as const,
         }
       : {}),
     ...(process.platform === "win32"
@@ -352,10 +363,10 @@ function windowDataFile(id: string) {
   return `opencode.window.${id.replace(/[^a-zA-Z0-9._-]/g, "-")}.dat`
 }
 
-export function registerRendererProtocol() {
-  if (protocol.isProtocolHandled(rendererProtocol)) return
+export function registerRendererProtocol(target: Protocol = protocol) {
+  if (target.isProtocolHandled(rendererProtocol)) return
 
-  protocol.handle(rendererProtocol, async (request) => {
+  target.handle(rendererProtocol, async (request) => {
     let url: URL
     let file: string
     try {

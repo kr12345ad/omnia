@@ -15,6 +15,26 @@ describe("timeline model", () => {
     expect(selectVisibleUserMessages(users)).toBe(users)
   })
 
+  test("hides the first message and everything after when the boundary is first", () => {
+    const users = selectUserMessages([user("msg_a"), assistant("msg_a_reply"), user("msg_b")])
+    expect(selectVisibleUserMessages(users, "msg_a")).toEqual([])
+  })
+
+  test("keeps every earlier turn when the boundary is the last message", () => {
+    const users = selectUserMessages([user("msg_a"), assistant("msg_a_reply"), user("msg_b")])
+
+    expect(selectVisibleUserMessages(users, "msg_b").map((message) => message.id)).toEqual(["msg_a"])
+  })
+
+  test("hides the loaded window when the revert boundary predates it", () => {
+    // History loads the newest page first and only prepends older pages, so a
+    // staged boundary missing from the loaded window is older than every shown
+    // user message.
+    const users = selectUserMessages([assistant("msg_a_reply"), user("msg_b"), assistant("msg_b_reply")])
+
+    expect(selectVisibleUserMessages(users, "msg_a")).toEqual([])
+  })
+
   test("waits for an assistant-only load to hydrate its user root", () => {
     expect(isTimelineReady([assistant("msg_2")], true)).toBe(false)
     expect(isTimelineReady([user("msg_1"), assistant("msg_2")], true)).toBe(true)

@@ -91,6 +91,7 @@ function uiApp(input?: {
   username?: string
   client?: Layer.Layer<HttpClient.HttpClient>
   disableEmbeddedWebUi?: boolean
+  chatOnly?: boolean
 }) {
   const handler = HttpRouter.toWebHandler(
     HttpRouter.use((router) =>
@@ -99,7 +100,12 @@ function uiApp(input?: {
         const client = yield* HttpClient.HttpClient
         const flags = yield* RuntimeFlags.Service
         yield* router.add("*", "/*", (request) =>
-          serveUIEffect(request, { fs, client, disableEmbeddedWebUi: flags.disableEmbeddedWebUi }),
+          serveUIEffect(request, {
+            fs,
+            client,
+            disableEmbeddedWebUi: flags.disableEmbeddedWebUi,
+            chatOnly: flags.chatOnly,
+          }),
         )
       }),
     ).pipe(
@@ -107,7 +113,10 @@ function uiApp(input?: {
       Layer.provide([
         fsUtilLayer,
         input?.client ?? httpClient(new Response("ui")),
-        RuntimeFlags.layer({ disableEmbeddedWebUi: input?.disableEmbeddedWebUi ?? false }),
+        RuntimeFlags.layer({
+          disableEmbeddedWebUi: input?.disableEmbeddedWebUi ?? false,
+          chatOnly: input?.chatOnly ?? false,
+        }),
         HttpServer.layerServices,
       ]),
     ),
@@ -323,6 +332,105 @@ describe("HttpApi UI fallback", () => {
       expect(readPath).toBe("/$bunfs/root/assets/app.js")
       expect(response.headers.get("content-type")).toContain("text/javascript")
       expect(yield* responseText(response)).toBe("console.log('embedded')")
+    }),
+  )
+
+  it.live("serves the chat surface at the root and hides the workspace in chat-only mode", () =>
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const readFile = (path: string) => {
+        if (path === "/$bunfs/root/chat.html") return Effect.succeed(new TextEncoder().encode("<html>chat</html>"))
+        if (path === "/$bunfs/root/index.html") return Effect.succeed(new TextEncoder().encode("<html>app</html>"))
+        return Effect.die(`unexpected embedded UI path: ${path}`)
+      }
+      const embedded = {
+        "chat.html": "/$bunfs/root/chat.html",
+        "index.html": "/$bunfs/root/index.html",
+      }
+
+      for (const path of ["/", "/index.html", "/chat", "/chat/"]) {
+        const response = yield* serveEmbeddedUIEffect(path, { ...fs, readFile }, embedded, {
+          chatOnly: true,
+        }).pipe(Effect.map(HttpServerResponse.toWeb))
+        expect(response.status).toBe(200)
+        expect(yield* responseText(response)).toBe("<html>chat</html>")
+      }
+
+      const hidden = yield* serveEmbeddedUIEffect("/some/session/route", { ...fs, readFile }, embedded, {
+        chatOnly: true,
+      }).pipe(Effect.map(HttpServerResponse.toWeb))
+      expect(hidden.status).toBe(404)
+    }),
+  )
+
+  it.live("refuses to proxy the full workspace when chat-only has no embedded UI", () =>
+    Effect.gen(function* () {
+      const response = yield* uiApp({
+        disableEmbeddedWebUi: true,
+        chatOnly: true,
+        client: Layer.succeed(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("chat-only must not proxy the full workspace")),
+        ),
+      }).request("/")
+
+      expect(response.status).toBe(503)
+      expect(yield* responseText(response)).toContain("chat UI")
+    }),
+  )
+
+  it.live("serves the chat surface at /chat without changing the default app fallback", () =>
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const readFile = (path: string) => {
+        if (path === "/$bunfs/root/chat.html") return Effect.succeed(new TextEncoder().encode("<html>chat</html>"))
+        if (path === "/$bunfs/root/index.html") return Effect.succeed(new TextEncoder().encode("<html>app</html>"))
+        return Effect.die(`unexpected embedded UI path: ${path}`)
+      }
+      const embedded = {
+        "chat.html": "/$bunfs/root/chat.html",
+        "index.html": "/$bunfs/root/index.html",
+      }
+
+      for (const [path, expected] of [
+        ["/chat", "<html>chat</html>"],
+        ["/chat/", "<html>chat</html>"],
+        ["/some/session/route", "<html>app</html>"],
+      ] as const) {
+        const response = yield* serveEmbeddedUIEffect(path, { ...fs, readFile }, embedded).pipe(
+          Effect.map(HttpServerResponse.toWeb),
+        )
+        expect(response.status).toBe(200)
+        expect(yield* responseText(response)).toBe(expected)
+      }
+    }),
+  )
+
+  it.live("serves the mobile surface at /mobile without falling back to the workspace", () =>
+    Effect.gen(function* () {
+      const fs = yield* FSUtil.Service
+      const readFile = (path: string) => {
+        if (path === "/$bunfs/root/mobile.html") return Effect.succeed(new TextEncoder().encode("<html>mobile</html>"))
+        if (path === "/$bunfs/root/index.html") return Effect.succeed(new TextEncoder().encode("<html>app</html>"))
+        return Effect.die(`unexpected embedded UI path: ${path}`)
+      }
+      const embedded = {
+        "mobile.html": "/$bunfs/root/mobile.html",
+        "index.html": "/$bunfs/root/index.html",
+      }
+
+      for (const [path, expected] of [
+        ["/mobile", "<html>mobile</html>"],
+        ["/mobile/", "<html>mobile</html>"],
+        ["/mobile.html", "<html>mobile</html>"],
+        ["/some/session/route", "<html>app</html>"],
+      ] as const) {
+        const response = yield* serveEmbeddedUIEffect(path, { ...fs, readFile }, embedded).pipe(
+          Effect.map(HttpServerResponse.toWeb),
+        )
+        expect(response.status).toBe(200)
+        expect(yield* responseText(response)).toBe(expected)
+      }
     }),
   )
 

@@ -92,6 +92,7 @@ if (process.env.OMNIA_SERVER_TOKEN === undefined) {
       url: handle.url,
       token: handle.token,
       serverId: handle.serverId,
+      ...(handle.grpc === undefined ? {} : { grpcUrl: handle.grpc.url, grpcPort: handle.grpc.port }),
       ...(localDriver === undefined ? {} : { computerId: localDriver.id }),
       platform: process.platform,
       pid: process.pid,

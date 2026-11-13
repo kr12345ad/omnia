@@ -1,7 +1,7 @@
-import { execFile } from "node:child_process"
+import { execFile, execFileSync } from "node:child_process"
 import { stat } from "node:fs/promises"
 import { basename, join } from "node:path"
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron"
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from "electron"
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
 import type { DesktopMenuAction } from "@opencode-ai/app/desktop-menu"
 import { parseDesktopNativeBundle, type DesktopNativeBundle } from "@opencode-ai/app/i18n/desktop-native"
@@ -35,6 +35,7 @@ import { registerChatIpcHandlers } from "./omnia/chat"
 import { registerComputerUseIpcHandlers } from "./omnia/computer-use"
 import { registerRemoteAgentIpcHandlers } from "./omnia/remote-agent"
 import { registerUsageReportIpcHandlers } from "./omnia/usage-report"
+import { registerSttIpcHandlers } from "./stt"
 import type { LegalController } from "./legal"
 
 const pickerFilters = (ext?: string[]) => {
@@ -78,6 +79,29 @@ type Deps = {
   quit?: () => void
 }
 
+
+// Electron's nativeTheme reads the GTK settings it saw at startup, and on
+// GNOME the dark choice can be carried only by the GTK theme name (GNOME 40
+// has no color-scheme key). Ask gsettings directly first, then fall back.
+function systemPrefersDark() {
+  if (process.platform !== "linux") return nativeTheme.shouldUseDarkColors
+  const read = (args: string[]): string => {
+    try {
+      return execFileSync("gsettings", args, { encoding: "utf8", timeout: 1500 }).trim().toLowerCase()
+    } catch {
+      return ""
+    }
+  }
+  const scheme = read(["get", "org.gnome.desktop.interface", "color-scheme"])
+  if (scheme.includes("prefer-dark")) return true
+  if (scheme.includes("prefer-light")) return false
+  const gtkTheme = read(["get", "org.gnome.desktop.interface", "gtk-theme"])
+  if (gtkTheme.includes("dark")) return true
+  const envTheme = (process.env.GTK_THEME ?? "").toLowerCase()
+  if (envTheme.includes("dark")) return true
+  return nativeTheme.shouldUseDarkColors
+}
+
 export function registerIpcHandlers(deps: Deps) {
   registerOmniaIpcHandlers()
   registerSuperskillIpcHandlers()
@@ -90,6 +114,7 @@ export function registerIpcHandlers(deps: Deps) {
   registerComputerUseIpcHandlers()
   registerRemoteAgentIpcHandlers()
   registerUsageReportIpcHandlers()
+  registerSttIpcHandlers()
   const legal = deps.legal
   if (legal !== undefined) {
     ipcMain.handle("legal-status", () => legal.status())
@@ -365,6 +390,25 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("get-pinch-zoom-enabled", () => getPinchZoomEnabled())
   ipcMain.handle("set-pinch-zoom-enabled", (_event: IpcMainInvokeEvent, enabled: boolean) => {
     setPinchZoomEnabled(enabled)
+  })
+  ipcMain.handle("get-system-dark", () => systemPrefersDark())
+  ipcMain.handle("window-minimize", (event: IpcMainInvokeEvent) => BrowserWindow.fromWebContents(event.sender)?.minimize())
+  ipcMain.handle("window-toggle-maximize", (event: IpcMainInvokeEvent) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return false
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+    return win.isMaximized()
+  })
+  ipcMain.handle("window-is-maximized", (event: IpcMainInvokeEvent) =>
+    BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false,
+  )
+  ipcMain.handle("window-close", (event: IpcMainInvokeEvent) => BrowserWindow.fromWebContents(event.sender)?.close())
+  ipcMain.handle("window-toggle-fullscreen", (event: IpcMainInvokeEvent) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return false
+    win.setFullScreen(!win.isFullScreen())
+    return win.isFullScreen()
   })
   ipcMain.handle("set-titlebar", (event: IpcMainInvokeEvent, theme: TitlebarTheme) => {
     const win = BrowserWindow.fromWebContents(event.sender)

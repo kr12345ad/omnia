@@ -44,7 +44,8 @@ import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
 import { IconButton } from "@opencode-ai/ui/icon-button"
 import { Select } from "@opencode-ai/ui/select"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
-import { ModelSelectorPopover, ModelSelectorPopoverV2 } from "@/components/dialog-select-model"
+import { ModelMark, ModelSelectorPopover, ModelSelectorPopoverV2 } from "@/components/dialog-select-model"
+import { modelDisplayName } from "@/components/dialog-select-model-search"
 import { DialogSelectModelUnpaid } from "@/components/dialog-select-model-unpaid"
 import { DialogSelectModelUnpaidV2 } from "@/components/dialog-select-model-unpaid-v2"
 import { useCommand } from "@/context/command"
@@ -483,6 +484,12 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
   const shellModeKey = "mod+shift+x"
   const normalModeKey = "mod+shift+e"
 
+  // The options memo can run during this component's render pass, so the
+  // enterprise lookup the command callback closes over must be initialized
+  // before register().
+  const enterprise = useEnterprise()
+  const attachmentsAllowed = () => enterprise.feature("fileAttachments")
+
   command.register("prompt-input", () => [
     {
       id: "file.attach",
@@ -756,14 +763,30 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     return [...custom, ...builtin]
   })
 
+  // Dispatches a built-in slash command by name. A recognized but disabled
+  // command is swallowed instead of being sent to the model as prompt text.
+  const runSlashCommand = (name: string) => {
+    const matches = command.options.filter((entry) => entry.slash === name)
+    if (matches.length === 0) return false
+    const option = matches.find((entry) => !entry.disabled)
+    if (option) command.trigger(option.id, "slash")
+    return true
+  }
+
   const handleSlashSelect = (cmd: SlashCommand | undefined) => {
     if (!cmd) return
     const menu = store.slashMenu
     closePopover()
     const images = imageAttachments()
+    const typed = prompt
+      .current()
+      .map((part) => ("content" in part ? part.content : ""))
+      .join("")
+    // Selecting a command never discards the arguments already typed after it.
+    const args = typed.match(/^\/\S*(\s[\s\S]*)$/)?.[1] ?? ""
 
     if (cmd.type === "custom") {
-      const text = `/${cmd.trigger} `
+      const text = `/${cmd.trigger}${args}${/\s$/.test(args) ? "" : " "}`
       if (menu) {
         editorRef.focus()
         setCursorPosition(editorRef, 0)
@@ -1039,7 +1062,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
 
     if (!shellMode) {
       const atMatch = rawText.substring(0, cursorPosition).match(/@(\S*)$/)
-      const slashMatch = rawText.match(/^\/(\S*)$/)
+      const slashMatch = rawText.match(/^\/(\S*)(?:\s[\s\S]*)?$/)
 
       if (atMatch) {
         atOnInput(atMatch[1])
@@ -1201,8 +1224,6 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
     return true
   }
 
-  const enterprise = useEnterprise()
-  const attachmentsAllowed = () => enterprise.feature("fileAttachments")
   const rejectionToast = (message: string) =>
     showToast({
       variant: "error",
@@ -1271,6 +1292,7 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
         if (!popover) return closePopover()
         setStore({ popover, slashMenu: false, slashMenuQuery: "" })
       },
+      runSlashCommand,
       newSessionWorktree: () => props.newSessionWorktree,
       onNewSessionWorktreeReset: props.onNewSessionWorktreeReset,
       shouldQueue: props.shouldQueue,
@@ -1760,16 +1782,17 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                                 dialog.show(() => <DialogSelectModelUnpaid model={props.controls.model.selection} />)
                               }}
                             >
-                              <Show when={props.controls.model.selection.current()?.provider?.id}>
-                                <ProviderIcon
-                                  id={props.controls.model.selection.current()?.provider?.id ?? ""}
-                                  class="size-4 shrink-0 opacity-40 group-hover:opacity-100 transition-opacity duration-150"
-                                  style={{ "will-change": "opacity", transform: "translateZ(0)" }}
-                                />
+                              <Show when={props.controls.model.selection.current()}>
+                                {(current) => (
+                                  <span class="shrink-0 opacity-40 group-hover:opacity-100 transition-opacity duration-150">
+                                    <ModelMark model={current()} />
+                                  </span>
+                                )}
                               </Show>
                               <span class="truncate">
-                                {props.controls.model.selection.current()?.name ??
-                                  language.t("dialog.model.select.title")}
+                                {props.controls.model.selection.current()
+                                  ? modelDisplayName(props.controls.model.selection.current()!)
+                                  : language.t("dialog.model.select.title")}
                               </span>
                               <Icon name="chevron-down" size="small" class="shrink-0" />
                             </Button>
@@ -1793,16 +1816,17 @@ export const PromptInput: Component<PromptInputProps> = (props) => {
                                 class="min-w-0 max-w-[320px] text-13-regular text-text-base group"
                                 data-action="prompt-model"
                               >
-                                <Show when={props.controls.model.selection.current()?.provider?.id}>
-                                  <ProviderIcon
-                                    id={props.controls.model.selection.current()?.provider?.id ?? ""}
-                                    class="size-4 shrink-0 opacity-40 group-hover:opacity-100 transition-opacity duration-150"
-                                    style={{ "will-change": "opacity", transform: "translateZ(0)" }}
-                                  />
+                                <Show when={props.controls.model.selection.current()}>
+                                  {(current) => (
+                                    <span class="shrink-0 opacity-40 group-hover:opacity-100 transition-opacity duration-150">
+                                      <ModelMark model={current()} />
+                                    </span>
+                                  )}
                                 </Show>
                                 <span class="truncate">
-                                  {props.controls.model.selection.current()?.name ??
-                                    language.t("dialog.model.select.title")}
+                                  {props.controls.model.selection.current()
+                                    ? modelDisplayName(props.controls.model.selection.current()!)
+                                    : language.t("dialog.model.select.title")}
                                 </span>
                                 <Icon name="chevron-down" size="small" class="shrink-0" />
                               </Button>

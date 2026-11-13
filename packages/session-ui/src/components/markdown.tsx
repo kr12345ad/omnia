@@ -33,6 +33,7 @@ import { markdownBlockKey, type MarkdownToken } from "./markdown-worker-protocol
 import { shouldResetCodeTokens, type RenderedCodeState } from "./markdown-code-state"
 import { getCachedMarkdown, sanitizeMarkdown, touchCachedMarkdown, type MarkdownCacheEntry } from "./markdown-cache"
 import { inlineCodeKind } from "./markdown-inline-code-kind"
+import { linkChipLabel } from "./markdown-link"
 
 type RenderedBlock =
   | (MarkdownCacheEntry & { key: string; mode: Exclude<Block["mode"], "code"> })
@@ -266,6 +267,34 @@ function markCodeLinks(root: HTMLDivElement) {
   }
 }
 
+function linkIcon() {
+  const icon = document.createElement("span")
+  icon.className = "external-link-icon"
+  icon.setAttribute("aria-hidden", "true")
+  // A constant string, never ad or model text, so innerHTML cannot introduce
+  // anything that was not written here.
+  icon.innerHTML =
+    '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c1.7 1.6 2.6 3.6 2.6 6S9.7 12.4 8 14c-1.7-1.6-2.6-3.6-2.6-6S6.3 3.6 8 2Z"/></svg>'
+  return icon
+}
+
+// A link chip: a web icon and the link's own title. A bare URL is titled by its
+// host, so a model that writes a full URL does not leave a long trailing string
+// in the middle of a sentence. The full URL stays in the tooltip and the href.
+function markLinkChips(root: HTMLDivElement) {
+  const links = Array.from(root.querySelectorAll<HTMLAnchorElement>('a.external-link:not([data-link-chip="true"])'))
+  for (const link of links) {
+    const href = link.getAttribute("href") ?? ""
+    if (!/^https?:\/\//i.test(href)) continue
+    const label = document.createElement("span")
+    label.className = "external-link-label"
+    label.textContent = linkChipLabel(link.textContent ?? "", href)
+    link.dataset.linkChip = "true"
+    link.title = href
+    link.replaceChildren(linkIcon(), label)
+  }
+}
+
 function markInlineCode(root: HTMLDivElement) {
   const codeNodes = Array.from(root.querySelectorAll(":not(pre) > code"))
   for (const code of codeNodes) {
@@ -284,6 +313,7 @@ function decorate(root: HTMLDivElement, labels: CopyLabels) {
   if (!document.body.hasAttribute("data-new-layout")) return
   markInlineCode(root)
   markCodeLinks(root)
+  markLinkChips(root)
 }
 
 function setupCodeCopy(root: HTMLDivElement, getLabels: () => CopyLabels) {

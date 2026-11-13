@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PDF</title>
+  </head>
+  <body>
+    <div class="pdf-shell">
+      <header class="pdf-toolbar">
+        <div class="pdf-toolbar-group">
+          <button id="pdf-prev" class="pdf-button" type="button" aria-label="Previous page" title="Previous page" disabled>
+            Prev
+          </button>
+          <span id="pdf-page" class="pdf-label" data-slot="pdf-page" aria-live="polite">1 / 1</span>
+          <button id="pdf-next" class="pdf-button" type="button" aria-label="Next page" title="Next page" disabled>
+            Next
+          </button>
+        </div>
+        <div class="pdf-toolbar-group">
+          <button id="pdf-zoom-out" class="pdf-button" type="button" aria-label="Zoom out" title="Zoom out" disabled>
+            −
+          </button>
+          <span id="pdf-zoom" class="pdf-label" data-slot="pdf-zoom">100%</span>
+          <button id="pdf-zoom-in" class="pdf-button" type="button" aria-label="Zoom in" title="Zoom in" disabled>
+            +
+          </button>
+        </div>
+        <span id="pdf-fields" class="pdf-label pdf-fields" data-slot="pdf-fields">Loading PDF…</span>
+        <span id="pdf-file" class="pdf-file" data-slot="pdf-file"></span>
+        <button id="pdf-save" class="pdf-button pdf-save" type="button" data-slot="pdf-save" disabled>
+          Save filled PDF
+        </button>
+      </header>
+      <div id="pdf-status" class="pdf-status" data-slot="pdf-status" role="status" aria-live="polite">
+        Loading PDF…
+      </div>
+      <div class="pdf-viewer-frame">
+        <div id="viewerContainer" class="pdf-viewer-container" role="main">
+          <div id="viewer" class="pdfViewer"></div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="./pdf.tsx"></script>
+  </body>
+</html>

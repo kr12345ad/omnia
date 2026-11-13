@@ -105,7 +105,10 @@ export function isTimelineReady(messages: Message[] | undefined, loading: boolea
 export function selectVisibleUserMessages(messages: UserMessage[], revertMessageID?: string) {
   if (!revertMessageID) return messages
   const boundary = messages.findIndex((message) => message.id === revertMessageID)
-  return boundary < 0 ? messages : messages.slice(0, boundary)
+  // The loaded window starts at the newest page and only prepends older pages.
+  // A boundary outside it therefore precedes every loaded message, so all of
+  // them are hidden; showing the window would resurrect reverted turns.
+  return boundary < 0 ? [] : messages.slice(0, boundary)
 }
 
 export async function loadOlderTimeline(input: {

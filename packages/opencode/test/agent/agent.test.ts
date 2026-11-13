@@ -181,6 +181,20 @@ it.instance("compaction agent denies all permissions", () =>
   }),
 )
 
+it.instance("chat surface agent is hidden and denies every tool", () =>
+  Effect.gen(function* () {
+    const chat = yield* load((svc) => svc.get("chat"))
+    expect(chat).toBeDefined()
+    expect(chat?.hidden).toBe(true)
+    expect(chat?.prompt).toContain("You have no tools")
+    expect(evalPerm(chat, "bash")).toBe("deny")
+    expect(evalPerm(chat, "edit")).toBe("deny")
+    expect(evalPerm(chat, "read")).toBe("deny")
+    expect(evalPerm(chat, "task")).toBe("deny")
+    expect(evalPerm(chat, "discussion_room")).toBe("deny")
+  }),
+)
+
 it.instance(
   "custom agent from config creates new agent",
   () =>

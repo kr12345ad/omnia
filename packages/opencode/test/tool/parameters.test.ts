@@ -229,8 +229,13 @@ describe("tool parameters", () => {
     test("accepts name", () => {
       expect(parse(Skill, { name: "foo" }).name).toBe("foo")
     })
-    test("rejects missing name", () => {
-      expect(accepts(Skill, {})).toBe(false)
+    test("accepts a listing call without a name", () => {
+      const parsed = parse(Skill, {})
+      expect(parsed.name).toBeUndefined()
+      expect(parsed.query).toBeUndefined()
+    })
+    test("accepts a search query", () => {
+      expect(parse(Skill, { query: "react" }).query).toBe("react")
     })
   })
 

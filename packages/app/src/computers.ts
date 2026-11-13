@@ -79,6 +79,7 @@ export interface ComputerPlatform {
   list(): Promise<ComputerSummary[]>
   stop(computerId: string, reason?: string): Promise<ComputerControlResult>
   connect(computerId: string): Promise<ComputerControlResult>
+  rename(computerId: string, name: string): Promise<ComputerSummary>
   pair: {
     create(name?: string): Promise<ComputerPairing>
     cancel(code: string): Promise<boolean>

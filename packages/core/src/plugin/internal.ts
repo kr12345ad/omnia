@@ -28,6 +28,7 @@ import { SkillV2 } from "../skill"
 import { State } from "../state"
 import { FetchHttpClient, HttpClient } from "effect/unstable/http"
 import { AgentPlugin } from "./agent"
+import { ChatPlugin } from "./chat"
 import { CommandPlugin } from "./command"
 import { ModelsDevPlugin } from "./models-dev"
 import { ProviderPlugins } from "./provider"
@@ -113,6 +114,7 @@ const layer = Layer.effectDiscard(
         yield* add(SkillPlugin.Plugin)
         yield* add(ModelsDevPlugin)
         yield* add(ConfigAgentPlugin.Plugin)
+        yield* add(ChatPlugin.Plugin)
         yield* add(ConfigCommandPlugin.Plugin)
         yield* add(ConfigSkillPlugin.Plugin)
         for (const item of ProviderPlugins) yield* add(item)

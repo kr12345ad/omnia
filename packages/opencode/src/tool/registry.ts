@@ -10,6 +10,8 @@ import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
+import { SendMessageTool } from "./send_message"
+import { TriggerDormantAgentTool } from "./trigger_dormant_agent"
 import { DiscussionRoomTool } from "./discussion"
 import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
@@ -120,6 +122,8 @@ const layer = Layer.effect(
 
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
+    const sendMessage = yield* SendMessageTool
+    const triggerDormant = yield* TriggerDormantAgentTool
     const discussion = yield* DiscussionRoomTool
     const read = yield* ReadTool
     const question = yield* QuestionTool
@@ -253,6 +257,8 @@ const layer = Layer.effect(
           edit: Tool.init(edit),
           write: Tool.init(writetool),
           task: Tool.init(task),
+          sendMessage: Tool.init(sendMessage),
+          triggerDormant: Tool.init(triggerDormant),
           discussion: Tool.init(discussion),
           fetch: Tool.init(webfetch),
           todo: Tool.init(todo),
@@ -287,13 +293,14 @@ const layer = Layer.effect(
           builtin: [
             tool.invalid,
             ...(questionEnabled ? [tool.question] : []),
-            tool.shell,
-            tool.read,
-            tool.glob,
-            tool.grep,
-            tool.edit,
-            tool.write,
+            // Cut-down web deployment: no host filesystem or shell for web
+            // users, ever. Set OMNIA_WEB_CUTDOWN=1 on the hosted server.
+            ...(process.env.OMNIA_WEB_CUTDOWN === "1"
+              ? []
+              : [tool.shell, tool.read, tool.glob, tool.grep, tool.edit, tool.write]),
             tool.task,
+            tool.sendMessage,
+            tool.triggerDormant,
             tool.discussion,
             tool.fetch,
             tool.todo,
@@ -317,7 +324,7 @@ const layer = Layer.effect(
             tool.superskill,
             tool.memory,
             tool.visualize,
-            ...(tool.execute ? [tool.execute] : []),
+            ...(process.env.OMNIA_WEB_CUTDOWN === "1" ? [] : tool.execute ? [tool.execute] : []),
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
           ],

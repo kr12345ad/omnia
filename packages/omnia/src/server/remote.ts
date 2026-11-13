@@ -162,10 +162,9 @@ export class RemoteComputerDriver implements ServerComputerDriver {
       this.browserCall<{ files: string[] }>("upload", { files: [...files], tabId, sessionId }),
   }
   lastSeenAt: number
-  private readonly name: string
   private readonly platform: string
   private readonly architecture: string | undefined
-  private readonly info: ComputerInfo
+  private info: ComputerInfo
   private readonly capabilityList: readonly CapabilitySupport[]
   private readonly now: () => number
   private readonly timeouts: Readonly<Record<string, number>>
@@ -178,7 +177,6 @@ export class RemoteComputerDriver implements ServerComputerDriver {
 
   constructor(input: RemoteDriverInput) {
     this.id = input.id
-    this.name = input.name
     this.platform = input.platform
     this.architecture = input.architecture
     this.now = input.now ?? Date.now
@@ -312,6 +310,10 @@ export class RemoteComputerDriver implements ServerComputerDriver {
 
   getInfo(): Promise<ComputerInfo> {
     return Promise.resolve(this.info)
+  }
+
+  setName(name: string): void {
+    this.info = { ...this.info, name }
   }
 
   capabilities(): readonly CapabilitySupport[] {

@@ -94,6 +94,19 @@ mock.module("@/context/language", () => ({
 }))
 
 const { SettingsUsage } = isServer ? ({} as { SettingsUsage: never }) : await import("@/components/settings-usage")
+const { recordFreeZenLimit } = await import("@/utils/free-zen")
+
+/** A free-Zen refusal that still applies, and one whose day has already reset. */
+const refuseFreeZen = () => {
+  const at = Date.now()
+  recordFreeZenLimit({
+    at,
+    resetsAt: at + 60_000,
+    provider: "opencode",
+    message: "Subscribe to OpenCode Go for reliable access to the best open-source models for $10/month.",
+  })
+}
+const expireFreeZen = () => recordFreeZenLimit({ at: 0, resetsAt: 1 })
 
 /**
  * The free tier as the entitlement response reports it.
@@ -174,6 +187,33 @@ afterAll(() => {
 })
 
 describe.skipIf(isServer)("usage limits in settings", () => {
+  test("a spent free Zen allowance is shown without an account, then expires", async () => {
+    expireFreeZen()
+    const without = await mount(undefined)
+
+    // No refusal means no row: the gateway never sent a remaining count, and
+    // this surface does not invent one.
+    expect(without.container.querySelector("[data-slot=free-zen-limit]")).toBeNull()
+    without.unmount()
+
+    refuseFreeZen()
+    const spent = await mount(undefined)
+
+    const row = spent.container.querySelector("[data-slot=free-zen-limit]")
+    expect(row?.textContent).toContain("Free OpenCode Zen")
+    expect(row?.textContent).toContain("None left")
+    expect(row?.textContent).toContain("Resets")
+    // The refusal stands even though the entitlement could not be read.
+    expect(spent.text()).toContain("Sign in to see what your plan allows.")
+    spent.unmount()
+
+    // Yesterday's refusal is not today's budget.
+    expireFreeZen()
+    const reset = await mount(undefined)
+    expect(reset.container.querySelector("[data-slot=free-zen-limit]")).toBeNull()
+    reset.unmount()
+  })
+
   test("unlimited allowances get no row at all, never a full bar or a zero", async () => {
     const surface = await mount(FREE)
 
@@ -188,24 +228,24 @@ describe.skipIf(isServer)("usage limits in settings", () => {
     surface.unmount()
   })
 
-  test("a daily allowance is named daily and a monthly one monthly", async () => {
+  test("every capability but computers reports a percentage, not its allowance", async () => {
     const surface = await mount(FREE)
 
-    // browser_automation is the one daily rule in the free matrix, and the
-    // wording for it must not be the monthly one every other allowance uses.
-    expect(surface.value("Browser automation")).toBe("12 of 500 used per day")
-    expect(surface.value("Vault sign-ins")).toBe("1 of 3 used this month")
-    // The same capability is a monthly budget on other plans, so the period is
-    // never a property of the capability id.
-    expect(surface.value("Credential vault")).toBe("2 of 5 used this month")
+    // A percentage says how close the ceiling is without publishing the tier's
+    // internal allowance. The period still decides which counter was spent, so
+    // a daily and a monthly rule can never be mixed up.
+    expect(surface.value("Browser automation")).toBe("2%")
+    expect(surface.value("Vault sign-ins")).toBe("33%")
+    expect(surface.value("Credential vault")).toBe("40%")
     surface.unmount()
   })
 
-  test("the used count and the limit are both shown against each other", async () => {
+  test("no capability name or row leaks the raw used and limit numbers", async () => {
     const surface = await mount(FREE)
 
-    expect(surface.value("Browser automation")).toContain("12 of 500")
-    expect(surface.value("Live view")).toBe("4 of 500 used this month")
+    expect(surface.value("Live view")).toBe("1%")
+    expect(surface.value("Browser automation")).not.toContain("500")
+    expect(surface.value("Vault sign-ins")).not.toContain("of")
     // Unlimited allowances get no row at all, so there is no value to read.
     expect(surface.row("Subagents")).toBeUndefined()
     surface.unmount()
@@ -248,7 +288,7 @@ describe.skipIf(isServer)("usage limits in settings", () => {
       capabilities: { vault_login: { allowed: true, code: "granted", used: 2, limit: 9 } },
     })
 
-    expect(surface.value("Vault sign-ins")).toBe("2 of 9 used")
+    expect(surface.value("Vault sign-ins")).toBe("22%")
     surface.unmount()
   })
 
@@ -263,7 +303,7 @@ describe.skipIf(isServer)("usage limits in settings", () => {
 
     // The id shows rather than nothing, exactly as the paywall names a
     // capability it has no label for, and no period is invented for it.
-    expect(surface.value("some_new_capability")).toBe("1 of 4 used")
+    expect(surface.value("some_new_capability")).toBe("25%")
     surface.unmount()
   })
 

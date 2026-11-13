@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test"
 import {
   activeCommandRegistrations,
   addCommandRegistration,
+  commandCatalogEntry,
   commandPaletteOptions,
+  mergeCommandCatalog,
   resolveKeybindOption,
   type CommandOption,
 } from "./command"
@@ -18,6 +20,33 @@ const paletteOptions: CommandOption[] = [
 describe("commandPaletteOptions", () => {
   test("keeps visible enabled commands", () => {
     expect(commandPaletteOptions(paletteOptions).map((option) => option.id)).toEqual(["settings.open", "session.undo"])
+  })
+})
+
+describe("command catalog", () => {
+  test("keeps hidden metadata so hidden commands stay out of keybind settings", () => {
+    expect(commandCatalogEntry({ id: "session.hidden", title: "Hidden", hidden: true })).toMatchObject({
+      title: "Hidden",
+      hidden: true,
+    })
+  })
+
+  test("drops options without a title", () => {
+    expect(commandCatalogEntry({ id: "empty", title: "" })).toBeUndefined()
+  })
+
+  test("merges live commands without dropping entries registered elsewhere", () => {
+    const next = mergeCommandCatalog(
+      { "session.undo": { title: "Undo" } },
+      [
+        { id: "session.redo", title: "Redo", slash: "redo" },
+        { id: "session.undo", title: "Undo again", hidden: true },
+      ],
+    )
+
+    expect(next["session.redo"]).toMatchObject({ title: "Redo", slash: "redo" })
+    expect(next["session.undo"]).toMatchObject({ title: "Undo again", hidden: true })
+    expect(Object.keys(next).sort()).toEqual(["session.redo", "session.undo"])
   })
 })
 

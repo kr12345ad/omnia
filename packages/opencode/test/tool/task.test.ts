@@ -16,7 +16,7 @@ import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 
-import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
+import { TaskTool, canDeliverBackgroundResult, type TaskPromptOps } from "../../src/tool/task"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -749,6 +749,29 @@ describe("tool.task", () => {
     }),
   )
 
+  it.effect("only delivers a background completion to a live parent session", () =>
+    Effect.gen(function* () {
+      expect(canDeliverBackgroundResult(undefined)).toBe(false)
+      expect(canDeliverBackgroundResult({ time: { created: 1, updated: 1 } } as unknown as Session.Info)).toBe(true)
+      expect(
+        canDeliverBackgroundResult({ time: { created: 1, updated: 1, archived: 2 } } as unknown as Session.Info),
+      ).toBe(false)
+    }),
+  )
+
+  background.instance("description advertises background mode when the experiment is enabled", () =>
+    Effect.gen(function* () {
+      const agent = yield* Agent.Service
+      const build = yield* agent.get("build")
+      const registry = yield* ToolRegistry.Service
+      const description =
+        (yield* registry.tools({ ...ref, agent: build })).find((tool) => tool.id === TaskTool.id)?.description ?? ""
+
+      expect(description).toContain("background=true")
+      expect(description).toContain("synthetic message")
+    }),
+  )
+
   background.instance("execute launches background tasks without waiting for completion", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
@@ -798,10 +821,12 @@ describe("tool.task", () => {
       const updated = defer<SessionPrompt.PromptInput>()
       const injected = defer<SessionPrompt.PromptInput>()
       let prompts = 0
+      let injections = 0
       const promptOps: TaskPromptOps = {
         ...stubOps(),
         prompt: (input) => {
           if (input.sessionID === chat.id) {
+            injections += 1
             injected.resolve(input)
             return Effect.succeed(reply(input, "done"))
           }
@@ -858,6 +883,62 @@ describe("tool.task", () => {
       expect(notification.variant).toBe("xhigh")
       expect(notification.parts[0]?.type).toBe("text")
       if (notification.parts[0]?.type === "text") expect(notification.parts[0].text).toContain("second done")
+      expect(injections).toBe(1)
+    }),
+  )
+
+  background.instance("does not wake an archived parent with a background completion", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const gate = defer<void>()
+      const injected = defer<SessionPrompt.PromptInput>()
+      let injections = 0
+      const promptOps: TaskPromptOps = {
+        ...stubOps(),
+        prompt: (input) => {
+          if (input.sessionID === chat.id) {
+            injections += 1
+            injected.resolve(input)
+            return Effect.succeed(reply(input, "injected"))
+          }
+          return Effect.promise(() => gate.promise).pipe(Effect.as(reply(input, "background done")))
+        },
+      }
+
+      const result = yield* def.execute(
+        {
+          description: "inspect bug",
+          prompt: "look into the cache key path",
+          subagent_type: "general",
+          background: true,
+        },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      )
+
+      // The task cannot finish until the gate opens, so the archive always
+      // lands before the completion is injected.
+      yield* sessions.setArchived({ sessionID: chat.id, time: Date.now() })
+      gate.resolve()
+      expect((yield* jobs.wait({ id: result.metadata.sessionId, timeout: 1_000 })).info?.status).toBe("completed")
+
+      // Let the forked notification run; it must observe the archived parent.
+      yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 0)))
+      yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 0)))
+
+      expect(injections).toBe(0)
     }),
   )
 

@@ -18,7 +18,7 @@ import {
 } from "@/server/shared/pty-ticket"
 import { Effect, Layer, Option, Queue, Schema } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
-import { HttpApiBuilder } from "effect/unstable/httpapi"
+import { HttpApiBuilder, HttpApiError } from "effect/unstable/httpapi"
 import * as Socket from "effect/unstable/socket/Socket"
 import { InstanceHttpApi } from "../api"
 import * as ApiError from "../errors"
@@ -62,11 +62,16 @@ export const ptyHandlers = HttpApiBuilder.group(InstanceHttpApi, "pty", (handler
     })
 
     const list = Effect.fn("PtyHttpApi.list")(function* () {
+      if (cutdown) return []
       const sessions = yield* pty(Pty.Service.use((service) => service.list()))
       return sessions.filter((info) => info.status === "running")
     })
 
+    // Cut-down web deployment: web users get no host shell.
+    const cutdown = process.env.OMNIA_WEB_CUTDOWN === "1"
+
     const create = Effect.fn("PtyHttpApi.create")(function* (ctx: { payload: typeof Pty.CreateInput.Type }) {
+      if (cutdown) return yield* new HttpApiError.BadRequest({})
       const cwd = ctx.payload.cwd || (yield* InstanceState.context).directory
       const shell = yield* plugin.trigger("shell.env", { cwd }, { env: {} as Record<string, string> })
       return yield* pty(
@@ -144,6 +149,7 @@ export const ptyHandlers = HttpApiBuilder.group(InstanceHttpApi, "pty", (handler
     })
 
     const connectToken = Effect.fn("PtyHttpApi.connectToken")(function* (ctx: { params: { ptyID: PtyID } }) {
+      if (cutdown) return yield* new ApiError.PtyForbiddenError({ message: "Terminal is disabled on the web workspace." })
       const request = yield* HttpServerRequest.HttpServerRequest
       if (request.headers[PTY_CONNECT_TOKEN_HEADER] !== PTY_CONNECT_TOKEN_HEADER_VALUE || !validOrigin(request, cors))
         return yield* new ApiError.PtyForbiddenError({ message: "Invalid PTY connect token request" })
@@ -186,6 +192,7 @@ export const ptyConnectHandlers = HttpApiBuilder.group(PtyConnectApi, "pty-conne
         params: { ptyID: PtyID }
         request: HttpServerRequest.HttpServerRequest
       }) {
+        if (process.env.OMNIA_WEB_CUTDOWN === "1") return HttpServerResponse.empty({ status: 403 })
         const exists = yield* pty(Pty.Service.use((service) => service.get(ctx.params.ptyID))).pipe(
           Effect.map((info) => info.status === "running"),
           Effect.catchTag("Pty.NotFoundError", () => Effect.succeed(false)),

@@ -37,6 +37,17 @@ export default defineConfig({
   },
   build: {
     target: "esnext",
+    // Three surfaces share this app: the full workspace at index.html, the
+    // tool-free browser chat at chat.html, and the mobile chat shell at
+    // mobile.html. The server embeds every file under dist, so no extra build
+    // step is needed for the mobile entry.
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        chat: "chat.html",
+        mobile: "mobile.html",
+      },
+    },
     sourcemap: sourcemaps,
     minify: "esbuild",
     cssMinify: "esbuild",

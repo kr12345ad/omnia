@@ -1,6 +1,7 @@
 import { app, BrowserWindow, ipcMain } from "electron"
 import type { IpcMainInvokeEvent, WebContents, WebFrameMain } from "electron"
 import { registerBillingIpcHandlers } from "./billing"
+import { registerAdsIpcHandlers } from "./ads"
 import { createOmniaOperations } from "./operations"
 import { omniaDriverRegistry } from "./registry"
 import type { OmniaDriverRegistry } from "./registry"
@@ -34,6 +35,7 @@ export function registerOmniaIpcHandlers(registry: OmniaDriverRegistry = omniaDr
   // Billing is served entirely by the control plane and needs no driver, so it
   // registers with the other control-plane handlers rather than in src/main/ipc.ts.
   registerBillingIpcHandlers()
+  registerAdsIpcHandlers()
   const operations = createOmniaOperations(registry)
   const senders = new Map<number, SenderState>()
 

@@ -80,10 +80,15 @@ export namespace Timeline {
       if (index >= 0) turns.splice(index, 0, turn)
       turnByUserID.set(user.id, turn)
     })
-    const activeMessageID = turns.at(-1)?.user.id
+    // The projected user list is the visibility authority: a staged revert
+    // removes turns from it. Never render a turn the projection no longer
+    // contains, even when the raw message page still has it.
+    const visibleUserIDs = new Set(projectedUserMessages.map((user) => user.id))
+    const visibleTurns = turns.filter((turn) => visibleUserIDs.has(turn.user.id))
+    const activeMessageID = visibleTurns.at(-1)?.user.id
     return {
       activeMessageID,
-      rows: turns.flatMap((turn, index) =>
+      rows: visibleTurns.flatMap((turn, index) =>
         constructMessageRows(
           turn.user,
           getMessageParts,

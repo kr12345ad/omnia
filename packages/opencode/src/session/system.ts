@@ -18,7 +18,6 @@ import PROMPT_TRINITY from "./prompt/trinity.txt"
 import type { Provider } from "@/provider/provider"
 import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
-import { Skill } from "@/skill"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Location } from "@opencode-ai/core/location"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
@@ -101,7 +100,6 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Sy
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const skill = yield* Skill.Service
     const mcp = yield* MCP.Service
     const locations = yield* LocationServiceMap.Service
 
@@ -149,14 +147,12 @@ const layer = Layer.effect(
       skills: Effect.fn("SystemPrompt.skills")(function* (agent: Agent.Info) {
         if (Permission.disabled(["skill"], agent.permission).has("skill")) return
 
-        const list = yield* skill.available(agent)
-
+        // Keep the skill catalog out of the system prompt. With hundreds or thousands of installed
+        // skills, listing every name and description here costs more tokens than the conversation
+        // itself. The skill tool exposes the catalog lazily, and only its output pays that cost.
         return [
           "Skills provide specialized instructions and workflows for specific tasks.",
-          "Use the skill tool to load a skill when a task matches its description.",
-          // the agents seem to ingest the information about skills a bit better if we present a more verbose
-          // version of them here and a less verbose version in tool description, rather than vice versa.
-          Skill.fmt(list, { verbose: true }),
+          "The skill catalog is loaded on demand. Call the skill tool with no arguments to list skill names, with `query` to search names and descriptions, or with `name` to load a skill. Do not guess a skill name.",
         ].join("\n")
       }),
 
@@ -190,7 +186,7 @@ const locationServiceMapNode = LayerNode.make({
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Skill.node, MCP.node, locationServiceMapNode],
+  deps: [MCP.node, locationServiceMapNode],
 })
 
 export * as SystemPrompt from "./system"

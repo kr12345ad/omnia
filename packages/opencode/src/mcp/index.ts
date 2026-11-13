@@ -350,6 +350,14 @@ const layer = Layer.effect(
       key: string,
       mcp: ConfigMCPV1.Info & { type: "local" },
     ) {
+      // Cut-down web deployment: local MCP servers spawn processes on the
+      // shared host, so they are refused. Remote MCP servers stay.
+      if (process.env.OMNIA_WEB_CUTDOWN === "1") {
+        return {
+          client: undefined as MCPClient | undefined,
+          status: { status: "failed" as const, error: "Local MCP servers are disabled on the web workspace." },
+        }
+      }
       const [cmd, ...args] = mcp.command
       const baseDir = yield* InstanceState.directory
       const cwd = mcp.cwd ? path.resolve(baseDir, mcp.cwd) : baseDir

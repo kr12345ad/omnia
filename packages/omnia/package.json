@@ -23,12 +23,17 @@
     "standalone": "bun ./src/server/standalone.ts",
     "enterprise": "bun ./src/server/cli.ts",
     "build:server": "bun build ./src/server/cli.ts --compile --outfile ./dist/omnia-server",
+    "generate:grpc": "bun ./script/generate-grpc-descriptor.ts",
     "license": "bun ./script/license.ts"
   },
   "devDependencies": {
     "@tsconfig/bun": "catalog:",
     "@types/bun": "catalog:",
-    "@typescript/native-preview": "catalog:"
+    "@typescript/native-preview": "catalog:",
+    "protobufjs": "8.8.1"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@grpc/grpc-js": "1.14.7",
+    "@grpc/proto-loader": "0.8.1"
+  }
 }

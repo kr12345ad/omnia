@@ -4,7 +4,7 @@ import { Progress } from "@opencode-ai/ui/progress"
 import { useLanguage } from "@/context/language"
 import { usePlatform } from "@/context/platform"
 import { checkoutPlan, openBillingPortal, useEntitlement } from "@/context/entitlement"
-import { COMPUTERS, usageLimits, type UsageLimit } from "./usage-limits"
+import { COMPUTERS, usageLimits, usagePercent, type UsageLimit } from "./usage-limits"
 import { SettingsRuns } from "./settings-runs"
 
 // The Account tab: plan, purchase actions, and every finite allowance as a bar.
@@ -73,40 +73,30 @@ export const SettingsAccount = () => {
     return new Intl.NumberFormat(language.intl(), { style: "currency", currency: "USD" }).format(usd)
   }
 
+  // Computers keep their exact count because the allowance is a number of
+  // machines somebody can name and buy more of. Every other row is shown as a
+  // percentage: it says how close the ceiling is without publishing the tier's
+  // internal allowance, and it reads the same on a daily and a monthly plan.
   const valueText = (limit: UsageLimit) => {
     // No ceiling means no bar and no count. usageLimits drops unknown-plan rows
     // before they arrive, so an undefined limit here is the server's null: the
     // JSON form of Infinity, i.e. genuinely unlimited rather than uncounted.
     if (limit.limit === undefined) return t("settings.usage.unlimited") ?? "Unlimited"
     if (limit.id === COMPUTERS) {
-      if (limit.used === undefined) return t("settings.usage.allowed", { limit: number().format(limit.limit!) })
+      if (limit.used === undefined) return t("settings.usage.allowed", { limit: number().format(limit.limit) })
       return t("settings.usage.computersUsed", {
         used: number().format(limit.used),
-        limit: number().format(limit.limit!),
+        limit: number().format(limit.limit),
       })
     }
-    const base =
-      limit.used === undefined
-        ? t("settings.usage.allowed", { limit: number().format(limit.limit!) })
-        : limit.period === "day"
-          ? t("settings.usage.usedPerDay", { used: number().format(limit.used), limit: number().format(limit.limit!) })
-          : limit.period === "month"
-            ? t("settings.usage.usedPerMonth", {
-                used: number().format(limit.used),
-                limit: number().format(limit.limit!),
-              })
-            : t("settings.usage.used", { used: number().format(limit.used), limit: number().format(limit.limit!) })
+    const percent = usagePercent(limit)
+    const base = percent === undefined ? t("settings.usage.unlimited") ?? "Unlimited" : `${percent}%`
     if (limit.resetsAt === undefined) return base
     const resets = t("settings.usage.resetsOn", { date: date(limit.resetsAt) })
     // The date alone is still informative when the sentence is untranslated.
     const suffix = resets ?? date(limit.resetsAt)
-    return base === undefined ? suffix : `${base} · ${suffix}`
+    return `${base} · ${suffix}`
   }
-
-  const percent = (limit: UsageLimit) =>
-    limit.limit === undefined || limit.limit <= 0 || limit.used === undefined
-      ? 0
-      : Math.min(100, Math.round((limit.used / limit.limit) * 100))
 
   return (
     <>

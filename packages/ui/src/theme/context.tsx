@@ -130,6 +130,15 @@ function getSystemMode(): "light" | "dark" {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
 }
 
+// Some window managers (notably older GNOME sessions on X11) never update the
+// media query, so the app would stick on the light theme. The main process
+// reads the OS appearance through nativeTheme and serves it on demand.
+function systemDarkFromDesktop(): Promise<boolean | undefined> {
+  const api = (window as { api?: { systemDark?: () => Promise<boolean> } }).api
+  if (!api?.systemDark) return Promise.resolve(undefined)
+  return api.systemDark().catch(() => undefined)
+}
+
 function applyThemeCss(theme: DesktopTheme, themeId: string, mode: "light" | "dark") {
   const isDark = mode === "dark"
   const variant = isDark ? theme.dark : theme.light
@@ -254,6 +263,12 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
 
     onMount(() => {
       makeEventListener(window, "storage", onStorage)
+
+      void systemDarkFromDesktop().then((dark) => {
+        if (dark === undefined) return
+        if (store.colorScheme !== "system") return
+        setStore("mode", dark ? "dark" : "light")
+      })
 
       const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)")
       const onMedia = () => {

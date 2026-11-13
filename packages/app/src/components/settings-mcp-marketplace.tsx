@@ -53,6 +53,7 @@ export const SettingsMcpMarketplace: Component<{ directory?: string }> = (props)
     sort: "popular" as MarketplaceSort,
     page: 1,
     view: "browse" as "browse" | "installed",
+    filtersOpen: false,
     selected: undefined as MarketplaceServer | undefined,
     busy: undefined as string | undefined,
     checking: undefined as string | undefined,
@@ -109,6 +110,10 @@ export const SettingsMcpMarketplace: Component<{ directory?: string }> = (props)
   const pageCount = () => Math.max(1, Math.ceil(results().total / PAGE))
   const hasFilters = () =>
     query().trim().length > 0 || category() !== CATEGORY_ALL || store.runtime !== "all" || store.sort !== "popular"
+  const activeFilterCount = () =>
+    [query().trim().length > 0, category() !== CATEGORY_ALL, store.runtime !== "all", store.sort !== "popular"].filter(
+      Boolean,
+    ).length
   const resetFilters = () =>
     setStore({ query: "", category: CATEGORY_ALL, runtime: "all", sort: "popular", page: 1 })
   createEffect(() => {
@@ -221,7 +226,7 @@ export const SettingsMcpMarketplace: Component<{ directory?: string }> = (props)
               {language.t("settings.mcpMarketplace.installed")} ({installed().length})
             </ButtonV2>
           </nav>
-          <div class="settings-v2-tab-search">
+          <div class="settings-v2-tab-search settings-v2-marketplace-toolbar">
             <TextInputV2
               type="search"
               appearance="base"
@@ -235,9 +240,35 @@ export const SettingsMcpMarketplace: Component<{ directory?: string }> = (props)
               autocapitalize="off"
               aria-label={language.t("settings.mcpMarketplace.search")}
             />
+            <Show when={store.view === "browse"}>
+              <ButtonV2
+                variant={store.filtersOpen ? "neutral" : "ghost"}
+                size="small"
+                icon="sliders"
+                aria-expanded={store.filtersOpen}
+                onClick={() => setStore("filtersOpen", !store.filtersOpen)}
+              >
+                {language.t("settings.mcpMarketplace.filters")}
+                <Show when={hasFilters()}> ({activeFilterCount()})</Show>
+              </ButtonV2>
+              <label class="settings-v2-marketplace-sort">
+                <span class="sr-only">{language.t("settings.mcpMarketplace.sort")}</span>
+                <select
+                  value={store.sort}
+                  onChange={(event) => setStore({ sort: event.currentTarget.value as MarketplaceSort, page: 1 })}
+                >
+                  <option value="popular">{language.t("settings.mcpMarketplace.sort.popular")}</option>
+                  <option value="name">{language.t("settings.mcpMarketplace.sort.name")}</option>
+                </select>
+              </label>
+            </Show>
           </div>
           <Show when={store.view === "browse"}>
-            <div class="settings-v2-marketplace-filters">
+            <div
+              class="settings-v2-marketplace-filters-panel"
+              hidden={!store.filtersOpen}
+              style={store.filtersOpen ? undefined : "display:none"}
+            >
               <label>
                 <span>{language.t("settings.mcpMarketplace.runtime")}</span>
                 <select
@@ -249,39 +280,29 @@ export const SettingsMcpMarketplace: Component<{ directory?: string }> = (props)
                   </For>
                 </select>
               </label>
-              <label>
-                <span>{language.t("settings.mcpMarketplace.sort")}</span>
-                <select
-                  value={store.sort}
-                  onChange={(event) => setStore({ sort: event.currentTarget.value as MarketplaceSort, page: 1 })}
-                >
-                  <option value="popular">{language.t("settings.mcpMarketplace.sort.popular")}</option>
-                  <option value="name">{language.t("settings.mcpMarketplace.sort.name")}</option>
-                </select>
-              </label>
+              <div class="settings-v2-marketplace-categories">
+                <For each={categories(catalog())}>
+                  {(item) => (
+                    <button
+                      type="button"
+                      class="settings-v2-marketplace-chip"
+                      data-active={category() === item ? "" : undefined}
+                      aria-pressed={category() === item}
+                      onClick={() => setCategory(item)}
+                    >
+                      {categoryName(item)}
+                      <span class="settings-v2-marketplace-chip-count" aria-hidden="true">
+                        {categoryCounts().get(item) ?? 0}
+                      </span>
+                    </button>
+                  )}
+                </For>
+              </div>
               <Show when={hasFilters()}>
                 <ButtonV2 variant="ghost" size="small" icon="reset" onClick={resetFilters}>
                   {language.t("common.reset")}
                 </ButtonV2>
               </Show>
-            </div>
-            <div class="settings-v2-marketplace-categories">
-              <For each={categories(catalog())}>
-                {(item) => (
-                  <button
-                    type="button"
-                    class="settings-v2-marketplace-chip"
-                    data-active={category() === item ? "" : undefined}
-                    aria-pressed={category() === item}
-                    onClick={() => setCategory(item)}
-                  >
-                    {categoryName(item)}
-                    <span class="settings-v2-marketplace-chip-count" aria-hidden="true">
-                      {categoryCounts().get(item) ?? 0}
-                    </span>
-                  </button>
-                )}
-              </For>
             </div>
           </Show>
         </Show>
@@ -441,12 +462,6 @@ export const SettingsMcpMarketplace: Component<{ directory?: string }> = (props)
 
         <Show when={!store.selected && store.view === "browse"}>
           <section class="settings-v2-section">
-            <h3 class="settings-v2-section-title">
-              {language.t("settings.mcpMarketplace.catalog")}
-              <Show when={!loading()}>
-                <span class="settings-v2-marketplace-section-count">{results().total}</span>
-              </Show>
-            </h3>
             <Show
               when={results().servers.length > 0}
               fallback={
@@ -462,8 +477,6 @@ export const SettingsMcpMarketplace: Component<{ directory?: string }> = (props)
                       <div class="settings-v2-marketplace-copy">
                         <span class="settings-v2-marketplace-name">
                           {server.name}
-                          <Tag>{categoryName(server.category)}</Tag>
-                          <Tag>{runtimeName(server)}</Tag>
                           <Show when={formatPopularity(server.popularity)}>
                             {(value) => <span class="settings-v2-marketplace-popularity">{value()}</span>}
                           </Show>
@@ -514,14 +527,6 @@ export const SettingsMcpMarketplace: Component<{ directory?: string }> = (props)
                   variant="neutral"
                   size="small"
                   disabled={store.page === 1}
-                  onClick={() => setStore("page", 1)}
-                >
-                  {language.t("settings.mcpMarketplace.first")}
-                </ButtonV2>
-                <ButtonV2
-                  variant="neutral"
-                  size="small"
-                  disabled={store.page === 1}
                   onClick={() => setStore("page", store.page - 1)}
                 >
                   {language.t("settings.mcpMarketplace.previous")}
@@ -540,14 +545,6 @@ export const SettingsMcpMarketplace: Component<{ directory?: string }> = (props)
                   onClick={() => setStore("page", store.page + 1)}
                 >
                   {language.t("settings.mcpMarketplace.next")}
-                </ButtonV2>
-                <ButtonV2
-                  variant="neutral"
-                  size="small"
-                  disabled={store.page === pageCount()}
-                  onClick={() => setStore("page", pageCount())}
-                >
-                  {language.t("settings.mcpMarketplace.last")}
                 </ButtonV2>
               </nav>
             </Show>

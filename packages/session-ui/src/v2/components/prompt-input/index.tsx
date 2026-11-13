@@ -24,6 +24,7 @@ import type {
 import type { PromptInputV2Interaction, PromptInputV2SelectControl } from "./interaction"
 import { PromptInputV2Paywall, PromptInputV2ShellPaywall, promptInputV2VisionOwed, type PromptInputV2Paywalls } from "./paywall"
 import { PromptInputV2VariantSlider } from "./variant-slider"
+import { PromptInputV2ContextMeter } from "./context-meter"
 import "./attachments.css"
 
 export type {
@@ -46,6 +47,9 @@ export type PromptInputV2Props = {
   class?: string
   modelControl?: JSX.Element
   variantControlVisible?: boolean
+  /** Live context-window usage; omitted when the host has no session data. */
+  contextUsed?: number
+  contextLimit?: number
   attachKeybind?: string[]
   attachShortcut?: string
   /** A fleet without file attachments offers no picker at all. */
@@ -57,6 +61,8 @@ export type PromptInputV2Props = {
    * Omitted means this composer has no billing context and draws no notice.
    */
   paywalls?: PromptInputV2Paywalls
+  /** Optional host-provided microphone control, rendered next to submit. */
+  voiceControl?: JSX.Element
 }
 
 export function PromptInputV2(props: PromptInputV2Props) {
@@ -70,6 +76,15 @@ export function PromptInputV2(props: PromptInputV2Props) {
     props.controller.onCursor(promptInputV2Cursor(editor))
   }
   const mode = createMemo(() => state.mode)
+  const contextMeter = () => (
+    <Show when={props.contextUsed !== undefined}>
+      <PromptInputV2ContextMeter
+        used={props.contextUsed ?? 0}
+        limit={props.contextLimit}
+        label={i18n.t("ui.promptInput.context")}
+      />
+    </Show>
+  )
   const buttons = createMemo(() => ({
     opacity: mode() === "normal" ? 1 : 0,
     "pointer-events": mode() === "normal" ? ("auto" as const) : ("none" as const),
@@ -286,8 +301,8 @@ export function PromptInputV2(props: PromptInputV2Props) {
             <Show when={(props.variantControlVisible ?? true) && view.variant} keyed>
               {(control) => (
                 <Show when={control.options().length > 1}>
-                  {/* Effort is a small set of named steps, so it reads better as
-                      a slider than as a menu that has to be opened first. */}
+                  {/* Effort is a small set of named steps, so the resting
+                      state is its text label and the rail appears on press. */}
                   <PromptInputV2VariantSlider
                     title={i18n.t("ui.promptInput.chooseVariant")}
                     keybind={["Shift", "Mod", "D"]}
@@ -298,7 +313,9 @@ export function PromptInputV2(props: PromptInputV2Props) {
                 </Show>
               )}
             </Show>
+            {contextMeter()}
           </div>
+          <Show when={props.voiceControl}>{props.voiceControl}</Show>
           <PromptInputV2SubmitButton
             mode={state.mode}
             stopping={view.submit.stopping()}

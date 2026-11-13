@@ -104,14 +104,24 @@ export async function downloadCliToResources() {
 export async function stageLocalCli() {
   const dest = windowsify("resources/opencode-cli")
   const dir = join(import.meta.dirname, "..", "..", "opencode")
-  const build = await $`bun script/build.ts --single`.cwd(dir).nothrow().quiet()
+  const targetPlatform = process.env.OMNIA_TARGET_PLATFORM ?? process.platform
+  const targetArch = process.env.OMNIA_TARGET_ARCH ?? process.arch
+  // A cross build must not leave the other platform's binary behind: the
+  // package filter copies opencode-cli*, so a stale Linux ELF would ship
+  // inside the Windows installer and add hundreds of megabytes.
+  await $`rm -f resources/opencode-cli resources/opencode-cli.exe`
+  const build = await $`bun script/build.ts --single`
+    .cwd(dir)
+    .env({ OMNIA_TARGET_PLATFORM: targetPlatform, OMNIA_TARGET_ARCH: targetArch })
+    .nothrow()
+    .quiet()
   if (build.exitCode !== 0) {
     console.warn("local CLI build failed; staging the published CLI instead")
     await downloadCliToResources()
     return
   }
-  const arch = process.arch === "arm64" ? "arm64" : "x64"
-  const platform = process.platform === "win32" ? "windows" : process.platform
+  const arch = targetArch === "arm64" ? "arm64" : "x64"
+  const platform = targetPlatform === "win32" ? "windows" : targetPlatform
   const output = join(dir, "dist", `opencode-${platform}-${arch}`, "bin")
   // Bun appends .exe on Windows; older builds wrote the bare name.
   const binary = [join(output, "opencode.exe"), join(output, "opencode")].find((candidate) => existsSync(candidate))
@@ -169,5 +179,6 @@ async function clientVersion() {
 
 export function windowsify(path: string) {
   if (path.endsWith(".exe")) return path
-  return `${path}${process.platform === "win32" ? ".exe" : ""}`
+  const platform = process.env.OMNIA_TARGET_PLATFORM ?? process.platform
+  return `${path}${platform === "win32" ? ".exe" : ""}`
 }

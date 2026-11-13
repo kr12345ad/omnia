@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http"
 import { createHash, createHmac, timingSafeEqual } from "node:crypto"
+import { handleAdsRoute } from "./ads-api"
 import { handleBillingRoute } from "./billing-api"
 import { failsClosed, isPlanId, type Capability, type PlanId } from "../billing/plans"
 import type { EventBus, ServerEvent } from "./events"
@@ -710,6 +711,12 @@ function operatorDenied(
 // decides.
 export const CAPABILITY_CHECK_TIMEOUT_MS = 5_000
 
+/** A typed refusal from the control plane: 402 not entitled, 503 unconfirmed. */
+export interface CapabilityRefusal {
+  readonly status: number
+  readonly payload: Record<string, unknown>
+}
+
 /** How a capability is named to the person who just got refused. */
 const CAPABILITY_LABELS: Readonly<Partial<Record<Capability, string>>> = {
   input_freeze: "Freezing physical input",
@@ -754,14 +761,25 @@ async function capabilityDenied(
   context: Pick<ApiContext, "auth" | "token">,
   capability: Capability,
   options: { consume?: boolean; request: IncomingMessage },
-): Promise<{ status: number; payload: Record<string, unknown> } | undefined> {
-  const controlPlane = billingControlPlane()
-  if (controlPlane === undefined) return undefined
-  // Entitlements are per profile, so a signed-in customer has to be checked
-  // against THEIR plan rather than against the anonymous free one. Only the
+): Promise<CapabilityRefusal | undefined> {
   // Resolve the authenticated caller, not the server-wide sign-in state. A
   // client-supplied profile header never chooses the account being billed.
-  const profileId = runOwner(context, options.request)
+  return capabilityDecision(runOwner(context, options.request), capability)
+}
+
+/**
+ * The same control-plane decision without an HTTP request attached.
+ *
+ * Non-HTTP surfaces (the gRPC read path) have to enforce a paid capability too,
+ * and a second copy of this policy would drift. `profileId` is the authenticated
+ * caller, never a header the caller chose.
+ */
+export async function capabilityDecision(
+  profileId: string | undefined,
+  capability: Capability,
+): Promise<CapabilityRefusal | undefined> {
+  const controlPlane = billingControlPlane()
+  if (controlPlane === undefined) return undefined
   let body: unknown
   // The plan the control plane last reported for this caller, so a failure later
   // in this function can be judged against the right one.
@@ -834,7 +852,7 @@ function unconfirmed(
   capability: Capability,
   cause: string,
   plan?: PlanId,
-): { status: number; payload: Record<string, unknown> } | undefined {
+): CapabilityRefusal | undefined {
   // Evaluated against the plan the customer is actually on. Defaulting to `free`
   // here meant a paying customer lost a paid capability on any control-plane
   // hiccup - the fifth copy of the bug that plans.ts was fixed for.
@@ -1983,17 +2001,47 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
     return true
   }
 
-  if (parsed.method === "GET" && segments.length === 3 && segments[1] === "computers") {
-    if (computerOwnershipDenied(context, request, segments[2]!)) {
+  if (
+    (parsed.method === "GET" || parsed.method === "PATCH") &&
+    segments.length === 3 &&
+    segments[1] === "computers"
+  ) {
+    const computerId = segments[2]!
+    if (computerOwnershipDenied(context, request, computerId)) {
       json(response, 403, {
         ok: false,
-        error: `Computer ${segments[2]} belongs to another signed-in account.`,
+        error: `Computer ${computerId} belongs to another signed-in account.`,
       })
       return true
     }
-    const summary = await context.computers.summary(segments[2]!)
+    if (parsed.method === "PATCH") {
+      const body = (await readBoundBody(context, request)) as Record<string, unknown> | undefined
+      const name = isRecord(body) && typeof body.name === "string" ? body.name.trim() : ""
+      if (name.length === 0 || name.length > 128) {
+        json(response, 400, { ok: false, error: "A computer name between 1 and 128 characters is required." })
+        return true
+      }
+      const computer = context.computers.get(computerId)
+      if (!computer) {
+        json(response, 404, { ok: false, error: `Unknown computer ${computerId}.` })
+        return true
+      }
+      if (computer.driver.setName === undefined) {
+        json(response, 409, { ok: false, error: "This computer does not support renaming." })
+        return true
+      }
+      await computer.driver.setName(name)
+      const renamed = await context.computers.summary(computerId)
+      if (!renamed) {
+        json(response, 404, { ok: false, error: `Unknown computer ${computerId}.` })
+        return true
+      }
+      json(response, 200, { ok: true, computer: renamed })
+      return true
+    }
+    const summary = await context.computers.summary(computerId)
     if (!summary) {
-      json(response, 404, { ok: false, error: `Unknown computer ${segments[2]}.` })
+      json(response, 404, { ok: false, error: `Unknown computer ${computerId}.` })
       return true
     }
     json(response, 200, { ok: true, computer: summary })
@@ -3017,6 +3065,13 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
     return true
   }
 
+  // Sponsored ads are a private control-plane route: the bearer gate in the
+  // server already ran, and the handler additionally requires a profile. The
+  // publisher key never reaches the desktop.
+  if (segments[1] === "ads") {
+    if (await handleAdsRoute(context, request, response, parsed)) return true
+  }
+
   // Billing lives in its own module because it is the money path. It is matched
   // before anything that parses a body, because the Stripe webhook must verify
   // its signature over the RAW bytes.
@@ -3039,6 +3094,25 @@ export async function handleRequest(context: ApiContext, request: IncomingMessag
       return true
     }
     json(response, 200, { ok: true, clientToken: token, status: context.auth.status() })
+    return true
+  }
+
+  if (segments.length === 4 && segments[1] === "auth" && segments[2] === "server" && segments[3] === "token" && parsed.method === "GET") {
+    // Web logins: a client token that proved a GitHub/Google login may fetch
+    // the shared opencode-server auth token, so the hosted web app connects
+    // with the same account. The operator configures OMNIA_SERVER_AUTH_TOKEN
+    // with the base64 Basic credentials the server accepts.
+    const profile = presentedProfileId(context, request)
+    if (profile === undefined) {
+      json(response, 401, { ok: false, error: "Sign in first." })
+      return true
+    }
+    const authToken = process.env.OMNIA_SERVER_AUTH_TOKEN
+    if (authToken === undefined || authToken.length === 0) {
+      json(response, 501, { ok: false, error: "server_token_not_configured" })
+      return true
+    }
+    json(response, 200, { ok: true, authToken })
     return true
   }
 

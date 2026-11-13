@@ -26,6 +26,7 @@ export const SERVER_EVENT_TYPES = [
   "action.cancelled",
   "permission.requested",
   "permission.decided",
+  "permission.changed",
   "input.frozen",
   "input.released",
   "credential.created",

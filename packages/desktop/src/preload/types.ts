@@ -131,7 +131,27 @@ export type FatalRendererError = {
   os?: string
 }
 
+export type SttStatus = {
+  ok: boolean
+  ready: boolean
+  loading?: boolean
+  model: string
+  message?: string
+}
+
+export type SttResult = { ok: true; text: string; model: string } | { ok: false; message: string; model: string }
+
 export type ElectronAPI = {
+  stt: {
+    status: () => Promise<SttStatus>
+    load: () => Promise<SttStatus>
+    transcribe: (wav: ArrayBuffer) => Promise<SttResult>
+    onProgress: (cb: (progress: unknown) => void) => () => void
+  }
+  /** Contextual sponsored ads for the free plan; empty everywhere else. */
+  ads: {
+    get: (input: { sessionId: string; context: string; ua?: string }) => Promise<unknown>
+  }
   /** Plan, allowance and per-capability decisions. Absent meant the renderer
    *  could never learn its entitlements, so the paywall rendered nothing. */
   billing: {
@@ -223,6 +243,12 @@ export type ElectronAPI = {
   releasePickedFiles: (token: string) => Promise<void>
   getPathForFile: (file: File) => string
   saveFilePicker: (opts?: { title?: string; defaultPath?: string }) => Promise<string | null>
+  systemDark: () => Promise<boolean>
+  minimizeWindow: () => Promise<void>
+  toggleMaximizeWindow: () => Promise<boolean>
+  isMaximizedWindow: () => Promise<boolean>
+  closeWindow: () => Promise<void>
+  toggleFullscreenWindow: () => Promise<boolean>
   openExternal: (url: string) => void
   openLocalFile: (url: string) => void
   openPath: (path: string, app?: string) => Promise<void>

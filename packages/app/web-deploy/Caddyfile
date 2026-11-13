@@ -1,0 +1,19 @@
+# Omnia web at omnia.openfoodpantry.org.
+# The opencode server binary serves the embedded app UI + API on :4096.
+# The Omnia control plane (logins, billing, pairing) lives at /test1/omnia.
+omnia.openfoodpantry.org {
+    encode zstd gzip
+
+    # App UI + opencode API (same origin, so the browser calls never need CORS)
+    reverse_proxy 127.0.0.1:4096 {
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    handle /test1/omnia/* {
+        reverse_proxy 127.0.0.1:4312 {
+            header_up X-Forwarded-Host {host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+}

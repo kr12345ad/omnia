@@ -37,10 +37,18 @@ export const DialogServerV2: Component<{
     dialog.close()
   })
 
+  // The controller resets the form when the URL is empty, which also closes the
+  // dialog; guard submit so Enter from another field cannot silently dismiss it.
+  const canSubmit = () => !controller.formBusy() && controller.formValue().trim().length > 0
+  const submit = () => {
+    if (!canSubmit()) return
+    controller.submitForm()
+  }
+
   const keyDown = (event: KeyboardEvent) => {
     if (event.key !== "Enter" || event.isComposing) return
     event.preventDefault()
-    controller.submitForm()
+    submit()
   }
 
   const title = () =>
@@ -125,7 +133,7 @@ export const DialogServerV2: Component<{
         <ButtonV2 variant="neutral" disabled={controller.formBusy()} onClick={() => dialog.close()}>
           {language.t("common.cancel")}
         </ButtonV2>
-        <ButtonV2 variant="contrast" disabled={controller.formBusy()} onClick={controller.submitForm}>
+        <ButtonV2 variant="contrast" disabled={!canSubmit()} onClick={submit}>
           {submitLabel()}
         </ButtonV2>
       </DialogFooter>

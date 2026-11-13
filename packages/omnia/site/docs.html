@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Omnia documentation</title>
+<meta name="description" content="Install, sign in, run sessions, grant permissions and connect computers in Omnia." />
+<meta name="theme-color" content="#0f110e" />
+<script>document.documentElement.classList.add("js")</script>
+<style>
+  :root {
+    --paper: #f2f1ea; --paper-2: #fbfaf5; --ink: #111310; --muted: #64675e;
+    --line: #d9d8cc; --lime: #d4ff4f; --lime-deep: #b9e62e; --white: #f4f4ec;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    --max: 1080px;
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+  h1, h2, h3, p, ul, ol, figure { margin: 0; }
+  ul, ol { padding: 0 0 0 18px; }
+  a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+  .wrap { width: min(var(--max), calc(100% - 40px)); margin-inline: auto; }
+  header { border-bottom: 1px solid var(--line); background: var(--paper-2); position: sticky; top: 0; z-index: 10; }
+  .header-in { display: flex; align-items: center; justify-content: space-between; height: 60px; }
+  .brand { display: flex; align-items: center; gap: 9px; font-weight: 700; letter-spacing: 0.04em; font-size: 14px; text-decoration: none; }
+  .brand svg { width: 26px; height: 26px; }
+  nav { display: flex; gap: 20px; font-size: 13px; color: var(--muted); }
+  nav a { text-decoration: none; }
+  nav a:hover { color: var(--ink); }
+  main { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 48px; padding: 48px 0 96px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; gap: 24px; } nav.toc { display: none; } }
+  nav.toc { position: sticky; top: 84px; align-self: start; display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: var(--muted); }
+  nav.toc a { text-decoration: none; }
+  nav.toc a:hover { color: var(--ink); }
+  nav.toc b { margin-top: 12px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink); font-weight: 600; }
+  article h1 { font-size: clamp(30px, 5vw, 44px); letter-spacing: -0.03em; line-height: 1.05; }
+  article .lede { margin-top: 12px; font-size: 16px; line-height: 1.55; color: var(--muted); max-width: 62ch; }
+  section { margin-top: 44px; scroll-margin-top: 84px; }
+  h2 { font-size: 22px; letter-spacing: -0.02em; }
+  h3 { margin-top: 22px; font-size: 15px; }
+  p, li { margin-top: 10px; font-size: 14px; line-height: 1.6; }
+  ul, ol { margin-top: 8px; }
+  code, kbd { font-family: var(--mono); font-size: 12px; background: #e8e6da; padding: 1px 5px; border-radius: 4px; }
+  pre { margin-top: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--white); overflow-x: auto; font-family: var(--mono); font-size: 12px; line-height: 1.55; }
+  table { margin-top: 12px; width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+  .note { margin-top: 14px; padding: 12px 14px; border-left: 3px solid var(--lime-deep); background: var(--paper-2); font-size: 13px; line-height: 1.55; }
+  figure.shot { margin-top: 18px; }
+  figure.shot img { display: block; width: 100%; max-width: 100%; border: 1px solid var(--line); border-radius: 10px; }
+  figure.shot figcaption { margin-top: 8px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+  ol.controls { margin-top: 10px; padding-left: 22px; }
+  ol.controls li { margin-top: 7px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap header-in">
+    <a class="brand" href="/">
+      <svg width="26" height="26" viewBox="2 2 12 12" fill="none" aria-hidden="true">
+        <mask id="omnia-mark-docs-1" maskUnits="userSpaceOnUse" x="2" y="2" width="12" height="12" style="mask-type:luminance">
+          <rect x="2" y="2" width="12" height="12" fill="white"/>
+          <rect x="7.6" y="7.6" width="6" height="6" rx="1.6" fill="black"/>
+        </mask>
+        <rect x="3.5" y="3.5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1" mask="url(#omnia-mark-docs-1)"/>
+        <rect x="9" y="9" width="4" height="4" rx="1" fill="currentColor"/>
+      </svg>
+      <span>OMNIA</span>
+    </a>
+    <nav aria-label="Primary">
+      <a href="/">Home</a>
+      <a href="/docs.html" aria-current="page">Docs</a>
+      <a href="/downloads.html">Downloads</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+<main>
+  <nav class="toc" aria-label="Contents">
+    <b>Start</b>
+    <a href="#start">Getting started</a>
+    <a href="#home">Home screen</a>
+    <a href="#session">A session</a>
+    <b>Work</b>
+    <a href="#models">Model picker</a>
+    <a href="#settings">Settings</a>
+    <b>Trust</b>
+    <a href="#permissions">Permissions and approvals</a>
+    <b>Connect</b>
+    <a href="#remote">Remote and web</a>
+    <b>Other</b>
+    <a href="#fixes">Troubleshooting</a>
+  </nav>
+
+  <article>
+    <h1>Omnia documentation</h1>
+    <p class="lede">Omnia is a desktop agent that runs tasks on your computer. This guide follows the shipping app: install it, sign in, run a session, choose a model, change settings, answer permission prompts and connect other machines.</p>
+
+    <section id="start">
+      <h2>Getting started</h2>
+      <h3>Install</h3>
+      <p>Download the build for your platform from the <a href="/downloads.html">downloads page</a>. The Linux AppImage runs directly; the deb and rpm packages add a menu entry. macOS builds require macOS 13 or later. Windows builds require Windows 10 or later on x64.</p>
+      <p>Each artifact has a SHA-256 digest in <code>/downloads/SHA256SUMS</code>. Verify it before running:</p>
+      <pre>sha256sum -c SHA256SUMS</pre>
+
+      <h3>First launch</h3>
+      <p>Omnia opens on a full-window sign-in gate. The gate stays up until sign-in completes, so the rest of the app cannot be used without an account. The screen reads <strong>Sign in to Omnia</strong> above the line "Use your GitHub or Google account to sign in or create an account."</p>
+      <p><strong>Continue with GitHub</strong> and <strong>Continue with Google</strong> open the provider in your browser. The app shows "Waiting for GitHub..." or "Waiting for Google..." and finishes when the callback returns. If the provider reports an error, <strong>Try again</strong> restarts the exchange.</p>
+      <p>GitHub also offers <strong>Use a device code instead</strong>. That path shows a code with <strong>Copy code</strong> and <strong>Open GitHub</strong>; enter the code on GitHub and the app completes the sign-in. <strong>Use the GitHub CLI session</strong> reuses an existing <code>gh</code> login.</p>
+
+      <h3>After sign-in</h3>
+      <p>Omnia stores the credential on this computer. On a first install, the <strong>Welcome to Omnia</strong> setup follows. <strong>Bring your sessions</strong> imports detected OpenCode databases and Codex session files. <strong>Your first project</strong> creates the first folder with <strong>Create default project</strong>. <strong>Skip setup</strong> bypasses both steps; the import stays reachable later from Settings.</p>
+      <p>The account menu at the top right shows the avatar after sign-in. <strong>Settings, Account</strong> shows the plan and usage. <strong>Sign out</strong> in the account menu clears the credential and returns to the gate.</p>
+    </section>
+
+    <section id="home">
+      <h2>Home screen</h2>
+      <p>The home screen is a new session draft. The session sidebar sits on the left; the composer, quick actions and project selector sit in the center.</p>
+      <figure class="shot">
+        <img src="/shots/home.png" alt="Omnia home screen with the session sidebar, composer, quick actions and Default Project selector.">
+        <figcaption>Home screen. The numbered controls below name each clickable in the capture.</figcaption>
+      </figure>
+      <ol class="controls">
+        <li><strong>New session</strong> opens a draft tab in the selected project. The draft takes the next prompt.</li>
+        <li><strong>Search sessions</strong> turns the row into a field and filters the session list as you type. With a project selected, the placeholder reads Search sessions in followed by the project name, and results stay inside that project.</li>
+        <li>The recent sessions list groups sessions under Today, Yesterday and Older. Selecting a title opens that session in a tab; the selected row stays highlighted.</li>
+        <li>The project selector at the bottom of the composer shows the current project, here <strong>Default Project</strong>. Opening it gives a <strong>Search projects</strong> field, the project list and <strong>Add project</strong>. Choosing a project changes the folder the draft runs in.</li>
+        <li><strong>Add project</strong> opens the system folder chooser on desktop and adds the chosen folder to the project list. The web app has no folder chooser, so adding a project is a desktop action.</li>
+        <li>The composer starts the session. The plus button attaches images and files, the model chip opens the model picker, the variant label sets reasoning effort and the arrow sends. The full control list is under <a href="#session">A session</a>.</li>
+        <li>Quick actions fill the composer with a starting prompt. Research, Organize files, Spreadsheet, Use an application, Browse the web, Create an agent and Create a superskill each add text you can edit before sending. Discussion Room opens the New discussion dialog instead.</li>
+        <li>The <strong>Superskills</strong> row shows the saved count. <strong>Manage</strong> opens Settings, Superskills.</li>
+        <li><strong>Settings</strong> opens the Settings window on General.</li>
+        <li><strong>Chat Channels</strong> opens Settings on the Chat Channels tab.</li>
+        <li><strong>Help</strong> opens the Omnia feedback page in your browser.</li>
+        <li>The utility nav at the bottom groups Settings, Chat Channels and Help. When the sidebar collapses, the same rows become icons.</li>
+        <li>The account menu at the top right offers <strong>Sign in</strong> when signed out. Signed in, it shows the avatar, <strong>View GitHub profile</strong> and <strong>Sign out</strong>.</li>
+        <li>The titlebar holds the sidebar toggle, the Agent and Chat tabs, the browser panel toggle, the tab strip and the plus button. They work as described under <a href="#session">A session</a>.</li>
+      </ol>
+    </section>
+
+    <section id="session">
+      <h2>A session</h2>
+      <p>A session lives in a tab. The titlebar runs the tabs and modes, the timeline holds the conversation, and the composer takes the next prompt.</p>
+      <figure class="shot">
+        <img src="/shots/session.png" alt="Omnia session with the titlebar, tab strip, conversation timeline and composer." loading="lazy">
+        <figcaption>Session screen. The numbered controls below match the titlebar, timeline and composer.</figcaption>
+      </figure>
+      <ol class="controls">
+        <li>The sidebar toggle collapses the session list to an icon rail. The same control restores it.</li>
+        <li>The tab strip holds <strong>New session</strong> and every open session. Select a tab to switch; the close button on a tab closes it without deleting its history; the plus button opens a new session tab.</li>
+        <li><strong>Toggle browser</strong> opens the built-in browser beside the conversation. The same button closes it.</li>
+        <li>The mode control offers <strong>Agent</strong> and <strong>Chat</strong>. Agent runs tools; Chat answers without tools. The mode is fixed when the session is created, so start a new session to change it. Older builds called Chat <strong>Code</strong>; those sessions reopen as Chat.</li>
+        <li>The timeline shows your message, the answer and the work between them. Tool cards name the tool and hold its result behind a fold. Expand a card to read the arguments and output. Shell and edit cards can start expanded from Settings, General.</li>
+        <li>Thinking blocks appear when <strong>Show reasoning summaries</strong> is on. Expand one to read the model's summary.</li>
+        <li>Approval cards pause the run and sit above the composer. They are covered under <a href="#permissions">Permissions and approvals</a>.</li>
+        <li>Diff cards show file edits with the path and the added and removed lines.</li>
+        <li>The composer at the bottom takes the next prompt. Its controls are listed next.</li>
+      </ol>
+
+      <h3>Composer controls</h3>
+      <p>Describe the task to do. The composer holds the prompt and the controls that decide how it runs.</p>
+      <ol class="controls">
+        <li>The plus button, labelled <strong>Add images and files</strong>, opens the attachment picker. You can also drop images, PDFs and text files on the composer.</li>
+        <li>The model chip shows the current model, here DeepSeek V4.1 Flash. Selecting it opens the model picker.</li>
+        <li>The reasoning variant label shows <strong>Default</strong>, <strong>Max</strong> or another effort. Selecting the label opens a short slider; choose a stop to set the effort, or press <kbd>Esc</kbd> to close the slider unchanged.</li>
+        <li>The context meter, here 196k, shows the context in use. Hover or focus it to read used tokens out of the model limit and the percentage.</li>
+        <li>The arrow sends the prompt. While the agent works it becomes <strong>Stop</strong>; selecting it stops the run and keeps the transcript.</li>
+        <li>Type <code>/</code> at the start of the prompt to open the slash menu. The list holds commands, skills and MCP tools; choosing one inserts or runs it.</li>
+        <li>Type <code>@</code> after a space to open the context menu. The list holds files, agents and the active selection or comments; choosing one inserts a mention that attaches it to the prompt.</li>
+        <li><kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> adds a line, and <kbd>Esc</kbd> closes the open slash or @ menu and leaves shell mode.</li>
+      </ol>
+    </section>
+
+    <section id="models">
+      <h2>Model picker</h2>
+      <p>The model chip in the composer opens the picker. The list shows the models this build can use, with the selected model checked.</p>
+      <figure class="shot">
+        <img src="/shots/model-picker.png" alt="Omnia model picker above the composer with a search field, model rows, prices and Manage models." loading="lazy">
+        <figcaption>Model picker. The numbered controls below match the search field and model rows.</figcaption>
+      </figure>
+      <ol class="controls">
+        <li>The search field, <strong>Search models</strong>, filters by company and model name as you type. The clear button restores the full list.</li>
+        <li>Each row starts with the company logo, then the model name.</li>
+        <li><strong>Free</strong> marks a model with no input price. <strong>Latest</strong> marks the newest model in its family.</li>
+        <li>The price at the right is input/output per million tokens. <code>$8/$40</code> means $8 per million input tokens and $40 per million output tokens.</li>
+        <li>Selecting a row makes it the model for the next prompt and closes the picker. The chip updates to the new name.</li>
+        <li><strong>Manage models</strong> at the bottom opens the model manager, where each provider and model has a switch that controls whether it appears in this list.</li>
+      </ol>
+      <p><kbd>Esc</kbd> closes the picker without changing the model.</p>
+    </section>
+
+    <section id="settings">
+      <h2>Settings</h2>
+      <p>Settings opens in its own window with a sidebar. Desktop holds General, Account, Chat Channels and Shortcuts. Computer holds Superskills, MCP Marketplace, Memory, Computer use and Computers. Server holds Servers, Providers and Models. The version is at the bottom.</p>
+
+      <h3>General and Appearance</h3>
+      <figure class="shot">
+        <img src="/shots/settings-general.png" alt="Settings on General with Language, Auto-accept permissions, Terminal shell and timeline display rows." loading="lazy">
+        <figcaption>Settings, General. The numbered rows below match the labels in the window.</figcaption>
+      </figure>
+      <ol class="controls">
+        <li><strong>Language</strong> changes the display language. English is the default.</li>
+        <li><strong>Auto-accept permissions</strong> approves permission requests in the open project without showing a card. Switch it off to bring the cards back.</li>
+        <li><strong>Terminal shell</strong> picks the shell for terminals and agent commands. <strong>Auto (Default)</strong> uses the system shell.</li>
+        <li><strong>Show reasoning summaries</strong> adds thinking blocks to the timeline.</li>
+        <li><strong>Expand shell tool parts</strong> and <strong>Expand edit tool parts</strong> make those cards start open in the timeline.</li>
+      </ol>
+      <p>Permission scopes are separate: screen reading, pointer and keyboard control, clipboard, running processes and secrets each asks for approval.</p>
+      <figure class="shot">
+        <img src="/shots/settings-appearance.png" alt="Settings on General scrolled to Appearance with UI Refresh, Color scheme, Theme, UI Font and Code Font." loading="lazy">
+        <figcaption>Settings, General scrolled to Appearance.</figcaption>
+      </figure>
+      <ol class="controls">
+        <li><strong>UI Refresh</strong> switches between the current tabs and home layout and the previous layout.</li>
+        <li><strong>Color scheme</strong> sets System, Light or Dark. <strong>Theme</strong> sets the palette, here OC-2.</li>
+        <li><strong>UI Font</strong>, <strong>Code Font</strong> and <strong>Terminal Font</strong> set the type used in the interface, code blocks and terminal.</li>
+        <li>The Notifications section below sets system notifications for Agent, Permissions and Errors, and the sound rows set the sounds for the same events.</li>
+      </ol>
+
+      <h3>Account and previous sessions</h3>
+      <figure class="shot">
+        <img src="/shots/settings-account.png" alt="Settings Account in the signed-out demo state with the sign-in message." loading="lazy">
+        <figcaption>Settings, Account in the signed-out demo state.</figcaption>
+      </figure>
+      <p>Signed out, the page reads "Sign in to see what your plan allows." Signed in, it shows the plan name and price, <strong>Upgrade to Pro</strong>, <strong>Upgrade to Business</strong>, <strong>Manage Billing</strong>, and <strong>Usage limits</strong> with a bar for each finite allowance and its reset date. <strong>Scheduled runs</strong> on the same page create recurring tasks: name the run, write the prompt, set <strong>Repeat every (minutes)</strong>, then <strong>Schedule run</strong>; <strong>Enable</strong>, <strong>Pause</strong> and <strong>Delete</strong> manage it.</p>
+      <p>Session import is part of account setup. <strong>Bring your sessions</strong> lists OpenCode databases and Codex session files with session and message counts. <strong>Import selected</strong> copies the chosen sessions and messages; the originals are never modified. The import panel also offers <strong>Rescan</strong> to look for new files.</p>
+
+      <h3>Shortcuts</h3>
+      <p>Settings, Shortcuts lists every command with its current binding. Click a binding and press the new keys; <strong>Reset to defaults</strong> restores the shipped map. <strong>Search shortcuts</strong> filters the list. A conflict warning names the command that already holds the keys.</p>
+
+      <h3>Superskills</h3>
+      <figure class="shot">
+        <img src="/shots/settings-superskills.png" alt="Settings Superskills with New superskill, the Create with AI form and an empty list." loading="lazy">
+        <figcaption>Settings, Superskills with the Create with AI form and an empty list.</figcaption>
+      </figure>
+      <ol class="controls">
+        <li><strong>New superskill</strong> opens the editor for a hand-written superskill: name, ID, description, UI instructions, an optional bridge (<strong>Local command (stdio)</strong> or <strong>HTTP endpoint</strong>), methods JSON and an <strong>Enabled</strong> switch. <strong>Save</strong> stores it; <strong>Test</strong> runs the bridge; <strong>Delete</strong> removes it.</li>
+        <li><strong>Create with AI</strong> takes the description and sends an agent to inspect the application, write the UI instructions and save the result. It needs an open project. The example describes a LibreOffice Calc superskill that knows the menus, dialogs and how to fill and verify a spreadsheet.</li>
+        <li>The list below holds saved superskills. The switch on a row enables or disables it; selecting the row opens it for edits.</li>
+      </ol>
+
+      <h3>MCP marketplace</h3>
+      <figure class="shot">
+        <img src="/shots/settings-marketplace.png" alt="Settings MCP Marketplace with Browse selected, search, Filters, Sort by and server listings." loading="lazy">
+        <figcaption>Settings, MCP Marketplace with Browse selected and the server catalog.</figcaption>
+      </figure>
+      <ol class="controls">
+        <li><strong>Search servers</strong> filters the catalog as you type.</li>
+        <li><strong>Filters</strong> opens Runtime and category choices. Runtime covers All runtimes, Node.js, Python, Docker and Other.</li>
+        <li><strong>Sort by</strong> orders the list by <strong>Popularity</strong> or <strong>Name, A to Z</strong>.</li>
+        <li><strong>Browse</strong> and <strong>Installed (0)</strong> switch between the catalog and the servers already in your configuration. The count at the top right is the size of the catalog.</li>
+        <li><strong>Details</strong> opens the server page with the install command, configuration and documentation. <strong>Install</strong> adds the server; a row marked <strong>Needs setup</strong> asks for its fields first.</li>
+        <li>On the Installed tab, <strong>Load on startup</strong> decides whether the server starts with Omnia; <strong>Settings</strong> edits its configuration; <strong>Remove</strong> deletes it.</li>
+      </ol>
+      <p>Local servers run as your user on this machine. Read the command before installing.</p>
+
+      <h3>Memory</h3>
+      <p>Memory keeps application quirks, procedures and preferences between sessions. Settings, Memory lists each entry with its scope and confidence. <strong>Search memories</strong> filters the list; the scope row narrows it to All, Session, Task, Workspace, User, Skill or Application; <strong>Delete memory</strong> removes one entry; <strong>Forget all</strong> clears the store. <strong>Memories by scope</strong> shows the counts. The agent reads matching entries when a task needs them.</p>
+
+      <h3>Computer use</h3>
+      <figure class="shot">
+        <img src="/shots/settings-computer.png" alt="Settings Computer use with runtime status, engine selection and Allow model downloads." loading="lazy">
+        <figcaption>Settings, Computer use with the local runtime status and model download control.</figcaption>
+      </figure>
+      <ol class="controls">
+        <li><strong>Runtime</strong> reports whether the local llama.cpp runtime is ready. The CPU runtime ships with the app; GPU builds download on demand.</li>
+        <li><strong>Engine</strong> shows the accessibility engine in use, here <strong>Legacy accessibility engine</strong>.</li>
+        <li><strong>Allow model downloads</strong> lets Omnia fetch model weights from Hugging Face on demand. Downloads are large and stored on this computer.</li>
+        <li>The model list below the runtime shows each local computer-use model with <strong>Download</strong>, <strong>Load</strong>, <strong>Unload</strong> and <strong>Delete</strong>. With no models installed it reads "No local computer-use models are available."</li>
+        <li><strong>Display calibration</strong> measures how pointer input maps to screen pixels. <strong>Calibrate display</strong> moves the pointer to known points and saves the scale and offset; <strong>Reset</strong> clears the result; a changed display size marks it stale.</li>
+        <li>The audit log lists every computer-use action with its aim point, permission decision and verified outcome. Filter by computer, since date and <strong>Verified actions only</strong>; <strong>Refresh</strong> reloads the list.</li>
+      </ol>
+      <p>Models stay in your Omnia data folder and are never uploaded.</p>
+
+      <h3>Computers</h3>
+      <figure class="shot">
+        <img src="/shots/settings-computers.png" alt="Settings Computers with Pair with a code, Add computer and an empty connected list." loading="lazy">
+        <figcaption>Settings, Computers with Pair with a code and Add computer.</figcaption>
+      </figure>
+      <ol class="controls">
+        <li><strong>Add computer</strong> opens Pair a computer and generates a pairing code. On the other computer, open Settings, Computer, Computers, choose <strong>Pair with a code</strong> and paste the code. <strong>Copy code</strong> copies it; an expired code is replaced with <strong>New code</strong>.</li>
+        <li><strong>Pair with a code</strong> joins this computer to another. Paste the 8-character code shown on the other computer and select <strong>Pair with a code</strong>.</li>
+        <li>The list shows <strong>Connected</strong> or <strong>Stopped</strong>; <strong>Connect</strong> and <strong>Stop</strong> change that state without deleting credentials. <strong>Unpair</strong> removes the pairing.</li>
+        <li>Selecting a computer opens <strong>Credentials</strong>. <strong>Add credential</strong> stores a name, a kind (Password, Username and password, Token), the secret and the rules that decide when it is used: <strong>Command contains</strong>, <strong>Application is</strong> or <strong>URL starts with</strong>. <strong>Save</strong> stores it; <strong>Delete credential</strong> removes it.</li>
+      </ol>
+      <p>Everything is stored on this machine. Secrets are never shown to the model and never leave this machine. A paired computer runs its own Omnia runtime; this app sends approved actions to it.</p>
+
+      <h3>Chat channels</h3>
+      <p>The <strong>Chat Channels</strong> row in the sidebar opens Settings, Chat Channels. Pick a platform (Slack, Telegram, Microsoft Teams, Google Chat, Discord, GitHub, Linear or WhatsApp); the panel lists the fields it needs and a Setup guide. Polling platforms need no public URL. Webhook platforms show a <strong>Webhook path</strong> with <strong>Copy</strong>. The Omnia server holds the connection, so the agent keeps answering while the desktop window is closed. Connected channels show <strong>Connected</strong> and a received-message count.</p>
+    </section>
+
+    <section id="permissions">
+      <h2>Permissions and approvals</h2>
+      <p>A tool that needs a capability pauses the run and adds a <strong>Permission required</strong> card above the composer. The card names the tool and the target: a command, a path, a URL, or a computer-use control. For computer use it adds the aim point and a <strong>Highlight target</strong> preview that shows where the click will land.</p>
+      <p>Three buttons decide the request.</p>
+      <ol class="controls">
+        <li><strong>Deny</strong> refuses this request. The action does not run, and the agent receives the refusal.</li>
+        <li><strong>Allow always</strong> allows this request and matching requests for the rest of the session, so the card stops appearing for them.</li>
+        <li><strong>Allow once</strong> allows this request only; the next matching request asks again.</li>
+      </ol>
+      <h3>What stays blocked</h3>
+      <ul>
+        <li>A denied action does not run. The agent sees the refusal and must choose another path or stop.</li>
+        <li>Computer-use targets marked <strong>guess</strong> are not resolved controls. The card says so, and the action stays unverified until the outcome is checked.</li>
+        <li>The hosted web app has no terminal, file tree, Computer use, Computers, Superskills, MCP Marketplace, Memory, Chat Channels or Servers. Those actions are unavailable there, not waiting for approval.</li>
+        <li><strong>Auto-accept permissions</strong> in Settings, General approves requests for the open project without a card. Switching it off restores the cards.</li>
+      </ul>
+      <p>Credentials are separate from tool approvals. The local vault stores secrets with rules by command, application or URL. Values are injected at run time and redacted from tool output; they never enter the model context.</p>
+    </section>
+
+    <section id="remote">
+      <h2>Remote and web</h2>
+      <h3>Hosted web app</h3>
+      <p>The hosted app at <a href="https://omnia.openfoodpantry.org">omnia.openfoodpantry.org</a> signs in with the same account. It keeps sessions, prompting and the agent's browser automation, which runs on the hosted server rather than on the device you are using.</p>
+      <p>Host-only surfaces are left out: terminal, file tree, Computer use, Computers, Superskills, MCP Marketplace, Memory, Chat Channels and the Servers tab. The layout is single column, and the composer sits above the keyboard on a phone.</p>
+
+      <h3>Paired computers</h3>
+      <p>Settings, Computers pairs another machine by code or through your account. A paired computer runs its own Omnia runtime; this app sends approved actions to it. <strong>Stop</strong> disconnects it and keeps its credentials. <strong>Unpair</strong> removes the pairing.</p>
+
+      <h3>Server CLI</h3>
+      <p>The headless server is the same engine the desktop app runs. Set <code>OPENCODE_SERVER_PASSWORD</code> before starting it:</p>
+      <pre>OPENCODE_SERVER_PASSWORD='a-strong-password' opencode serve --hostname 127.0.0.1 --port 4096</pre>
+      <p>Clients authenticate with HTTP Basic, username <code>opencode</code> and that password, or with an <code>auth_token</code> query value containing base64 of <code>opencode:password</code>. The event stream is SSE on the same origin. A non-loopback listener refuses to start without the password.</p>
+    </section>
+
+    <section id="fixes">
+      <h2>Troubleshooting</h2>
+      <h3>The window opens after a delay</h3>
+      <p>The sidecar health check waits up to 30 seconds on first start. The window appears when the server reports ready.</p>
+      <h3>The app stays light on GNOME</h3>
+      <p>GNOME 40 carries dark mode only in the GTK theme. Omnia reads <code>gsettings</code> at startup; set the GTK theme to a dark variant, or open Settings, General and set <strong>Color scheme</strong> to Dark.</p>
+      <h3>Text looks light on GNOME</h3>
+      <p>Electron takes the GTK theme at startup. When the app and the GTK theme disagree, text can render light on a light surface. Open Settings, General and set <strong>Color scheme</strong> to System, then restart Omnia. To set the GNOME preference directly, run <code>gsettings set org.gnome.desktop.interface color-scheme 'prefer-light'</code> for a light surface or <code>'prefer-dark'</code> for a dark one.</p>
+      <h3>Login opens a file chooser on KDE</h3>
+      <p>KDE can route the sign-in URL through kioexec. Omnia opens external URLs with <code>gio open</code> on Linux for this reason; if a chooser still appears, set Firefox as the default web browser.</p>
+      <h3>Nothing renders on a virtual machine</h3>
+      <p>Some virtual displays cannot start the GPU process. Launch with <code>ELECTRON_DISABLE_GPU=1</code> to use software rendering.</p>
+      <h3>Reach the logs</h3>
+      <p>Press <kbd>Ctrl</kbd>+<kbd>K</kbd> (Command+K on macOS) and run <strong>Export logs</strong>. Omnia writes <code>opencode-debug-&lt;timestamp&gt;.zip</code> to your Downloads folder with the desktop logs, server logs, crash dumps and network log from the last 24 hours. The live desktop logs sit in <code>logs/</code> under the app's user data folder; server logs are in <code>~/.local/share/opencode/log</code> or <code>$XDG_DATA_HOME/opencode/log</code>.</p>
+    </section>
+  </article>
+</main>
+</div>
+</body>
+</html>

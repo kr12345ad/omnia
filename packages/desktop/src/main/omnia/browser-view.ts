@@ -8,10 +8,12 @@ import { randomBytes, randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import { app, BrowserWindow, ipcMain, session, webContents } from "electron"
 import type { IpcMainInvokeEvent, WebContents } from "electron"
 import { imageDownloadsDir, writeImageFile } from "@opencode-ai/omnia/browser/image-file"
 import { isNavigableBrowserUrl } from "@opencode-ai/omnia/browser/url-policy"
+import { isPdfReaderResourceUrl, isPdfReaderUrl, pdfReaderUrl } from "../../shared/pdf-reader"
 import { requireEnterpriseFeature } from "./enterprise"
 import { startWebSocketBridge } from "./ws-bridge"
 import type { WebSocketBridge, WebSocketBridgeClient } from "./ws-bridge"
@@ -22,7 +24,15 @@ export const BROWSER_PANEL_COMMAND = "browser-panel-command"
 // partition instead of the app session: the partition owns the permission
 // handlers, the request filter, and the download tracking, and the app's own
 // cookies and credentials are never reachable from a page.
-const BROWSER_PARTITION = "persist:omnia-browser"
+export const BROWSER_PARTITION = "persist:omnia-browser"
+// The guest preload is scoped by its own location check: it exposes the PDF
+// bridge only on the reader document, so ordinary web pages get no API even
+// though every guest receives the same preload.
+const PDF_PRELOAD = join(dirname(fileURLToPath(import.meta.url)), "../preload/pdf.js")
+// Chromium's built-in PDF viewer runs as this local extension. The partition
+// egress filter governs network destinations, so its resources must never be
+// mistaken for a blocked private-address request.
+const PDF_VIEWER_ORIGIN = "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai"
 // An image body written to disk is bounded on both sides: the page-script path
 // caps the in-page fetch and the bridge caps a data: URL it is handed.
 const MAX_IMAGE_BYTES = 32 * 1024 * 1024
@@ -260,8 +270,16 @@ export class EmbeddedBrowserManager {
     // cancelled before it leaves the process. This runs with or without a
     // connected controller, unlike the controller's Fetch interception.
     browserSession.webRequest.onBeforeRequest({ urls: ["*://*/*"] }, (details, callback) => {
-      if (isAllowedBrowserUrl(details.url)) callback({})
-      else {
+      // The reader's worker and styles are local renderer assets. In development
+      // they share the Vite origin, which is loopback and would otherwise be
+      // refused as a private destination even though it is not web content.
+      if (
+        details.url.startsWith(`${PDF_VIEWER_ORIGIN}/`) ||
+        isPdfReaderResourceUrl(details.url) ||
+        isAllowedBrowserUrl(details.url)
+      ) {
+        callback({})
+      } else {
         this.bridge?.broadcast({
           method: "Omnia.requestBlocked",
           params: { url: details.url, resourceType: details.resourceType },
@@ -274,11 +292,33 @@ export class EmbeddedBrowserManager {
       // cancelled even when the hop looked public.
       const location = headerValue(details.responseHeaders, "location")
       const target = location === undefined ? undefined : redirectTarget(details.url, location)
-      if (target === undefined || isAllowedBrowserUrl(target)) callback({})
-      else callback({ cancel: true })
+      if (target !== undefined && !isAllowedBrowserUrl(target)) return callback({ cancel: true })
+      const pdf = isPdfNavigation(details)
+      const headers = pdfNavigationHeaders(details)
+      if (headers === undefined) callback({})
+      else callback({ responseHeaders: headers })
+      if (pdf) this.routePdfNavigation(details)
     })
     app.on("web-contents-created", this.onWebContentsCreated)
     for (const window of BrowserWindow.getAllWindows()) this.prepare(window.webContents)
+  }
+
+  // Chromium turns a top-level PDF into a download or its built-in plugin before
+  // the guest commits. The reader fetches the same URL through the partitioned
+  // session itself, so replacing the in-flight navigation with the reader page
+  // keeps PHP cookies/auth and avoids the plugin entirely.
+  private routePdfNavigation(details: { url: string; resourceType?: string; webContentsId?: number }): void {
+    if (details.resourceType !== "mainFrame") return
+    if (details.webContentsId === undefined || isPdfReaderUrl(details.url)) return
+    // A request in this partition always belongs to a browser guest, including
+    // the guest's very first navigation, before dom-ready has registered it.
+    const contents = webContents.fromId(details.webContentsId)
+    if (contents === undefined || contents.isDestroyed() || contents.getType() !== "webview") return
+    const target = pdfReaderUrl(details.url)
+    setTimeout(() => {
+      if (contents.isDestroyed()) return
+      contents.loadURL(target).catch(() => undefined)
+    }, 0)
   }
 
   async start(): Promise<BrowserViewBridge> {
@@ -319,18 +359,25 @@ export class EmbeddedBrowserManager {
     emitter.on("-run-dialog", () => {})
     if (contents.getType() === "window") {
       contents.on("will-attach-webview", (event, webPreferences, params) => {
-        delete webPreferences.preload
+        // The preload checks its own location before exposing anything, so a
+        // regular page cannot reach the PDF byte/save bridge just because the
+        // webview carries it.
+        webPreferences.preload = PDF_PRELOAD
         webPreferences.nodeIntegration = false
         webPreferences.nodeIntegrationInSubFrames = false
         webPreferences.contextIsolation = true
         webPreferences.sandbox = true
         webPreferences.webSecurity = true
+        // Chromium's built-in PDF viewer is a guest plugin. Without this a PDF
+        // navigation leaves the webview blank (or turns into a download) even
+        // when the response is a normal inline application/pdf.
+        webPreferences.plugins = true
         // The guest is forced into the isolated partition (and never allowed to
         // run mixed or insecure content) so its cookies, permissions, and
         // request filter are the guest's own.
         webPreferences.partition = BROWSER_PARTITION
         webPreferences.allowRunningInsecureContent = false
-        if (!isAllowedBrowserUrl(params.src)) event.preventDefault()
+        if (!isAllowedBrowserUrl(params.src) && !isPdfReaderUrl(params.src)) event.preventDefault()
       })
       return
     }
@@ -349,15 +396,15 @@ export class EmbeddedBrowserManager {
     // invisible there, so both are gated explicitly. Every event here carries the
     // target on its details object; the positional url argument is deprecated.
     contents.on("will-navigate", (details) => {
-      if (isAllowedBrowserUrl(details.url)) return
+      if (isAllowedBrowserUrl(details.url) || isPdfReaderUrl(details.url)) return
       details.preventDefault()
     })
     contents.on("will-frame-navigate", (details) => {
-      if (isAllowedBrowserUrl(details.url)) return
+      if (isAllowedBrowserUrl(details.url) || isPdfReaderUrl(details.url)) return
       details.preventDefault()
     })
     contents.on("will-redirect", (details) => {
-      if (isAllowedBrowserUrl(details.url)) return
+      if (isAllowedBrowserUrl(details.url) || isPdfReaderUrl(details.url)) return
       details.preventDefault()
     })
     contents.setWindowOpenHandler(({ url }) => {
@@ -1362,7 +1409,7 @@ export class EmbeddedBrowserManager {
     try {
       const debugger_ = page.webContents.debugger
       if (!debugger_.isAttached()) return
-      const allowed = isAllowedBrowserUrl(url)
+      const allowed = isAllowedBrowserUrl(url) || isPdfReaderResourceUrl(url)
       void Promise.resolve(debugger_.sendCommand(
         allowed ? "Fetch.continueRequest" : "Fetch.failRequest",
         allowed ? { requestId } : { requestId, errorReason: "BlockedByClient" },
@@ -1552,6 +1599,65 @@ function isReadableUploadPath(path: string): boolean {
   } catch {
     return false
   }
+}
+
+// PHP download scripts commonly force a generated PDF into a download with
+// `Content-Disposition: attachment` (and occasionally `application/octet-stream`).
+// Chromium then saves the file and the embedded panel stays blank. The reader
+// replaces that navigation, while these normalized headers keep the brief
+// in-flight response from being treated as a download in the meantime.
+// Subframes and non-PDF responses are untouched.
+function isPdfNavigation(details: {
+  url: string
+  resourceType?: string
+  responseHeaders?: Record<string, string | string[]>
+}): boolean {
+  if (details.resourceType !== "mainFrame") return false
+  const headers = details.responseHeaders
+  if (headers === undefined) return false
+  const mime = headerValue(headers, "content-type")?.split(";")[0]?.trim().toLowerCase()
+  const filename = dispositionFilename(headerValue(headers, "content-disposition"))
+  const pathname = (() => {
+    try {
+      return new URL(details.url).pathname.toLowerCase()
+    } catch {
+      return ""
+    }
+  })()
+  return (
+    mime === "application/pdf" ||
+    mime === "application/x-pdf" ||
+    filename?.toLowerCase().endsWith(".pdf") === true ||
+    (pathname.endsWith(".pdf") &&
+      (mime === undefined || mime === "application/octet-stream" || mime === "binary/octet-stream"))
+  )
+}
+
+function pdfNavigationHeaders(details: {
+  url: string
+  resourceType?: string
+  responseHeaders?: Record<string, string | string[]>
+}): Record<string, string | string[]> | undefined {
+  if (!isPdfNavigation(details)) return undefined
+  const headers = details.responseHeaders ?? {}
+  const disposition = headerValue(headers, "content-disposition")
+  // Keep every other header, but drop the original casing variants so the
+  // normalized pair is the only one Chromium sees.
+  const next: Record<string, string | string[]> = {}
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase()
+    if (lower === "content-type" || lower === "content-disposition") continue
+    next[key] = value
+  }
+  next["Content-Type"] = "application/pdf"
+  next["Content-Disposition"] = disposition === undefined ? "inline" : disposition.replace(/^\s*attachment\b/i, "inline")
+  return next
+}
+
+function dispositionFilename(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const match = /filename\*?\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(value)
+  return (match?.[1] ?? match?.[2])?.trim()
 }
 
 // Response headers are attacker-influenced, so the redirect target is only read

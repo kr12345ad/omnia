@@ -4,6 +4,7 @@ import { existsSync, lstatSync, readFileSync, rmSync, statSync, symlinkSync, wri
 import { join } from "node:path"
 import { handlers, setEncryptionAvailable } from "../../../test-support/electron"
 import { activateTestUserData, useTestUserData } from "../../../test-support/user-data"
+import { getOmniaDriver } from "./registry"
 
 // remote-agent.ts imports Electron main-process modules that only exist inside
 // a running app. Substitute the narrow surface it touches (app paths, safe
@@ -35,6 +36,7 @@ mock.module("./server-call", () => ({
 const agentWorkingModule = await import("./agent-working")
 const configPath = join(userData, "remote-agent.json")
 const controlPlanePath = join(userData, "remote-agent-control-plane.json")
+const displayNamePath = join(userData, "computer-display-name.json")
 const sessionPath = join(userData, "auth-session.json")
 
 beforeAll(() => {
@@ -46,6 +48,7 @@ beforeEach(() => {
   activateTestUserData(userData)
   rmSync(configPath, { force: true })
   rmSync(controlPlanePath, { force: true })
+  rmSync(displayNamePath, { force: true })
   rmSync(sessionPath, { force: true })
   setEncryptionAvailable(true)
 })
@@ -297,6 +300,18 @@ describe("control-plane registration", () => {
     }) as unknown as typeof fetch
   }
 
+  test("does not treat a plan-limited session as a revoked registration", () => {
+    expect(remoteAgent.shouldReRegisterControlPlaneAgent(undefined)).toBe(false)
+    expect(remoteAgent.shouldReRegisterControlPlaneAgent({ running: true })).toBe(false)
+    expect(remoteAgent.shouldReRegisterControlPlaneAgent({ running: false })).toBe(true)
+    expect(
+      remoteAgent.shouldReRegisterControlPlaneAgent({ running: false, sessionEnd: { resumable: true } }),
+    ).toBe(false)
+    expect(
+      remoteAgent.shouldReRegisterControlPlaneAgent({ running: false, sessionEnd: { resumable: false } }),
+    ).toBe(true)
+  })
+
   test("registers the local runtime and starts the signed remote agent", async () => {
     process.env.OMNIA_CONTROL_PLANE_URL = "https://cp.example.com"
     writeFileSync(sessionPath, JSON.stringify({ url: "https://cp.example.com", clientToken: "client-token" }), {
@@ -333,6 +348,72 @@ describe("control-plane registration", () => {
     } finally {
       delete process.env.OMNIA_CONTROL_PLANE_URL
       globalThis.fetch = originalFetch
+    }
+  })
+
+  test("registers with the saved display name", async () => {
+    process.env.OMNIA_CONTROL_PLANE_URL = "https://cp.example.com"
+    writeFileSync(sessionPath, JSON.stringify({ url: "https://cp.example.com", clientToken: "client-token" }), {
+      mode: 0o600,
+    })
+    writeFileSync(displayNamePath, JSON.stringify({ name: "Design Studio" }))
+    const requests: CapturedRequest[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = captureFetch(requests)
+    try {
+      await remoteAgent.registerWithControlPlane()
+      const register = requests.find((request) => request.url.endsWith("/v1/computers/register"))
+      const body = JSON.parse(register?.body ?? "{}") as Record<string, unknown>
+      expect(body.name).toBe("Design Studio")
+      expect((body.info as { name?: string }).name).toBe("Design Studio")
+    } finally {
+      delete process.env.OMNIA_CONTROL_PLANE_URL
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  test("unregisters the control-plane driver after leaving", async () => {
+    process.env.OMNIA_CONTROL_PLANE_URL = "https://leave.example.com"
+    writeFileSync(sessionPath, JSON.stringify({ url: "https://leave.example.com", clientToken: "leave-token" }), {
+      mode: 0o600,
+    })
+    const requests: CapturedRequest[] = []
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = captureFetch(requests)
+    try {
+      await remoteAgent.registerWithControlPlane()
+      expect(getOmniaDriver()?.id).toBe("cp-1")
+      await handlers.get("computers-pair-leave")!({})
+      // The UI must stop driving the computer the user just unpaired from.
+      expect(getOmniaDriver()).toBeUndefined()
+      expect(await handlers.get("computers-pair-status")!({})).toEqual({ paired: false })
+    } finally {
+      delete process.env.OMNIA_CONTROL_PLANE_URL
+      globalThis.fetch = originalFetch
+      rmSync(sessionPath, { force: true })
+    }
+  })
+
+  test("refuses to start the runtime when the session changes mid-registration", async () => {
+    process.env.OMNIA_CONTROL_PLANE_URL = "https://race.example.com"
+    writeFileSync(sessionPath, JSON.stringify({ url: "https://race.example.com", clientToken: "race-token" }), {
+      mode: 0o600,
+    })
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async () => {
+      // A sign-out or account switch lands before the registration response.
+      writeFileSync(sessionPath, JSON.stringify({ url: "https://race.example.com", clientToken: "new-token" }), {
+        mode: 0o600,
+      })
+      return new Response(JSON.stringify({ ok: true, computerId: "race-1", token: "race-token" }), { status: 200 })
+    }) as unknown as typeof fetch
+    try {
+      await expect(remoteAgent.registerWithControlPlane()).rejects.toThrow("session changed")
+      expect(getOmniaDriver()).toBeUndefined()
+    } finally {
+      delete process.env.OMNIA_CONTROL_PLANE_URL
+      globalThis.fetch = originalFetch
+      rmSync(sessionPath, { force: true })
     }
   })
 

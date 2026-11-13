@@ -24,7 +24,11 @@ export const fileHandlers = HttpApiBuilder.group(InstanceHttpApi, "file", (handl
       )
     })
 
+    // Cut-down web deployment: web users get no host filesystem.
+    const cutdown = process.env.OMNIA_WEB_CUTDOWN === "1"
+
     const findText = Effect.fn("FileHttpApi.findText")(function* (ctx: { query: { pattern: string } }) {
+      if (cutdown) return []
       return (yield* ripgrep
         .grep({ cwd: (yield* InstanceState.context).directory, pattern: ctx.query.pattern, limit: 10 })
         .pipe(Effect.orDie)).map((match) => ({
@@ -64,6 +68,7 @@ export const fileHandlers = HttpApiBuilder.group(InstanceHttpApi, "file", (handl
     })
 
     const list = Effect.fn("FileHttpApi.list")(function* (ctx: { query: { path: string } }) {
+      if (cutdown) return []
       const directory = (yield* InstanceState.context).directory
       return yield* filesystem(
         Effect.gen(function* () {
@@ -94,6 +99,7 @@ export const fileHandlers = HttpApiBuilder.group(InstanceHttpApi, "file", (handl
     })
 
     const content = Effect.fn("FileHttpApi.content")(function* (ctx: { query: { path: string } }) {
+      if (cutdown) return { type: "text" as const, content: "" }
       const directory = (yield* InstanceState.context).directory
       const file = path.resolve(directory, ctx.query.path)
       if (!FSUtil.contains(directory, file)) return yield* Effect.die(new Error("Path escapes the location"))

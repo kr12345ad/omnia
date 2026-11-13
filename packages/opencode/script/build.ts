@@ -121,9 +121,14 @@ const allTargets: {
   },
 ]
 
+// Cross packaging sets the target so a Linux host can produce the CLI that a
+// macOS or Windows package will actually run.
+const targetOS = process.env.OMNIA_TARGET_PLATFORM ?? process.platform
+const targetArch = process.env.OMNIA_TARGET_ARCH ?? process.arch
+
 const targets = singleFlag
   ? allTargets.filter((item) => {
-      if (item.os !== process.platform || item.arch !== process.arch) {
+      if (item.os !== targetOS || item.arch !== targetArch) {
         return false
       }
 

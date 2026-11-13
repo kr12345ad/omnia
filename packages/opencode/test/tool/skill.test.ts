@@ -79,6 +79,15 @@ Use this skill.
           }),
       }
 
+      const listing = yield* tool.execute({}, ctx)
+      expect(listing.output).toContain("tool-skill")
+      expect(listing.output).not.toContain("# Tool Skill")
+      expect(requests.length).toBe(0)
+
+      const search = yield* tool.execute({ query: "tool tests" }, ctx)
+      expect(search.output).toContain("Skill for tool tests.")
+      expect(requests.length).toBe(0)
+
       const result = yield* tool.execute({ name: "tool-skill" }, ctx)
       const file = path.resolve(skill, "scripts", "demo.txt")
 

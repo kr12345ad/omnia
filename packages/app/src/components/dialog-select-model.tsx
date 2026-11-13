@@ -15,6 +15,15 @@ import { Icon } from "@opencode-ai/ui/v2/icon"
 import { Tag as TagV2 } from "@opencode-ai/ui/v2/badge-v2"
 import { MenuV2 } from "@opencode-ai/ui/v2/menu-v2"
 import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
+import { ProviderIcon } from "@opencode-ai/ui/provider-icon"
+import { iconNames } from "@opencode-ai/ui/icons/provider"
+import {
+  MODEL_GATEWAY_PROVIDERS,
+  modelDisplayName,
+  modelLetterFallback,
+  modelPriceLabel,
+  modelVendor,
+} from "@/components/dialog-select-model-search"
 import { ModelTooltip } from "./model-tooltip"
 import { useLanguage } from "@/context/language"
 import { decode64 } from "@/utils/base64"
@@ -31,18 +40,6 @@ type ModelItem = ReturnType<ModelState["list"]>[number]
 
 const modelKey = (model: ModelItem) => `${model.provider.id}:${model.id}`
 const manageKey = "action:manage"
-
-const sortModelGroups = (a: { category: string; items: ModelItem[] }, b: { category: string; items: ModelItem[] }) => {
-  const aIndex = popularProviders.indexOf(a.category)
-  const bIndex = popularProviders.indexOf(b.category)
-  const aPopular = aIndex >= 0
-  const bPopular = bIndex >= 0
-
-  if (aPopular && !bPopular) return -1
-  if (!aPopular && bPopular) return 1
-  if (aPopular && bPopular) return aIndex - bIndex
-  return a.items[0].provider.name.localeCompare(b.items[0].provider.name)
-}
 
 const ModelList: Component<{
   provider?: string
@@ -239,7 +236,6 @@ export function ModelSelectorPopoverV2(props: {
     <ModelSelectorPopoverV2View
       trigger={props.trigger}
       models={controller.models}
-      groups={controller.groups}
       current={controller.current}
       select={controller.select}
       onManage={() => {
@@ -273,13 +269,6 @@ function createModelSelectorController(input: {
         : allModels()
       return [...filtered].sort((a, b) => a.name.localeCompare(b.name))
     },
-    groups: (models: ModelItem[]) => {
-      const byProvider = new Map<string, ModelItem[]>()
-      for (const item of models) {
-        byProvider.set(item.provider.id, [...(byProvider.get(item.provider.id) ?? []), item])
-      }
-      return Array.from(byProvider, ([category, items]) => ({ category, items })).sort(sortModelGroups)
-    },
     current: () => {
       const value = model.current()
       return value ? modelKey(value) : undefined
@@ -294,7 +283,6 @@ function createModelSelectorController(input: {
 function ModelSelectorPopoverV2View(props: {
   trigger: ModelSelectorTrigger
   models: (search: string) => ModelItem[]
-  groups: (models: ModelItem[]) => { category: string; items: ModelItem[] }[]
   current: () => string | undefined
   select: (item: ModelItem) => void
   onManage: () => void
@@ -307,7 +295,6 @@ function ModelSelectorPopoverV2View(props: {
   const dismiss = createMenuDismissController(() => contentRef)
 
   const models = createMemo(() => props.models(store.search))
-  const groups = createMemo(() => props.groups(models()))
   const keys = () => [...models().map(modelKey), manageKey]
   const initialActive = () => {
     const selected = props.current()
@@ -447,15 +434,9 @@ function ModelSelectorPopoverV2View(props: {
                   </div>
                 }
               >
-                <For each={groups()}>
-                  {(group) => (
-                    <MenuV2.Group>
-                      <MenuV2.GroupLabel class="sticky top-0 z-10 gap-2 bg-v2-background-bg-layer-01 px-3">
-                        <span class="min-w-0 truncate">{group.items[0].provider.name}</span>
-                      </MenuV2.GroupLabel>
-                      <MenuV2.RadioGroup value={props.current()}>
-                        <For each={group.items}>
-                          {(item) => (
+                <MenuV2.RadioGroup value={props.current()}>
+                  <For each={models()}>
+                    {(item) => (
                             <TooltipV2
                               class="w-full"
                               placement="right-start"
@@ -482,21 +463,26 @@ function ModelSelectorPopoverV2View(props: {
                                 }}
                                 onSelect={() => selectModel(item)}
                               >
-                                <span class="min-w-0 truncate leading-5">{item.name}</span>
+                                <ModelMark model={item} />
+                                <span class="min-w-0 truncate pr-2 leading-5">{modelDisplayName(item)}</span>
                                 <Show when={isFree(item.provider.id, item.cost)}>
                                   <TagV2 class="shrink-0">{language.t("model.tag.free")}</TagV2>
                                 </Show>
                                 <Show when={item.latest}>
                                   <TagV2 class="shrink-0">{language.t("model.tag.latest")}</TagV2>
                                 </Show>
-                              </MenuV2.RadioItem>
-                            </TooltipV2>
-                          )}
-                        </For>
-                      </MenuV2.RadioGroup>
-                    </MenuV2.Group>
-                  )}
-                </For>
+                                <Show when={modelPriceLabel(item.cost)}>
+                                  {(price) => (
+                                    <span class="ml-auto shrink-0 pl-5 pr-1 text-[10px] font-[440] tabular-nums text-v2-text-text-faint">
+                                      {price()}
+                                    </span>
+                                  )}
+                                </Show>
+                        </MenuV2.RadioItem>
+                      </TooltipV2>
+                    )}
+                  </For>
+                </MenuV2.RadioGroup>
               </Show>
             </div>
           </ScrollView>
@@ -553,5 +539,35 @@ export const DialogSelectModel: Component<{ provider?: string; model?: ModelStat
         {language.t("dialog.model.manage")}
       </Button>
     </Dialog>
+  )
+}
+
+
+export function ModelMark(props: {
+  model: { id?: string; name: string; provider: { id: string; name: string } }
+}) {
+  // The AI company that made the model wins. A gateway's own logo (OpenCode
+  // Zen, OpenRouter, ...) never stands in for it. Unrecognized or stealth
+  // models get one letter instead of a wrong mark.
+  const icon = () => {
+    const vendor = modelVendor(props.model)
+    if (vendor && (iconNames as readonly string[]).includes(vendor)) return vendor
+    if (MODEL_GATEWAY_PROVIDERS.has(props.model.provider.id)) return undefined
+    return (iconNames as readonly string[]).includes(props.model.provider.id) ? props.model.provider.id : undefined
+  }
+  return (
+    <Show
+      when={icon()}
+      fallback={
+        <span
+          class="flex size-4 shrink-0 items-center justify-center rounded bg-v2-background-bg-layer-03 text-[10px] font-semibold text-v2-text-text-muted"
+          aria-hidden="true"
+        >
+          {modelLetterFallback(props.model)}
+        </span>
+      }
+    >
+      {(id) => <ProviderIcon id={id()} class="size-4 shrink-0" />}
+    </Show>
   )
 }

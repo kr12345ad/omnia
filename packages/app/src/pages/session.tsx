@@ -55,6 +55,7 @@ import { SDKProvider, useSDK } from "@/context/sdk"
 import { useServerSDK } from "@/context/server-sdk"
 import { ServerConnection, serverName, useServer } from "@/context/server"
 import { useEntitlement } from "@/context/entitlement"
+import { SponsoredAd } from "@/components/sponsored-ad"
 import { useSettings } from "@/context/settings"
 import { useSync } from "@/context/sync"
 import { useTabs } from "@/context/tabs"
@@ -467,7 +468,9 @@ export default function Page() {
   const size = createSizing()
   const desktopReviewOpen = createMemo(() => isDesktop() && view().reviewPanel.opened())
   const desktopV2ReviewOpen = createMemo(() => newSessionDesign() && desktopReviewOpen() && !!params.id)
-  const terminalOpen = createMemo(() => view().terminal.opened())
+  // Web cut-down: terminal and file tree expose the host shell and
+  // filesystem. They never open in the web workspace.
+  const terminalOpen = createMemo(() => view().terminal.opened() && platform.platform !== "web")
   // Asked only once the panel has been opened, so mounting a session does not
   // spend a billing read on a shell nobody asked for. While the panel is closed
   // it is inert and aria-hidden anyway, which is why the composer carries the
@@ -489,6 +492,7 @@ export default function Page() {
   const desktopFileTreeOpen = createMemo(
     () =>
       isDesktop() &&
+      platform.platform !== "web" &&
       shouldShowFileTree({
         visible: settings.visibility.fileTree(),
         opened: layout.fileTree.opened(),
@@ -586,6 +590,18 @@ export default function Page() {
   const sessionSync = timeline.resource
   const userMessages = timeline.userMessages
   const visibleUserMessages = timeline.visibleUserMessages
+  // The last thing the person asked is the best ad context available without
+  // shipping the whole transcript to a third party.
+  const adContext = createMemo(() => {
+    const message = lastUserMessage()
+    if (message === undefined) return ""
+    // Message parts are stored beside the message, keyed by id, rather than on
+    // the message itself.
+    return (sync().data.part[message.id] ?? [])
+      .flatMap((part) => (part.type === "text" ? [part.text] : []))
+      .join(" ")
+      .trim()
+  })
 
   createEffect(() => {
     const tab = activeFileTab()
@@ -1177,6 +1193,9 @@ export default function Page() {
     focusInput,
     review: reviewTab,
     fileBrowser: () => newSessionDesign() && isDesktop() && !!params.id,
+    // Lazy wrappers: the revert mutations are declared below this call.
+    revert: (input) => revert(input),
+    restore: (messageID) => restore(messageID),
   })
   command.register("session-palette", () => [
     {
@@ -2241,6 +2260,11 @@ export default function Page() {
           return (
             <SessionComposerRegion
               controller={controller}
+              sponsoredAd={
+                <Show when={params.id}>
+                  {(id) => <SponsoredAd sessionID={id()} context={adContext()} />}
+                </Show>
+              }
               promptInput={
                 <Show
                   when={newSessionDesign()}

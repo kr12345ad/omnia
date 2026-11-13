@@ -17,11 +17,13 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "package": "electron-builder --config electron-builder.config.ts",
-    "package:mac": "electron-builder --mac --config electron-builder.config.ts",
-    "package:win": "electron-builder --win --config electron-builder.config.ts",
-    "package:linux": "electron-builder --linux --config electron-builder.config.ts",
+    "package:mac": "bun run build:mac && bun script/verify-target.ts && electron-builder --mac --config electron-builder.config.ts",
+    "package:win": "bun run build:win && bun script/verify-target.ts && electron-builder --win --config electron-builder.config.ts",
+    "package:linux": "bun run build && bun script/verify-target.ts && electron-builder --linux --config electron-builder.config.ts",
     "native:build": "bun install --cwd native",
-    "legal:smoke": "bun script/legal.ts smoke"
+    "legal:smoke": "bun script/legal.ts smoke",
+    "build:mac": "OMNIA_TARGET_PLATFORM=darwin OMNIA_TARGET_ARCH=x64 sh -c 'bun ./scripts/prebuild.ts && electron-vite build'",
+    "build:win": "OMNIA_TARGET_PLATFORM=win32 OMNIA_TARGET_ARCH=x64 sh -c 'bun ./scripts/prebuild.ts && electron-vite build'"
   },
   "main": "./out/main/index.js",
   "dependencies": {
@@ -33,7 +35,8 @@
     "electron-store": "11.0.2",
     "electron-updater": "6.8.11",
     "electron-window-state": "^5.0.3",
-    "drizzle-orm": "catalog:"
+    "drizzle-orm": "catalog:",
+    "@huggingface/transformers": "3.8.1"
   },
   "devDependencies": {
     "@actions/artifact": "6.3.1",
@@ -53,6 +56,7 @@
     "electron": "42.11.16",
     "electron-builder": "26.18.0",
     "electron-vite": "6.0.0-beta.5",
+    "pdfjs-dist": "6.4.299",
     "solid-js": "catalog:",
     "sury": "11.0.0-alpha.4",
     "typescript": "~5.6.2",

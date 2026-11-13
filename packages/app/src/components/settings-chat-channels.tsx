@@ -26,6 +26,18 @@ import { usePlatform } from "@/context/platform"
  * never blocked by a stale server. With no answer at all (signed out, or no
  * billing configured) there is no gate, because enforcement is the server's job.
  */
+const platformIcon = (id: string): "slack" | "telegram" | "teams" | "gchat" | "discord" | "github" | "linear" | "whatsapp" | "comment" =>
+  id === "slack" ||
+  id === "telegram" ||
+  id === "teams" ||
+  id === "gchat" ||
+  id === "discord" ||
+  id === "github" ||
+  id === "linear" ||
+  id === "whatsapp"
+    ? (id as "slack" | "telegram" | "teams" | "gchat" | "discord" | "github" | "linear" | "whatsapp")
+    : "comment"
+
 export function SettingsChatChannels() {
   const language = useLanguage()
   const platform = usePlatform()
@@ -188,7 +200,7 @@ export function SettingsChatChannels() {
                 >
                   <div class="flex items-start justify-between gap-3">
                     <div class="flex min-w-0 gap-2">
-                      <Icon name="comment" size="small" class="mt-0.5 shrink-0 text-v2-icon-icon-muted" />
+                      <Icon name={platformIcon(spec.id)} size="small" class="mt-0.5 shrink-0 text-v2-icon-icon-muted" />
                       <div class="flex min-w-0 flex-col gap-1">
                         <span class="text-[13px] font-[530] text-v2-text-text-base">{spec.name}</span>
                         <span class="text-[11px] font-[440] text-v2-text-text-muted">{spec.description}</span>
@@ -233,6 +245,7 @@ export function SettingsChatChannels() {
                   <Show when={channel(spec.id)}>
                     {(connected) => (
                       <div class="flex flex-col gap-1">
+                        <Show when={!spec.polling}>
                         <div class="flex items-center gap-2">
                           <span class="text-[11px] font-[440] text-v2-text-text-muted">
                             {language.t("settings.chatChannels.webhook")}
@@ -246,6 +259,7 @@ export function SettingsChatChannels() {
                               : language.t("settings.chatChannels.copy")}
                           </Button>
                         </div>
+                        </Show>
                         <span class="text-[11px] font-[440] text-v2-text-text-faint">
                           {language.t("settings.chatChannels.messages", {
                             count: String(connected().messageCount ?? 0),

@@ -118,7 +118,7 @@ export default defineConfig({
       sourcemap: false,
       reportCompressedSize: false,
       rollupOptions: {
-        input: { index: "src/preload/index.ts" },
+        input: { index: "src/preload/index.ts", pdf: "src/preload/pdf.ts" },
         output: {
           format: "cjs",
           entryFileNames: "[name].js",
@@ -148,6 +148,7 @@ export default defineConfig({
         input: {
           main: "src/renderer/index.html",
           overlay: "src/renderer/overlay.html",
+          pdf: "src/renderer/pdf.html",
         },
       },
     },

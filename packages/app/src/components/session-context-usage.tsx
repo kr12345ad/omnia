@@ -1,4 +1,4 @@
-import { Match, Show, Switch, createMemo, type ComponentProps, type JSX } from "solid-js"
+import { Match, Show, Switch, createEffect, createMemo, type ComponentProps, type JSX } from "solid-js"
 import { ProgressCircle } from "@opencode-ai/ui/progress-circle"
 import { ProgressCircleV2 } from "@opencode-ai/ui/v2/progress-circle-v2"
 import { Button } from "@opencode-ai/ui/button"
@@ -13,6 +13,8 @@ import { useLanguage } from "@/context/language"
 import { useProviders } from "@/hooks/use-providers"
 import { useSDK } from "@/context/sdk"
 import { getSessionContext } from "@/components/session/session-context-metrics"
+import { createSessionContextFormatter } from "@/components/session/session-context-format"
+import { activeFreeZenLimit, freeZenLimitFromStatus, recordFreeZenLimit } from "@/utils/free-zen"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { createSessionTabs } from "@/pages/session/helpers"
 import { useSettings } from "@/context/settings"
@@ -74,9 +76,33 @@ export function SessionContextUsage(props: SessionContextUsageProps) {
   )
 
   const context = createMemo(() => getSessionContext(messages(), [...providers.all().values()]))
+  const formatter = createMemo(() => createSessionContextFormatter(language.intl()))
   const cost = createMemo(() => {
     return usd().format(info()?.cost ?? 0)
   })
+  const usage = createMemo(() => {
+    const value = context()?.usage
+    // No limit is not 0%: the model metadata simply has nothing to divide by.
+    return value === null || value === undefined ? "—" : formatter().percent(value)
+  })
+  const tokens = createMemo(() => {
+    const current = context()
+    if (!current) return "0"
+    const total = current.total.toLocaleString(language.intl())
+    if (current.limit === undefined) return total
+    // The counter is only a counter against a ceiling, so both numbers show.
+    return `${total} / ${current.limit.toLocaleString(language.intl())}`
+  })
+  const status = createMemo(() => (params.id ? sync().data.session_status[params.id] : undefined))
+  // A retry that began before this view mounted sits in the store without ever
+  // emitting an event here, so the refusal is read from the status as well as
+  // from the session listener in the page.
+  createEffect(() => recordFreeZenLimit(freeZenLimitFromStatus(status())))
+  // The free tier publishes no remaining count; the refusal is the only number
+  // it ever states, so this row appears exactly when that number is zero.
+  const freeZen = createMemo(() =>
+    context()?.message.providerID === "opencode" ? activeFreeZenLimit() : undefined,
+  )
   const contextVisible = createMemo(() => view().reviewPanel.opened() && tabState.activeTab() === "context")
   const hasOtherTabs = createMemo(() =>
     tabs()
@@ -126,13 +152,16 @@ export function SessionContextUsage(props: SessionContextUsageProps) {
   )
 
   const tooltipValue = () => (
-    <div class="flex w-[120px] flex-col gap-2">
+    <div class="flex w-[160px] flex-col gap-2">
       <ContextTooltipRow name={language.t("context.usage.cost")} value={cost()} />
-      <ContextTooltipRow name={language.t("context.usage.usage")} value={`${context()?.usage ?? 0}%`} />
-      <ContextTooltipRow
-        name={language.t("context.usage.tokens")}
-        value={context()?.total.toLocaleString(language.intl()) ?? "0"}
-      />
+      <ContextTooltipRow name={language.t("context.usage.usage")} value={usage()} />
+      <ContextTooltipRow name={language.t("context.usage.tokens")} value={tokens()} />
+      <Show when={freeZen()}>
+        <ContextTooltipRow
+          name={language.t("context.usage.freeZen")}
+          value={language.t("context.usage.freeZenExhausted")}
+        />
+      </Show>
     </div>
   )
 

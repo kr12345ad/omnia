@@ -94,6 +94,32 @@ export function commandPaletteOptions(options: CommandOption[]) {
   )
 }
 
+export function commandCatalogEntry(option: CommandOption): CommandCatalogItem | undefined {
+  if (!option.title) return undefined
+  return {
+    title: option.title,
+    description: option.description,
+    category: option.category,
+    keybind: option.keybind,
+    slash: option.slash,
+    hidden: option.hidden,
+  }
+}
+
+// The catalog is a cache of command metadata, not a mirror of the currently mounted commands.
+// Keep entries for commands that are registered elsewhere so keybind settings can still list them.
+export function mergeCommandCatalog(
+  catalog: Record<string, CommandCatalogItem>,
+  options: CommandOption[],
+): Record<string, CommandCatalogItem> {
+  const next = { ...catalog }
+  for (const option of options) {
+    const entry = commandCatalogEntry(option)
+    if (entry) next[actionId(option.id)] = entry
+  }
+  return next
+}
+
 export function resolveKeybindOption(candidates: CommandOption[] | undefined, event: KeyboardEvent) {
   return candidates?.find((option) => option.when?.(event)) ?? candidates?.find((option) => !option.when)
 }
@@ -310,20 +336,7 @@ export const { use: useCommand, provider: CommandProvider } = createSimpleContex
     createEffect(() => {
       if (!catalogReady()) return
 
-      setCatalog(
-        registered().reduce((acc, opt) => {
-          const id = actionId(opt.id)
-          if (opt.title)
-            acc[id] = {
-              title: opt.title,
-              description: opt.description,
-              category: opt.category,
-              keybind: opt.keybind,
-              slash: opt.slash,
-            }
-          return acc
-        }, {} as CommandCatalog),
-      )
+      setCatalog((prev) => mergeCommandCatalog(prev, registered()))
     })
 
     const catalogOptions = createMemo(() => Object.entries(catalog).map(([id, meta]) => ({ id, ...meta })))

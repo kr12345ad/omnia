@@ -29,6 +29,20 @@ const omniaIpc = {
 const api: ElectronAPI = {
   // Billing went missing here entirely, which is why the paywall component
   // rendered nothing in the shipping app: no call site could reach a decision.
+  stt: {
+    status: () => ipcRenderer.invoke("stt-status"),
+    load: () => ipcRenderer.invoke("stt-load"),
+    transcribe: (wav) => ipcRenderer.invoke("stt-transcribe", wav),
+    onProgress: (cb) => {
+      const handler = (_: unknown, progress: unknown) => cb(progress)
+      ipcRenderer.on("stt-progress", handler)
+      return () => ipcRenderer.removeListener("stt-progress", handler)
+    },
+  },
+  ads: {
+    // The key lives in the main process; the renderer only receives an ad.
+    get: (input) => ipcRenderer.invoke("ads-get", input),
+  },
   billing: {
     entitlement: () => ipcRenderer.invoke("billing-entitlement"),
     check: (capability: string) => ipcRenderer.invoke("billing-check", capability),
@@ -80,6 +94,7 @@ const api: ElectronAPI = {
     list: () => ipcRenderer.invoke("computers-list"),
     stop: (computerId: string, reason?: string) => ipcRenderer.invoke("computers-stop", computerId, reason),
     connect: (computerId: string) => ipcRenderer.invoke("computers-connect", computerId),
+    rename: (computerId: string, name: string) => ipcRenderer.invoke("computers-rename", computerId, name),
     pair: {
       create: (name?: string) => ipcRenderer.invoke("computers-pair-create", name),
       cancel: (code: string) => ipcRenderer.invoke("computers-pair-cancel", code),
@@ -315,6 +330,12 @@ const api: ElectronAPI = {
     return () => ipcRenderer.removeListener("zoom-factor-changed", handler)
   },
   setTitlebar: (theme) => ipcRenderer.invoke("set-titlebar", theme),
+  systemDark: () => ipcRenderer.invoke("get-system-dark"),
+  minimizeWindow: () => ipcRenderer.invoke("window-minimize"),
+  toggleMaximizeWindow: () => ipcRenderer.invoke("window-toggle-maximize"),
+  isMaximizedWindow: () => ipcRenderer.invoke("window-is-maximized"),
+  closeWindow: () => ipcRenderer.invoke("window-close"),
+  toggleFullscreenWindow: () => ipcRenderer.invoke("window-toggle-fullscreen"),
   runDesktopMenuAction: (action) => ipcRenderer.invoke("run-desktop-menu-action", action),
   setBackgroundColor: (color: string) => ipcRenderer.invoke("set-background-color", color),
   setAgentWorking: (working) => ipcRenderer.send("agent-working", working),

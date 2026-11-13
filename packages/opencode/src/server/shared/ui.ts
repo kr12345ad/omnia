@@ -76,12 +76,30 @@ export function serveEmbeddedUIEffect(
   requestPath: string,
   fs: FSUtil.Interface,
   embeddedWebUI: Record<string, string>,
+  options: { chatOnly?: boolean } = {},
 ) {
   const key = requestPath.replace(/^\//, "")
   // Own-property lookup only: `constructor`, `toString`, `__proto__`, ... would otherwise
   // resolve to inherited members and be treated as asset entries.
+  // The browser chat and mobile surfaces are extra Vite entries. Give them
+  // friendly paths (`/chat`, `/mobile`) while keeping every other unknown path
+  // on the full app. Without the mobile alias `/mobile` would miss the map and
+  // fall back to `index.html`, silently loading the full workspace on a phone.
+  // In chat-only mode the root entry is chat too, and an unknown path is a 404:
+  // the chat page has no client-side routes, so falling back would load it
+  // under a base that its API calls cannot resolve.
+  const html =
+    options.chatOnly && (key === "" || key === "index.html" || key === "chat.html")
+      ? "chat.html"
+      : key === "chat" || key === "chat/"
+        ? "chat.html"
+        : key === "mobile" || key === "mobile/"
+          ? "mobile.html"
+          : key
   const file =
-    (Object.hasOwn(embeddedWebUI, key) ? embeddedWebUI[key] : undefined) ?? embeddedWebUI["index.html"] ?? null
+    (Object.hasOwn(embeddedWebUI, html) ? embeddedWebUI[html] : undefined) ??
+    (options.chatOnly ? undefined : embeddedWebUI["index.html"]) ??
+    null
   if (!file) return Effect.succeed(notFound())
 
   return fs.readFile(file).pipe(
@@ -92,13 +110,27 @@ export function serveEmbeddedUIEffect(
 
 export function serveUIEffect(
   request: HttpServerRequest.HttpServerRequest,
-  services: { fs: FSUtil.Interface; client: HttpClient.HttpClient; disableEmbeddedWebUi: boolean },
+  services: {
+    fs: FSUtil.Interface
+    client: HttpClient.HttpClient
+    disableEmbeddedWebUi: boolean
+    chatOnly?: boolean
+  },
 ) {
   return Effect.gen(function* () {
     const embeddedWebUI = yield* Effect.promise(() => embeddedUI(services.disableEmbeddedWebUi))
     const path = new URL(request.url, "http://localhost").pathname
 
-    if (embeddedWebUI) return yield* serveEmbeddedUIEffect(path, services.fs, embeddedWebUI)
+    if (embeddedWebUI) return yield* serveEmbeddedUIEffect(path, services.fs, embeddedWebUI, services)
+    // The remote UI is the full workspace. Serving it here would silently
+    // re-enable every agent surface that chat-only exists to leave out, so a
+    // build without the embedded bundle refuses the page instead.
+    if (services.chatOnly) {
+      return HttpServerResponse.text("This build does not include the chat UI.", {
+        status: 503,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      })
+    }
 
     const response = yield* services.client.execute(
       HttpClientRequest.make(request.method)(upstreamURL(path), {

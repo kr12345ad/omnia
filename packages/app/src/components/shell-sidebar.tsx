@@ -129,7 +129,9 @@ export function ShellSidebar() {
   const title = (session: Session) => sessionTitle(session.title) ?? language.t("command.session.new")
 
   const openNewSession = () => {
-    const dir = directory()
+    // With no project open, start in the server home directory instead of
+    // doing nothing: the web workspace keeps no local project folders.
+    const dir = directory() ?? sync().data.path.home ?? sync().data.path.directory ?? ""
     if (!dir) return
     void tabs.newDraft({ server: server.key, directory: dir })
   }

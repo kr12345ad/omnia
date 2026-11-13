@@ -1,0 +1,21 @@
+import { chromium } from "/home/krishnaa/omnia/node_modules/.bun/playwright@1.59.1/node_modules/playwright/index.mjs"
+const browser = await chromium.launch()
+const page = await browser.newPage()
+page.on("console", (m) => { if (m.type() === "error") console.log("[console]", m.text().slice(0, 300)) })
+page.on("pageerror", (e) => console.log("[pageerror]", String(e).slice(0, 400)))
+page.on("response", (r) => { if (r.status() >= 400) console.log("HTTP", r.status(), r.url().slice(0, 130)) })
+await page.goto("http://127.0.0.1:8811/index.html?auth_token=b3BlbmNvZGU6b21uaWEtbG9jYWwtMTIzNA==", { waitUntil: "commit" }).catch(() => {})
+await page.evaluate(() => localStorage.setItem("omnia.web.auth.v1", JSON.stringify({ clientToken: "debug-token", controlPlaneUrl: "/test1/omnia", profile: { id: 1, login: "debug", provider: "github" } })))
+await page.reload()
+await page.waitForTimeout(2000)
+await page.waitForTimeout(12000)
+console.log("text:", (await page.locator("body").innerText().catch(() => "")).slice(0, 400))
+const newBtn = page.getByRole("button", { name: /new session/i }).first()
+console.log("new session btn:", await newBtn.count())
+if (await newBtn.count()) {
+  await newBtn.click()
+  await page.waitForTimeout(8000)
+  console.log("url:", page.url())
+  console.log("after click:", (await page.locator("body").innerText().catch(() => "")).slice(0, 900))
+}
+await browser.close()

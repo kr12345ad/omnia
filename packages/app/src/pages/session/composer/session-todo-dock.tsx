@@ -119,6 +119,7 @@ export function SessionTodoDock(props: {
           tabIndex={0}
           onClick={props.onToggle}
           onKeyDown={(event) => {
+            if (event.target !== event.currentTarget) return
             if (event.key !== "Enter" && event.key !== " ") return
             event.preventDefault()
             props.onToggle()

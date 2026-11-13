@@ -269,6 +269,41 @@
     text-underline-offset: 2px;
   }
 
+  /* A link renders as a web icon and its title, never as a trailing raw URL. */
+  a.external-link[data-link-chip="true"] {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: min(100%, 40ch);
+    margin: 0 1px;
+    padding: 1px 7px 2px;
+    border: 1px solid var(--v2-border-border-muted);
+    border-radius: 5px;
+    background: var(--v2-background-bg-layer-02);
+    color: var(--v2-text-text-base);
+    font-size: 0.92em;
+    line-height: 1.55;
+    text-decoration: none;
+    vertical-align: -2px;
+  }
+
+  a.external-link[data-link-chip="true"]:hover {
+    border-color: var(--v2-border-border-base);
+    text-decoration: none;
+  }
+
+  .external-link-icon {
+    display: inline-flex;
+    flex: none;
+    color: var(--v2-text-text-muted);
+  }
+
+  .external-link-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   /* Tables */
   table {
     width: 100%;

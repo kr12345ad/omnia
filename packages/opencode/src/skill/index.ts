@@ -76,7 +76,7 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("Ski
   available: Schema.Array(Schema.String),
 }) {
   override get message() {
-    return `Skill "${this.name}" not found. Available skills: ${this.available.join(", ") || "none"}`
+    return `Skill "${this.name}" not found. Call the skill tool without a name to list available skills.`
   }
 }
 

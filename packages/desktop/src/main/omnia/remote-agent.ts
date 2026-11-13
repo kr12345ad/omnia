@@ -41,6 +41,25 @@ function registrationFile(): string {
   return join(app.getPath("userData"), "control-plane-computer.json")
 }
 
+function displayNameFile(): string {
+  return join(app.getPath("userData"), "computer-display-name.json")
+}
+
+export function readComputerDisplayName(): string {
+  try {
+    const parsed = JSON.parse(readFileSync(displayNameFile(), "utf8")) as { name?: unknown }
+    if (typeof parsed.name === "string" && parsed.name.trim().length > 0) return parsed.name.trim()
+  } catch {
+    // A missing or corrupt name falls back to the OS hostname.
+  }
+  return hostname()
+}
+
+export function rememberComputerDisplayName(computerId: string, name: string): void {
+  if (readRegisteredComputerId() !== computerId) return
+  writeSecretFile(displayNameFile(), JSON.stringify({ name: name.trim() }))
+}
+
 function readRegistration(): { computerId: string; challenge?: string } | undefined {
   try {
     const parsed = JSON.parse(readFileSync(registrationFile(), "utf8")) as {
@@ -655,6 +674,7 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
   if (driver === undefined) throw new Error("No computer runtime is available on this machine.")
   const keys = await Remote.loadOrCreateRemoteKeyPair(remoteKeyStorage())
   const info = await driver.getInfo()
+  const displayName = readComputerDisplayName()
   const registration = readRegistration()
   const reuseId = registration?.computerId
   const timestampMs = Date.now()
@@ -675,14 +695,18 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
           }),
         }
   const path = "/v1/computers/register"
+  // A sign-out (or a switch to a different control plane) while this request is
+  // in flight must not end with the old session's agent running: the response
+  // carries a computer token for an account the user has already left.
+  const expectedFingerprint = `${auth.url}\n${auth.clientToken}`
   const response = await fetchControlPlane(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      name: hostname(),
+      name: displayName,
       platform: info.platform,
       ...(info.architecture === undefined ? {} : { architecture: info.architecture }),
-      info,
+      info: { ...info, name: displayName },
       capabilities: driver.capabilities ?? [],
       publicKey: keys.publicKey,
       ...(reuseId === undefined ? {} : { computerId: reuseId }),
@@ -717,6 +741,10 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
       typeof body.error === "string" ? body.error : `Registering this computer failed with HTTP ${response.status}.`,
     )
   }
+  if (controlPlaneFingerprint() !== expectedFingerprint) {
+    driver.dispose?.()
+    throw new Error("The control-plane session changed while this computer was registering. Sign in again and retry.")
+  }
   stopControlPlaneRuntime()
   controlPlane = { computerId: body.computerId, serverUrl: auth.url }
   writeRegistration(body.computerId, typeof body.challenge === "string" ? body.challenge : undefined)
@@ -734,6 +762,16 @@ export async function registerWithControlPlane(): Promise<{ computerId: string; 
   return controlPlane
 }
 
+// A remote agent that ended a session at its plan ceiling is resumable, not
+// revoked. Re-registering it here would begin a fresh session window every
+// tick and defeat the plan's session limit, so only an agent that stopped for
+// another reason (a revoked pairing or a control-plane restart) is replaced.
+export function shouldReRegisterControlPlaneAgent(
+  current: { readonly running: boolean; readonly sessionEnd?: { readonly resumable?: boolean } } | undefined,
+): boolean {
+  return current !== undefined && current.running !== true && current.sessionEnd?.resumable !== true
+}
+
 export async function syncControlPlaneRegistration(): Promise<void> {
   if (!enterpriseFeature("computerUse")) return
   if (config !== undefined) return
@@ -744,8 +782,9 @@ export async function syncControlPlaneRegistration(): Promise<void> {
   }
   // A control-plane restart (or revoked token) stops the remote agent; clear
   // the registration so the next tick registers again with the durable client
-  // token and the persisted computer id.
-  if (controlPlane !== undefined && agent?.running !== true) stopControlPlaneRuntime()
+  // token and the persisted computer id. A resumable session end is not that:
+  // leave it stopped until the operator reconnects.
+  if (controlPlane !== undefined && shouldReRegisterControlPlaneAgent(agent)) stopControlPlaneRuntime()
   if (fingerprint === registeredFingerprint || registering) return
   registering = true
   try {
@@ -801,16 +840,17 @@ export function registerRemoteAgentIpcHandlers(): void {
     const driver = createPlatformHostDriver()
     if (driver === undefined) throw new Error("No computer runtime is available on this machine.")
     const info = await driver.getInfo()
+    const displayName = readComputerDisplayName()
     const keys = await Remote.loadOrCreateRemoteKeyPair(remoteKeyStorage())
     const response = await fetch(`${serverUrl}/v1/computers/pair/claim`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         code: request.code,
-        name: hostname(),
+        name: displayName,
         platform: info.platform,
         ...(info.architecture === undefined ? {} : { architecture: info.architecture }),
-        info,
+        info: { ...info, name: displayName },
         capabilities: driver.capabilities ?? [],
         publicKey: keys.publicKey,
       }),
@@ -837,24 +877,21 @@ export function registerRemoteAgentIpcHandlers(): void {
       await new Promise((resolve) => setTimeout(resolve, 2000))
       const retryDriver = createPlatformHostDriver()
       if (retryDriver !== undefined && start(config, { driver: retryDriver, keys })) {
-        return { computerId: config.computerId, serverUrl: config.serverUrl, name: hostname() }
+        return { computerId: config.computerId, serverUrl: config.serverUrl, name: displayName }
       }
       throw new Error("Paired, but the computer runtime did not start. Restart the app to resume the pairing.")
     }
-    return { computerId: config.computerId, serverUrl: config.serverUrl, name: hostname() }
+    return { computerId: config.computerId, serverUrl: config.serverUrl, name: displayName }
   })
 
   guarded("computers-pair-leave", async () => {
     const current = config
     suppressedFingerprint = controlPlaneFingerprint()
-    agent?.stop()
-    agent = undefined
-    activeDriver?.dispose?.()
-    activeDriver = undefined
-    bindActiveGrab()
+    // Leave has to release the control-plane driver too. Clearing only the
+    // agent leaves the UI (readiness, overlay, computer-use) talking to the
+    // computer this user just unpaired from.
+    stopControlPlaneRuntime()
     config = undefined
-    controlPlane = undefined
-    registeredFingerprint = undefined
     persistRemoteAgentConfig(undefined)
     if (current !== undefined) {
       const keys = await Remote.loadOrCreateRemoteKeyPair(remoteKeyStorage())

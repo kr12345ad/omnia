@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { getCACertificates, setDefaultCACertificates } from "node:tls"
 import type { Event } from "electron"
-import { app, BrowserWindow } from "electron"
+import { app, BrowserWindow, session } from "electron"
 
 import { Deferred, Effect, Fiber } from "effect"
 import contextMenu from "electron-context-menu"
@@ -48,10 +48,13 @@ import {
 import { createWslServersController } from "./wsl/servers"
 import { createAgentWorking } from "./omnia/agent-working"
 import {
+  BROWSER_PARTITION,
   destroyBrowserViewBridge,
   registerBrowserViewIpc,
   startBrowserViewBridge,
 } from "./omnia/browser-view"
+import { registerPdfReaderIpc } from "./omnia/pdf-reader"
+import { primeStt } from "./stt"
 import {
   agentEventSource,
   createRemoteBrowserHandler,
@@ -317,6 +320,15 @@ const main = Effect.gen(function* () {
       })
     })
   }
+  // Some X11 window managers (notably older GNOME sessions) fail to back the
+  // window store when the GPU process cannot open the display device, which
+  // leaves the app on a white screen. ELECTRON_DISABLE_GPU=1 swaps in the
+  // software renderer for those sessions.
+  if (process.env.ELECTRON_DISABLE_GPU === "1") {
+    // Software rasterization must stay available: disabling both leaves no
+    // compositor and Chromium exits with "GPU process isn't usable".
+    app.disableHardwareAcceleration()
+  }
   // Chromium's background services (component updater, domain reliability,
   // metrics) are pure startup noise for a locally hosted desktop app.
   app.commandLine.appendSwitch("disable-background-networking")
@@ -436,6 +448,9 @@ const main = Effect.gen(function* () {
   app.setAsDefaultProtocolClient("omnia")
   app.setAsDefaultProtocolClient("opencode")
   registerRendererProtocol()
+  // Guest pages live in their own session, so the renderer protocol must be
+  // handled there too or a packaged build cannot open the PDF reader page.
+  registerRendererProtocol(session.fromPartition(BROWSER_PARTITION).protocol)
   setDockIcon()
   // Bans and terms acceptance are decided before the local server exists: a
   // banned installation must not open its database (it gets sealed instead) and
@@ -497,6 +512,8 @@ const main = Effect.gen(function* () {
   })
   registerWslIpcHandlers(wslServers)
   registerBrowserViewIpc()
+  registerPdfReaderIpc()
+  setTimeout(() => void primeStt(), 4000)
   if (UPDATER_ENABLED) {
     void updater.start()
     const updateTimer = setInterval(() => void updater.check(), 10 * 60 * 1000)

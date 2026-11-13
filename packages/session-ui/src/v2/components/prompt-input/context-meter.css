@@ -1,0 +1,35 @@
+/* A compact live token readout that sits beside the effort control. Its width
+   stays stable because the number is right-aligned in tabular figures, so the
+   composer does not jitter on every streamed delta. */
+[data-component="prompt-context-meter"] {
+  color: var(--v2-text-text-muted);
+  font-size: 11px;
+  font-weight: 440;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  transition: color 120ms ease;
+}
+
+[data-component="prompt-context-meter"]:hover,
+[data-component="prompt-context-meter"]:focus-visible {
+  color: var(--v2-text-text-base);
+}
+
+[data-component="prompt-context-meter"]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1.5px var(--v2-border-border-focus);
+}
+
+[data-component="prompt-context-meter"][data-pressure="warning"] {
+  color: var(--v2-state-fg-warning);
+}
+
+[data-component="prompt-context-meter"][data-pressure="danger"] {
+  color: var(--v2-state-fg-danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-component="prompt-context-meter"] {
+    transition: none;
+  }
+}

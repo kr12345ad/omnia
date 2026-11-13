@@ -283,6 +283,12 @@ declare global {
         decline: () => Promise<void>
       }
       setTitlebar?: (theme: { mode: "light" | "dark"; scheme?: "system" | "light" | "dark" }) => Promise<void>
+      systemDark?: () => Promise<boolean>
+      minimizeWindow?: () => Promise<void>
+      toggleMaximizeWindow?: () => Promise<boolean>
+      isMaximizedWindow?: () => Promise<boolean>
+      closeWindow?: () => Promise<void>
+      toggleFullscreenWindow?: () => Promise<boolean>
       exportDebugLogs?: () => Promise<string>
       isFirstLaunchOnboardingPending?: () => Promise<boolean>
       finishFirstLaunchOnboarding?: (createDefaultProject: boolean) => Promise<string | null>
@@ -361,6 +367,36 @@ function DesktopCommands() {
 
   command.register("desktop", () => {
     const commands: CommandOption[] = []
+    if (platform.platform === "desktop") {
+      commands.push({
+        id: "app.exit",
+        title: language.t("command.app.exit"),
+        category: language.t("command.category.file"),
+        slash: "exit",
+        onSelect: () => {
+          void (
+            window.api as unknown as { closeWindow?: () => Promise<void> }
+          ).closeWindow?.()
+        },
+      })
+      commands.push({
+        id: "window.toggleMaximize",
+        title: language.t("command.window.maximize"),
+        category: language.t("command.category.view"),
+        onSelect: () => {
+          void (window.api as unknown as { toggleMaximizeWindow?: () => Promise<boolean> }).toggleMaximizeWindow?.()
+        },
+      })
+      commands.push({
+        id: "window.toggleFullscreen",
+        title: language.t("command.window.fullscreen"),
+        category: language.t("command.category.view"),
+        keybind: "f11",
+        onSelect: () => {
+          void (window.api as unknown as { toggleFullscreenWindow?: () => Promise<boolean> }).toggleFullscreenWindow?.()
+        },
+      })
+    }
     if (platform.platform === "desktop" && platform.exportDebugLogs) {
       commands.push({
         id: "logs.export",

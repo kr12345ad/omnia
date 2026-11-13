@@ -250,7 +250,7 @@ describe.skipIf(isServer)("settings chat channels", () => {
     expect(connects).toEqual([{ platform: "telegram", credentials: { botToken: "12345:bot-token" } }])
     const connected = surface.card("telegram")
     expect(connected.textContent).toContain(en["settings.chatChannels.connected"])
-    expect(connected.textContent).toContain(TELEGRAM.webhookPath)
+    expect(connected.textContent).not.toContain(TELEGRAM.webhookPath)
     // The value typed in is gone from the surface: the server returns which
     // fields are set, never the secret itself.
     expect(surface.text()).not.toContain("12345:bot-token")

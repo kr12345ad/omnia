@@ -1,0 +1,58 @@
+{
+  "captured": {
+    "home.png": {
+      "width": 1280,
+      "height": 800,
+      "screen": "Home / new-session landing with the left session sidebar, Default Project selector, composer, quick-action tiles, and Superskills row."
+    },
+    "session.png": {
+      "width": 1280,
+      "height": 800,
+      "screen": "Open project session with the conversation timeline, rendered Markdown plan, and composer; sidebar and session tabs visible."
+    },
+    "model-picker.png": {
+      "width": 1280,
+      "height": 800,
+      "screen": "Model picker popover open from the composer, listing available models with prices and the current DeepSeek V4.1 Flash selection."
+    },
+    "settings-general.png": {
+      "width": 1280,
+      "height": 800,
+      "screen": "Settings > General: language, permissions, terminal shell, reasoning/tool display toggles; Appearance section begins below."
+    },
+    "settings-appearance.png": {
+      "width": 1280,
+      "height": 800,
+      "screen": "Settings > General scrolled to the Appearance section: UI Refresh, color scheme, theme, UI font, code font, and terminal font. There is no separate Appearance tab."
+    },
+    "settings-account.png": {
+      "width": 1280,
+      "height": 800,
+      "screen": "Settings > Account in the isolated demo session; the page shows the signed-out plan state because no control-plane account is available."
+    },
+    "settings-computer.png": {
+      "width": 1280,
+      "height": 800,
+      "screen": "Settings > Computer use: local-vision runtime status, engine selection, model-download toggle, and runtime information."
+    },
+    "settings-marketplace.png": {
+      "width": 1280,
+      "height": 800,
+      "screen": "Settings > MCP Marketplace: server count, Browse/Installed tabs, search and filters, and the top marketplace listings."
+    },
+    "settings-superskills.png": {
+      "width": 1280,
+      "height": 800,
+      "screen": "Settings > Superskills: create-with-AI form, New superskill action, and the empty superskills list."
+    },
+    "settings-computers.png": {
+      "width": 1280,
+      "height": 800,
+      "screen": "Settings > Computers: Pair with a code and Add computer actions plus the empty connected-computers state."
+    }
+  },
+  "missing": {
+    "settings-chat.png": "The Chat Channels settings tab was reached, but the isolated demo sign-in has no valid control-plane account. The live /v1/chat/channels call returned HTTP 429/401 and the panel rendered a red error instead of a clean empty state, so it was omitted rather than shipped as a broken screenshot.",
+    "settings-memory.png": "The Memory settings tab was reached, but the isolated demo sign-in has no valid control-plane account. The live /v1/memories call returned HTTP 429/401 and the panel rendered a red error instead of a clean empty state, so it was omitted rather than shipped as a broken screenshot."
+  }
+}

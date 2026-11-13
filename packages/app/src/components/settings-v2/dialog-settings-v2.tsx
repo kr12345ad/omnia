@@ -36,7 +36,12 @@ export const DialogSettings: Component<{
   const [tab, setTab] = createSignal(props.defaultValue ?? "general")
   // A managed client only offers the surfaces its distribution enables.
   const enterprise = useEnterprise()
+  const isWeb = () => platform.platform === "web"
   const visible = (value: string) => {
+    // The web build is cut down: no computer control, superskills, memory,
+    // chat channels, or server management. Browser automation stays.
+    if (isWeb() && (value === "computer-use" || value === "computers" || value === "superskills" || value === "memory" || value === "chat-channels" || value === "servers" || value === "marketplace"))
+      return false
     if (value === "chat-channels") return enterprise.granted("chatChannels")
     if (value === "superskills") return enterprise.feature("superskills")
     if (value === "marketplace") return enterprise.feature("mcpMarketplace")
@@ -100,6 +105,9 @@ export const DialogSettings: Component<{
                   </div>
                 </div>
 
+                <Show
+                  when={["superskills", "marketplace", "memory", "computer-use", "computers"].some((tab) => visible(tab))}
+                >
                 <div class="flex flex-col gap-1.5">
                   <TabsV2.SectionTitle>{language.t("settings.section.computer")}</TabsV2.SectionTitle>
                   <div class="flex flex-col gap-1.5 w-full">
@@ -136,13 +144,16 @@ export const DialogSettings: Component<{
                   </div>
                 </div>
 
+                </Show>
                 <div class="flex flex-col gap-1.5">
                   <TabsV2.SectionTitle>{language.t("settings.section.server")}</TabsV2.SectionTitle>
                   <div class="flex flex-col gap-1.5 w-full">
-                    <TabsV2.Trigger value="servers">
-                      <Icon name="server" />
-                      {language.t("status.popover.tab.servers")}
-                    </TabsV2.Trigger>
+                    <Show when={visible("servers")}>
+                      <TabsV2.Trigger value="servers">
+                        <Icon name="server" />
+                        {language.t("status.popover.tab.servers")}
+                      </TabsV2.Trigger>
+                    </Show>
                     <TabsV2.Trigger value="providers">
                       <Icon name="providers" />
                       {language.t("settings.providers.title")}
@@ -173,9 +184,11 @@ export const DialogSettings: Component<{
         <TabsV2.Content value="shortcuts" class="settings-v2-panel">
           <SettingsKeybinds v2 />
         </TabsV2.Content>
-        <TabsV2.Content value="servers" class="settings-v2-panel">
-          <SettingsServersV2 />
-        </TabsV2.Content>
+        <Show when={visible("servers")}>
+          <TabsV2.Content value="servers" class="settings-v2-panel">
+            <SettingsServersV2 />
+          </TabsV2.Content>
+        </Show>
         <TabsV2.Content value="providers" class="settings-v2-panel">
           <SettingsProvidersV2 directory={directory} onBack={showProviders} />
         </TabsV2.Content>

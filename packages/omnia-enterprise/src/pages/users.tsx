@@ -295,7 +295,7 @@ export function UsersPage() {
       <PageHeader
         kicker="Directory"
         title="People"
-        description="Accounts that can sign in to your client. Enterprise builds use single sign-on with a work email or employee ID — personal and social accounts are not accepted."
+        description="Accounts that can sign in to your client. Enterprise builds use single sign-on with a work email or employee ID. Personal and social accounts are not accepted."
         actions={
           <>
             <Button variant="secondary" icon="download" onClick={exportDirectory} disabled={users().length === 0}>
@@ -773,7 +773,7 @@ function InvitationCreated(props: { url: string; email: string; onDone: () => vo
   return (
     <div class="ent-stack">
       <InlineNote tone="success" icon="check">
-        Invitation created for {props.email}. Copy the link now — it is shown once and expires in seven days.
+        Invitation created for {props.email}. Copy the link now. It shows once and expires in seven days.
       </InlineNote>
       <CopyField value={props.url} />
       <div class="ent-row" style={{ "justify-content": "flex-end" }}>

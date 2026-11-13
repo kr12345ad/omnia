@@ -325,9 +325,7 @@ export function IntegrationsPage() {
                 </div>
                 <div style={{ "margin-top": "8px" }}>
                   <InlineNote icon="help">
-                    These endpoints are stored on this server for your delivery service. The events it forwards are
-                    the same ones in the audit log — invitations, sign-ins, releases and policy changes — never
-                    prompts or screen contents.
+                    These endpoints are stored on this server for your delivery service. The events it forwards match the audit log. It forwards invitations, sign-ins, releases, and policy changes. It never forwards prompts or screen contents.
                   </InlineNote>
                 </div>
               </Card>

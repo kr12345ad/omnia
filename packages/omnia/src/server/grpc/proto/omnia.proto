@@ -1,0 +1,77 @@
+// Omnia structured gRPC services.
+//
+// gNMI (gnmi.proto) is the standards interface for state and configuration.
+// These services cover operations that are not YANG data: computer inventory
+// and lifecycle, plus a compact health check. They deliberately do not expose
+// arbitrary computer actions; execution remains on Omnia's HTTP action routes
+// so the existing permission, approval, verification and audit boundary stays
+// authoritative.
+syntax = "proto3";
+
+package omnia.v1;
+
+service ComputerService {
+  rpc ListComputers(ListComputersRequest) returns (ListComputersResponse);
+  rpc GetComputer(GetComputerRequest) returns (Computer);
+  rpc ConnectComputer(ComputerRequest) returns (ComputerOperationResponse);
+  rpc DisconnectComputer(ComputerRequest) returns (ComputerOperationResponse);
+}
+
+service HealthService {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message ListComputersRequest {}
+
+message ListComputersResponse {
+  repeated Computer computers = 1;
+}
+
+message GetComputerRequest {
+  string id = 1;
+}
+
+message ComputerRequest {
+  string id = 1;
+}
+
+message ComputerOperationResponse {
+  bool ok = 1;
+  string status = 2;
+  string message = 3;
+  Computer computer = 4;
+}
+
+message Computer {
+  string id = 1;
+  string name = 2;
+  string platform = 3;
+  string architecture = 4;
+  string backend = 5;
+  string driver = 6;
+  bool connected = 7;
+  int64 last_seen = 8;
+  repeated Capability capabilities = 9;
+}
+
+message Capability {
+  string name = 1;
+  string status = 2;
+  double score = 3;
+  string reason = 4;
+  string metadata_json = 5;
+}
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  string status = 1;
+  string version = 2;
+  int32 protocol = 3;
+  int64 uptime_ms = 4;
+  int32 active_sessions = 5;
+  int32 connected_computers = 6;
+  string server_id = 7;
+}

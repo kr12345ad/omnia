@@ -1,7 +1,8 @@
 import { For, Show, createMemo, onMount } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useLanguage } from "@/context/language"
-import { COMPUTERS, usageLimits, type UsageLimit } from "./usage-limits"
+import { activeFreeZenLimit } from "@/utils/free-zen"
+import { COMPUTERS, usageLimits, usagePercent, type UsageLimit } from "./usage-limits"
 
 // What the account is allowed, before a limit stops it.
 //
@@ -47,13 +48,21 @@ export const SettingsUsage = () => {
     return t(key) ?? id
   }
 
+  // The computer allowance is the one number a person can act on directly, so
+  // it keeps its exact count. Every other row is a rate: the percentage is what
+  // tells somebody how close the ceiling is without publishing the tier's
+  // internal allowance.
   const value = (limit: UsageLimit) => {
-    if (limit.limit === undefined) return t("settings.usage.unlimited")
-    if (limit.used === undefined) return t("settings.usage.allowed", { limit: number().format(limit.limit) })
-    return t(USED[limit.period ?? "unknown"], {
-      used: number().format(limit.used),
-      limit: number().format(limit.limit),
-    })
+    if (limit.id === COMPUTERS) {
+      if (limit.limit === undefined) return t("settings.usage.unlimited")
+      if (limit.used === undefined) return t("settings.usage.allowed", { limit: number().format(limit.limit) })
+      return t(USED[limit.period ?? "unknown"], {
+        used: number().format(limit.used),
+        limit: number().format(limit.limit),
+      })
+    }
+    const percent = usagePercent(limit)
+    return percent === undefined ? t("settings.usage.unlimited") : `${percent}%`
   }
 
   const refresh = async () => {
@@ -76,6 +85,41 @@ export const SettingsUsage = () => {
         </div>
       </div>
       <div class="settings-v2-tab-body">
+        {/* The free models are metered by the Zen gateway per machine, not by
+            the account plan, so their refusal is shown whether or not an
+            entitlement could be read. There is no remaining count to show: the
+            gateway states the allowance only at zero, and this surface must not
+            fill the gap with a number it invented. */}
+        <Show when={activeFreeZenLimit()}>
+          {(limit) => (
+            <dl class="flex flex-col gap-2" data-component="free-zen-usage">
+              <div
+                class="flex items-start justify-between gap-3 rounded-md border border-v2-border-border-muted p-3"
+                data-slot="free-zen-limit"
+              >
+                <dt class="flex min-w-0 flex-col gap-1">
+                  <span class="text-[13px] font-[530] text-v2-text-text-base">
+                    {t("settings.usage.freeZen.title")}
+                  </span>
+                  <span class="text-[11px] font-[530] text-v2-text-text-base">
+                    {t("settings.usage.resetsOn", {
+                      date: new Intl.DateTimeFormat(language.intl(), { month: "short", day: "numeric", year: "numeric" }).format(
+                        new Date(limit().resetsAt),
+                      ),
+                    })}
+                  </span>
+                </dt>
+                <dd class="shrink-0 text-[13px] font-[530] text-v2-text-text-muted">
+                  {t("settings.usage.freeZen.exhausted")}
+                </dd>
+              </div>
+              <Show when={limit().message}>
+                {(message) => <p class="px-1 text-[11px] font-[440] text-v2-text-text-muted">{message()}</p>}
+              </Show>
+            </dl>
+          )}
+        </Show>
+
         <Show when={store.loading}>
           <div class="text-[13px] font-[440] text-v2-text-text-muted">{language.t("common.loading")}</div>
         </Show>
@@ -104,7 +148,7 @@ export const SettingsUsage = () => {
                         )}
                       </Show>
                     </dt>
-                    <dd class="shrink-0 text-[13px] font-[530] text-v2-text-text-muted">{value(limit)}</dd>
+                    <dd class="shrink-0 text-[13px] font-[530] text-v2-text-text-muted tabular-nums">{value(limit)}</dd>
                   </div>
                 )}
               </For>

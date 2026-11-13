@@ -53,6 +53,39 @@ export function isNavigableTabUrl(value: string): boolean {
   return isNavigableBrowserUrl(value)
 }
 
+// The desktop ships a local pdf.js reader page. Its address is not a public web
+// address, but it is the document the browser tools must read and fill after a
+// PDF navigation is redirected. Only the built-in reader shape is admitted:
+// the oc://renderer document in a packaged app, or the same path on the Vite
+// dev server during development.
+export function isPdfReaderBrowserDocument(value: string): boolean {
+  if (!URL.canParse(value)) return false
+  const url = new URL(value)
+  if (url.pathname !== "/pdf.html") return false
+  if (url.searchParams.get("url") === null) return false
+  if (url.protocol === "oc:" && url.host === "renderer") return true
+  const dev = devRendererOrigin()
+  return dev !== undefined && url.origin === dev
+}
+
+// The reader's module scripts, worker, and styles live beside the document on
+// the same local origin. They are app assets, not web content, so the request
+// policy admits them along with the document without widening navigation.
+export function isPdfReaderBrowserResource(value: string): boolean {
+  if (isPdfReaderBrowserDocument(value)) return true
+  if (!URL.canParse(value)) return false
+  const url = new URL(value)
+  if (url.protocol === "oc:" && url.host === "renderer") return true
+  const dev = devRendererOrigin()
+  return dev !== undefined && url.origin === dev
+}
+
+function devRendererOrigin(): string | undefined {
+  const value = process.env.ELECTRON_RENDERER_URL
+  if (value === undefined || !URL.canParse(value)) return undefined
+  return new URL(value).origin
+}
+
 export function assertNavigableBrowserUrl(value: string): string {
   if (isNavigableBrowserUrl(value)) return value
   throw new BrowserUrlError(`Refusing to navigate to ${value}. Only public http(s) addresses are allowed.`)

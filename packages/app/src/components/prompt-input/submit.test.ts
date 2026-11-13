@@ -636,6 +636,44 @@ describe("prompt submit worktree selection", () => {
     expect(serverSessionSyncs).toBe(0)
   })
 
+  test("runs a built-in slash command instead of sending it as prompt text", async () => {
+    params = { id: "session-1" }
+    promptValue = [{ type: "text", content: "/undo", start: 0, end: 5 }]
+    const run: string[] = []
+    const modes: string[] = []
+    const popovers: (string | null)[] = []
+
+    const submit = createPromptSubmit({
+      prompt,
+      info: () => ({ id: "session-1" }),
+      imageAttachments: () => [],
+      commentCount: () => 0,
+      autoAccept: () => false,
+      mode: () => "normal",
+      working: () => false,
+      editor: () => undefined,
+      queueScroll: () => undefined,
+      promptLength: (value) => value.reduce((sum, part) => sum + ("content" in part ? part.content.length : 0), 0),
+      addToHistory: () => undefined,
+      resetHistoryNavigation: () => undefined,
+      setMode: (mode) => modes.push(mode),
+      setPopover: (popover) => popovers.push(popover),
+      runSlashCommand: (name) => {
+        run.push(name)
+        return name === "undo"
+      },
+    })
+
+    await submit.handleSubmit({ preventDefault: () => undefined } as unknown as Event)
+
+    expect(run).toEqual(["undo"])
+    expect(sentPrompts).toEqual([])
+    expect(sentCommands).toEqual([])
+    // clearInput ran before the command, exactly like selecting it from the popover.
+    expect(modes).toEqual(["normal"])
+    expect(popovers).toEqual([null])
+  })
+
   test("uses an injected model selection", async () => {
     params = { id: "session-1" }
     const model = {

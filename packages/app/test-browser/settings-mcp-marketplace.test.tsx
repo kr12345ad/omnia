@@ -206,8 +206,13 @@ describe.skipIf(isServer)("settings MCP marketplace", () => {
 
     expect(container.textContent).toContain("MCP Marketplace")
     expect(container.textContent).toContain("2 servers")
-    expect(row(container, "Fetch").textContent).toContain("Search & research")
+    expect(row(container, "Fetch").textContent).not.toContain("Search & research")
     expect(row(container, "GitHub").textContent).toContain("Needs setup")
+    button(row(container, "Fetch"), "Details").click()
+    await settle()
+    expect(container.textContent).toContain("Search & research")
+    button(container, "Back to results").click()
+    await settle()
 
     button(row(container, "Fetch"), "Install").click()
     await settle()
@@ -291,7 +296,7 @@ describe.skipIf(isServer)("settings MCP marketplace", () => {
 
     button(container, "Installed (2)").click()
     await settle()
-    expect(row(container, "hand").textContent).toContain("Added by you")
+    expect(row(container, "hand").textContent).toContain("You added this")
     button(row(container, "fetch"), "Remove").click()
     await settle()
 
@@ -335,7 +340,9 @@ describe.skipIf(isServer)("settings MCP marketplace", () => {
     await settle()
     expect(search.value).toBe("")
     expect(rows(container)).toHaveLength(2)
-    expect(container.querySelector<HTMLSelectElement>("select")?.value).toBe("all")
+    expect([...container.querySelectorAll<HTMLSelectElement>("select")].find((item) => item.value === "all")?.value).toBe(
+      "all",
+    )
   })
 
   test("reaches every page and resets pagination when searching", async () => {
@@ -353,7 +360,7 @@ describe.skipIf(isServer)("settings MCP marketplace", () => {
     await settle()
     expect(container.textContent).toContain("Page 2 of 3")
     expect(rows(container)[0].textContent).toContain("Entry 24")
-    button(container, "Last").click()
+    button(container, "Next").click()
     await settle()
     expect(rows(container)).toHaveLength(5)
     expect(button(container, "Next").disabled).toBe(true)
@@ -374,7 +381,7 @@ describe.skipIf(isServer)("settings MCP marketplace", () => {
     button(row(container, "GitHub"), "Details").click()
     await settle()
     expect(container.querySelector(".settings-v2-marketplace-details")?.textContent).toContain("GITHUB_TOKEN")
-    expect(container.textContent).toContain("Requires Node.js and npx")
+    expect(container.textContent).toContain("Needs Node.js and npx on the server.")
     expect(container.querySelector("pre")?.textContent).toContain("@modelcontextprotocol/server-github")
     button(container, "Back to results").click()
     await settle()
@@ -384,7 +391,9 @@ describe.skipIf(isServer)("settings MCP marketplace", () => {
 
   test("filters the catalog by runtime", async () => {
     const container = await mount(() => createComponent(SettingsMcpMarketplace, {}))
-    const select = container.querySelector<HTMLSelectElement>("select")!
+    const select = [...container.querySelectorAll<HTMLSelectElement>("select")].find((item) =>
+      [...item.options].some((option) => option.value === "docker"),
+    )!
     select.value = "docker"
     select.dispatchEvent(new Event("change", { bubbles: true }))
     await settle()

@@ -62,6 +62,17 @@ function normalizeAddress(value: string): string | undefined {
   return isNavigableBrowserUrl(candidate) ? candidate : undefined
 }
 
+// The guest URL is the local reader page while a PDF is open. The address bar
+// still belongs to the document the user opened, so show its source URL rather
+// than the internal oc://renderer reader address.
+function displayAddress(value: string): string {
+  if (!URL.canParse(value)) return value
+  const url = new URL(value)
+  if (!url.pathname.endsWith("/pdf.html")) return value
+  const source = url.searchParams.get("url")
+  return source !== null && URL.canParse(source) ? source : value
+}
+
 export function BrowserPanel() {
   const platform = usePlatform()
   const settings = useSettings()
@@ -75,6 +86,13 @@ export function BrowserPanel() {
   const elements = new Map<string, WebviewElement>()
 
   const available = createMemo(() => platform.platform === "desktop" && api !== undefined)
+  // A persisted open panel from a desktop session must not wedge the web
+  // workspace in a state it cannot render or toggle back.
+  createEffect(() => {
+    if (available()) return
+    if (!settings.general.browserPanelOpen()) return
+    settings.general.setBrowserPanelOpen(false)
+  })
   const open = createMemo(() => settings.general.browserPanelOpen())
   const activeTab = createMemo(() => tabs.items.find((tab) => tab.key === tabs.active))
   const activeUrl = createMemo(() => activeTab()?.url ?? "about:blank")
@@ -225,7 +243,7 @@ export function BrowserPanel() {
   }
 
   createEffect(() => {
-    const url = activeUrl()
+    const url = displayAddress(activeUrl())
     setAddress(url === "about:blank" ? "" : url)
     setBlocked(false)
   })
@@ -381,7 +399,7 @@ export function BrowserPanel() {
                     ? tab.title
                     : tab.url === "about:blank"
                       ? language.t("browser.panel.newTab")
-                      : tab.url}
+                      : displayAddress(tab.url)}
                 </span>
                 <Tooltip placement="bottom" value={language.t("browser.panel.closeTab")}>
                   <button
@@ -463,6 +481,7 @@ export function BrowserPanel() {
               >
                 <webview
                   partition={BROWSER_PARTITION}
+                  plugins
                   class="w-full h-full"
                   ref={(element) => setupTab(tab.key, element as WebviewElement)}
                 />

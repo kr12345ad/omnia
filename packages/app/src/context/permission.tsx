@@ -13,6 +13,7 @@ import type { ServerSync } from "./server-sync"
 import { useParams, useSearchParams } from "@solidjs/router"
 import { decode64 } from "@/utils/base64"
 import { useGlobal } from "./global"
+import { usePlatform } from "./platform"
 import { ServerConnection, useServer } from "./server"
 import { type DraftTab, useTabs } from "./tabs"
 import { useSettings } from "./settings"
@@ -64,6 +65,7 @@ export const { use: usePermission, provider: PermissionProvider } = createSimple
     const params = useParams<{ serverKey?: string; dir?: string; id?: string }>()
     const [search] = useSearchParams<{ draftId?: string }>()
     const global = useGlobal()
+    const platform = usePlatform()
     const server = useServer()
     const tabs = useTabs()
     const settings = useSettings()
@@ -145,6 +147,11 @@ export const { use: usePermission, provider: PermissionProvider } = createSimple
       const directory = activeDirectory()
       if (!directory) return
       selected().enableConfiguredDirectory(directory)
+      // The web workspace has no permission dock on /new-session, so a prompt
+      // there would block forever. The user opts in by sending from the
+      // browser, so auto-accept the directory on web.
+      if (platform.platform === "web" && !selected().isAutoAcceptingDirectory(directory))
+        selected().toggleAutoAcceptDirectory(directory)
     })
 
     const permissionsEnabled = createMemo(() => {

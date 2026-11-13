@@ -1,5 +1,7 @@
-Load a specialized skill when the task at hand matches one of the skills listed in the system prompt.
+Load a specialized skill when the task at hand matches one.
 
-Use this tool to inject the skill's instructions and resources into current conversation. The output may contain detailed workflow guidance as well as references to scripts, files, etc in the same directory as the skill.
+The skill catalog is not included in the system prompt. Call this tool without a name to list available skill names, with `query` to search skill names and descriptions, or with `name` to load a skill's instructions.
 
-The skill name must match one of the skills listed in your system prompt.
+The output may contain detailed workflow guidance as well as references to scripts, files, etc. in the same directory as the skill.
+
+Do not guess a skill name. List or search first, then load the matching skill.

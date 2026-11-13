@@ -15,7 +15,6 @@ import { showToast } from "@/utils/toast"
 import { downloadSessionExport, fetchSessionExport, sessionExportFilename } from "@/utils/session-export"
 import { findLast } from "@opencode-ai/core/util/array"
 import { createSessionTabs } from "@/pages/session/helpers"
-import { extractPromptFromParts } from "@/utils/prompt"
 import { Message, Part, UserMessage } from "@opencode-ai/sdk/v2"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { useSessionArchive } from "@/pages/session/session-archive"
@@ -28,6 +27,10 @@ export type SessionCommandContext = {
   focusInput: () => void
   review?: () => boolean
   fileBrowser?: () => boolean
+  // Share the session page's revert mutations so undo/redo keep their halt,
+  // optimistic rollback and error toast behavior.
+  revert: (input: { sessionID: string; messageID: string }) => Promise<unknown> | undefined
+  restore: (messageID: string) => Promise<unknown> | undefined
 }
 
 const withCategory = (category: string) => {
@@ -59,18 +62,6 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
     const value = await load()
     owner.run(() => show(value))
   }
-  const runCommand = async <T,>(input: {
-    owner: ReturnType<ReturnType<typeof createSessionOwnership>["capture"]>
-    prompt: T
-    request: () => Promise<unknown>
-    updatePrompt: (prompt: T) => void
-    updateViewport: () => void
-  }) => {
-    await input.request()
-    input.updatePrompt(input.prompt)
-    input.owner.run(input.updateViewport)
-  }
-
   const info = () => {
     const id = params.id
     if (!id) return
@@ -131,7 +122,6 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
   }
 
   const navigateMessageByOffset = actions.navigateMessageByOffset
-  const setActiveMessage = actions.setActiveMessage
   const focusInput = actions.focusInput
 
   const sessionCommand = withCategory(language.t("command.category.session"))
@@ -334,65 +324,19 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
   const undo = async () => {
     const sessionID = params.id
     if (!sessionID) return
-    const owner = sessionOwnership.capture()
-    const session = sdk().api.session
-    const directory = sdk().directory
-    const promptSession = prompt.capture()
     const revert = info()?.revert?.messageID
     const messages = userMessages()
     const boundary = revert ? messages.findIndex((message) => message.id === revert) : messages.length
     if (boundary < 0) return
     const message = messages[boundary - 1]
     if (!message) return
-    const parts = sync().data.part[message.id]
-
-    if (sync().data.session_working(sessionID)) {
-      await session.interrupt({ sessionID }).catch(() => {})
-    }
-
-    await runCommand({
-      owner,
-      prompt: promptSession,
-      request: () => session.revert.stage({ sessionID, messageID: message.id }),
-      updatePrompt: (promptSession) => {
-        if (parts) promptSession.set(extractPromptFromParts(parts, { directory }))
-      },
-      updateViewport: () => setActiveMessage(messages[boundary - 2]),
-    })
+    await actions.revert({ sessionID, messageID: message.id })
   }
 
   const redo = async () => {
-    const sessionID = params.id
-    if (!sessionID) return
-    const owner = sessionOwnership.capture()
-    const session = sdk().api.session
-    const messages = userMessages()
-    const promptSession = prompt.capture()
-
     const revertMessageID = info()?.revert?.messageID
     if (!revertMessageID) return
-
-    const boundary = messages.findIndex((message) => message.id === revertMessageID)
-    if (boundary < 0) return
-    const next = messages[boundary + 1]
-    if (!next) {
-      await runCommand({
-        owner,
-        prompt: promptSession,
-        request: () => session.revert.clear({ sessionID }),
-        updatePrompt: (promptSession) => promptSession.reset(),
-        updateViewport: () => setActiveMessage(messages.at(-1)),
-      })
-      return
-    }
-
-    await runCommand({
-      owner,
-      prompt: promptSession,
-      request: () => session.revert.stage({ sessionID, messageID: next.id }),
-      updatePrompt: () => undefined,
-      updateViewport: () => setActiveMessage(messages[boundary]),
-    })
+    await actions.restore(revertMessageID)
   }
 
   const compact = async () => {

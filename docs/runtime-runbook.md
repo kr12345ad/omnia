@@ -18,9 +18,11 @@ Use it for the API smoke commands below:
 For standalone deployments, credentials supplied in `OMNIA_SERVER_TOKEN` stay
 in the operator's secret configuration. An automatically generated token is
 written to `OMNIA_SERVER_INFO_FILE` (default `./omnia-server-info.json`) with
-private permissions; it is no longer printed to stdout. Protect these files and
-exclude them from diagnostic exports. Omnia's HTTP listener binds to loopback;
-remote access must use an HTTPS proxy/tunnel. Discovery is opt-in.
+private permissions; it is no longer printed to stdout. When gRPC is enabled
+(the default), the file also carries `grpcUrl` and `grpcPort` for gNMI clients.
+Protect these files and exclude them from diagnostic exports. Omnia's HTTP
+listener binds to loopback; remote access must use an HTTPS proxy/tunnel.
+Discovery is opt-in.
 
 CORS defaults to `oc://renderer` and the configured public URL's origin.
 Standalone deployments may supply exact origins in `OMNIA_CORS_ORIGINS`.

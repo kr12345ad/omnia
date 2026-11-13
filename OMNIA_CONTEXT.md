@@ -8,6 +8,7 @@ Omnia is a desktop AI computer environment: an Electron app (forked from OpenCod
 - packages/ui + packages/session-ui: shared components, tool cards, timeline rendering.
 - packages/omnia: Omnia Server — local HTTP + SSE API (v1), token-auth, server.json discovery. Owns computer control, permissions, credentials, memory, superskills, computer-use models, pairing, events.
 - packages/opencode: OpenCode engine fork — sessions, agents, tools, providers, skills, subagents.
+- gRPC + gNMI: `packages/omnia/src/server/grpc` adds the official OpenConfig gNMI service and small Omnia gRPC services alongside HTTP. State is read from the existing managers, updates come from the existing EventBus, and the only writable YANG leaf is a permission scope state. See `packages/omnia/src/server/grpc/README.md`.
 
 ## Modes and sessions
 - Two modes: Agent (internal id "work") and Code. Drafts can switch modes until the first message. Tool surfaces are mode-scoped (e.g., computer tools and Discussion Room only in Agent mode).

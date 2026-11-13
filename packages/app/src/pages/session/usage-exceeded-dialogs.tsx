@@ -6,6 +6,7 @@ import { createStore } from "solid-js/store"
 import { useSessionLayout } from "./session-layout"
 import { useDialog } from "@opencode-ai/ui/context"
 import { DialogUsageExceeded } from "@/components/dialog-usage-exceeded"
+import { freeZenLimitFromStatus, recordFreeZenLimit } from "@/utils/free-zen"
 import { useI18n } from "@opencode-ai/ui/context"
 
 const GO_UPSELL_FREE_TIER_LAST_SEEN_AT = "go_upsell_last_seen_at"
@@ -52,6 +53,11 @@ export function useUsageExceededDialogs() {
 
   onCleanup(
     sdk().event.on("session.status", (evt) => {
+      // The free tier is metered per machine, not per session, so the refusal is
+      // recorded before this session's own filtering and before the dialog's
+      // dedupe: a repeat refusal still confirms the tier is spent, and every
+      // refusal carries a fresh reset instant.
+      recordFreeZenLimit(freeZenLimitFromStatus(evt.properties.status))
       if (evt.properties.sessionID !== params.id) return
       if (evt.properties.status.type !== "retry") return
       const { action } = evt.properties.status

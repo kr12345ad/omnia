@@ -92,6 +92,18 @@ export function usageLimits(entitlement: unknown): UsageLimit[] | undefined {
 }
 
 /**
+ * The share of a finite allowance already spent, as a whole percentage.
+ *
+ * An allowance with no ceiling, a missing count and a plan that does not
+ * include the capability all return undefined: none of them has a percentage
+ * that can be shown without inventing one.
+ */
+export function usagePercent(limit: UsageLimit): number | undefined {
+  if (limit.limit === undefined || limit.limit <= 0 || limit.used === undefined) return undefined
+  return Math.min(100, Math.round((limit.used / limit.limit) * 100))
+}
+
+/**
  * A ceiling off the wire, where null is how Infinity arrives.
  *
  * JSON has no Infinity, so an unlimited allowance is sent as null and a reader
