@@ -27,7 +27,7 @@ export function FirstRunGate(props: ParentProps) {
   // only needed for hosted services. Managed tenant installers still require
   // the work account their administrator provisioned.
   const managed = auth.enterprise?.managed === true
-  if (!managed) return <>{props.children}</>
+  const [continued, setContinued] = createSignal(!managed && continuedWithoutAccount())
 
   const [error, setError] = createSignal<unknown>()
   const [status, { refetch, mutate }] = createResource(async () => {
@@ -52,14 +52,19 @@ export function FirstRunGate(props: ParentProps) {
 
   return (
     <Show
-      when={status()?.authenticated === true}
+      when={status()?.authenticated === true || continued()}
       fallback={
         <GateScreen
           managed={managed}
+          optional={!managed}
           loading={status.loading || profile.loading}
           profile={profile()}
           error={error()}
           onRetry={refresh}
+          onContinue={() => {
+            rememberContinuedWithoutAccount()
+            setContinued(true)
+          }}
           onSignedIn={(next) => {
             setError(undefined)
             mutate(next)
@@ -73,8 +78,29 @@ export function FirstRunGate(props: ParentProps) {
   )
 }
 
+const CONTINUE_KEY = "omnia.account.continue-without-account"
+const LOGIN_SUNSET = "January 17, 2027"
+
+function continuedWithoutAccount(): boolean {
+  try {
+    return localStorage.getItem(CONTINUE_KEY) === "1"
+  } catch {
+    return false
+  }
+}
+
+function rememberContinuedWithoutAccount(): void {
+  try {
+    localStorage.setItem(CONTINUE_KEY, "1")
+  } catch {
+    // The choice lasts for this window when storage is unavailable.
+  }
+}
+
 function GateScreen(props: {
   managed: boolean
+  optional?: boolean
+  onContinue?: () => void
   loading: boolean
   profile?: EnterpriseProfile
   error?: unknown
@@ -109,9 +135,24 @@ function GateScreen(props: {
           {language.t("ui.github.signInDescription")}
         </p>
       </div>
+      <Show when={props.optional}>
+        <div class="w-full max-w-sm rounded-lg border border-v2-border-border-muted bg-v2-background-bg-layer-01 p-3 text-center">
+          <p class="text-[12px] font-[530] text-v2-text-text-base">
+            Omnia logins will be discontinued on {LOGIN_SUNSET}.
+          </p>
+          <p class="mt-1 text-[11px] font-[440] leading-4 text-v2-text-text-muted">
+            After that date, local use and self-hosting continue without an account.
+          </p>
+        </div>
+      </Show>
       <Show when={!props.loading} fallback={<LoaderV2 width={20} height={20} />}>
         <div class="flex flex-col items-center gap-3">
           <SignInOptions onSignedIn={props.onSignedIn} onError={props.onError} />
+          <Show when={props.optional}>
+            <ButtonV2 variant="outline" size="large" class="min-w-48 justify-center" onClick={props.onContinue}>
+              Continue without an account
+            </ButtonV2>
+          </Show>
           <Show when={props.error}>
             <ButtonV2 variant="outline" size="large" class="min-w-48 justify-center" onClick={props.onRetry}>
               {language.t("ui.github.retry")}

@@ -31,7 +31,7 @@ The plan matrix lives in `packages/omnia/src/billing/plans.ts`.
 
 ## Account sunset
 
-The public Omnia login remains available until January 19, 2027. After that date, local use and self-hosting continue to work without an account. Hosted accounts need a migration path before the sunset. The date is a service commitment, not a license term.
+The public Omnia login remains available until January 17, 2027. After that date, local use and self-hosting continue to work without an account. Hosted accounts need a migration path before the sunset. The date is a service commitment, not a license term.
 
 ## Development
 
